@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFrameworks>$(NetSkiaPreviousAndCurrent)</TargetFrameworks>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<RootNamespace>Uno.UI.Runtime.Skia.Headless.XUnit</RootNamespace>
+	</PropertyGroup>
+
+	<Import Project="../targetframework-override.props" />
+
+	<ItemGroup>
+		<PackageReference Include="xunit.v3.extensibility.core" Version="3.2.2" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\Uno.UI.Runtime.Skia.Headless\Uno.UI.Runtime.Skia.Headless.csproj" />
+		<ProjectReference Include="..\Uno.UI.RuntimeTests.Testing\Uno.UI.RuntimeTests.Testing.csproj" />
+	</ItemGroup>
+
+</Project>

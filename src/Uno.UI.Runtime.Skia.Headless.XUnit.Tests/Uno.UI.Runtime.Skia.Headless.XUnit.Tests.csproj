@@ -1,0 +1,61 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFrameworks>$(NetSkiaPreviousAndCurrent)</TargetFrameworks>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<IsTestProject>true</IsTestProject>
+		<OutputType>Exe</OutputType>
+		<UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>
+		<RootNamespace>Uno.UI.Runtime.Skia.Headless.XUnit.Tests</RootNamespace>
+		<IsUnoHead>true</IsUnoHead>
+		<UnoRuntimeIdentifier>Skia</UnoRuntimeIdentifier>
+	</PropertyGroup>
+
+	<Import Project="../targetframework-override.props" />
+
+	<ItemGroup>
+		<PackageReference Include="xunit.v3" Version="3.2.2" />
+	</ItemGroup>
+
+	<ItemGroup Condition="$([MSBuild]::IsOsPlatform('OSX'))">
+		<PackageReference Include="Uno.icu-macos" GeneratePathProperty="true" PrivateAssets="all" />
+	</ItemGroup>
+
+	<ItemGroup Condition="$([MSBuild]::IsOsPlatform('Windows'))">
+		<PackageReference Include="Uno.icu-win" GeneratePathProperty="true" PrivateAssets="all" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\Uno.UI.Runtime.Skia.Headless.XUnit\Uno.UI.Runtime.Skia.Headless.XUnit.csproj" />
+		<ProjectReference Include="..\Uno.UI.RuntimeTests.Testing\Uno.UI.RuntimeTests.Testing.csproj" />
+		<ProjectReference Include="..\Uno.UI.FluentTheme\Uno.UI.FluentTheme.Skia.csproj" />
+	</ItemGroup>
+
+	<PropertyGroup>
+		<UnoUIMSBuildTasksPath>$(MSBuildThisFileDirectory)..\SourceGenerators\Uno.UI.Tasks\bin\$(Configuration)_Shadow</UnoUIMSBuildTasksPath>
+	</PropertyGroup>
+
+	<Import Project="..\SourceGenerators\Uno.UI.Tasks\Content\Uno.UI.Tasks.targets" Condition="'$(SkipUnoResourceGeneration)' == '' " />
+	<Import Project="..\..\build\nuget\uno.winui.runtime-replace.targets" />
+
+	<Target Name="_UnoHeadlessOverrideRuntimeAssemblies" AfterTargets="Build" Condition="'$(TargetFramework)' != ''">
+		<ItemGroup>
+			<_HeadlessRuntimeAssembly Include="$(MSBuildThisFileDirectory)..\Uno.UWP\bin\Uno.Skia\$(Configuration)\$(TargetFramework)\Uno.dll" />
+			<_HeadlessRuntimeAssembly Include="$(MSBuildThisFileDirectory)..\Uno.UI.Dispatching\bin\Uno.UI.Dispatching.Skia\$(Configuration)\$(TargetFramework)\Uno.UI.Dispatching.dll" />
+			<_HeadlessRuntimeSymbols Include="$(MSBuildThisFileDirectory)..\Uno.UWP\bin\Uno.Skia\$(Configuration)\$(TargetFramework)\Uno.pdb" Condition="Exists('$(MSBuildThisFileDirectory)..\Uno.UWP\bin\Uno.Skia\$(Configuration)\$(TargetFramework)\Uno.pdb')" />
+			<_HeadlessRuntimeSymbols Include="$(MSBuildThisFileDirectory)..\Uno.UI.Dispatching\bin\Uno.UI.Dispatching.Skia\$(Configuration)\$(TargetFramework)\Uno.UI.Dispatching.pdb" Condition="Exists('$(MSBuildThisFileDirectory)..\Uno.UI.Dispatching\bin\Uno.UI.Dispatching.Skia\$(Configuration)\$(TargetFramework)\Uno.UI.Dispatching.pdb')" />
+		</ItemGroup>
+
+		<Copy
+			SourceFiles="@(_HeadlessRuntimeAssembly)"
+			DestinationFiles="@(_HeadlessRuntimeAssembly->'$(OutputPath)%(Filename)%(Extension)')"
+			SkipUnchangedFiles="false" />
+		<Copy
+			SourceFiles="@(_HeadlessRuntimeSymbols)"
+			DestinationFiles="@(_HeadlessRuntimeSymbols->'$(OutputPath)%(Filename)%(Extension)')"
+			SkipUnchangedFiles="false"
+			Condition="'@(_HeadlessRuntimeSymbols)' != ''" />
+	</Target>
+
+</Project>
