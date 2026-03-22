@@ -221,12 +221,16 @@
         href: xref:Uno.Guides.AddUnoToExistingSolution
       - name: Using the Skia Desktop
         href: xref:Uno.Skia.Desktop
+      - name: Using the Skia Headless Platform
+        href: xref:Uno.Skia.Headless
       - name: Linux Framebuffer
         href: features/using-linux-framebuffer.md
       - name: Using Skia Desktop (macOS)
         href: xref:Uno.Skia.macOS
       - name: Getting Started With Tests
         href: xref:Uno.Authoring.Tests
+      - name: Headless xUnit Testing
+        href: xref:Uno.Testing.Headless.XUnit
       - name: Logging
         href: logging.md
       - name: AppManifest (WebAssembly)
@@ -414,6 +418,8 @@
             href: uno-development/creating-mocked-tests.md
           - name: Platform-runtime unit tests (Uno.UI.RuntimeTests)
             href: uno-development/creating-runtime-tests.md
+          - name: Headless Skia xUnit tests
+            href: xref:Uno.Testing.Headless.XUnit
           - name: UI tests with Uno.UITest
             href: uno-development/creating-ui-tests.md
       - name: Debugging Solution Templates

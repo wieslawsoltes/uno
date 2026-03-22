@@ -14,6 +14,7 @@ The 'TLDR' rule of thumb for adding tests is:
 
 - if you're testing platform-independent functionality, like the dependency property system, [use Uno.UI.Tests](../../uno-development/creating-mocked-tests.md);
 - if you're testing platform-dependent functionality that can be verified programmatically in-process, like checking that a control is measured and arranged properly, [use Uno.UI.RuntimeTests](../../uno-development/creating-runtime-tests.md);
+- if you want a desktop Skia in-process UI test that runs through plain `dotnet test`, uses off-screen rendering, or needs screenshot artifacts, [use headless xUnit testing](../../features/headless-xunit-testing.md);
 - if your test needs to simulate user interaction or check that the final screen output is correct, [use SamplesApp.UITests](../../uno-development/creating-ui-tests.md).
 
 ## Types of tests
@@ -25,6 +26,7 @@ These are the main types of tests in Uno:
  UI tests                    | <https://github.com/unoplatform/uno/tree/master/src/SamplesApp/SamplesApp.UITests>
  Unit tests                  | <https://github.com/unoplatform/uno/tree/master/src/Uno.UI.Tests>
  Platform runtime unit tests | <https://github.com/unoplatform/uno/tree/master/src/Uno.UI.RuntimeTests>
+ Headless Skia xUnit tests   | <https://github.com/unoplatform/uno/tree/master/src/Uno.UI.Runtime.Skia.Headless.XUnit.Tests>
  XAML code generation tests  | <https://github.com/unoplatform/uno/tree/master/src/SourceGenerators/XamlGenerationTests>
  UI snapshot tests           | <https://github.com/unoplatform/uno/tree/master/src/SamplesApp/UITests.Shared>
 
@@ -67,6 +69,19 @@ Again these are 'classic' unit tests, but they are run 'in-process' on the actua
 These tests are useful for testing behavior which can run synchronously, or on the UI Thread and where correctness can be asserted programmatically. Relative to the unit tests, they have the advantage that platform-dependent behavior can be tested, and also that the same test can easily be run on WinUI by compiling and running the Windows head of the SamplesApp, giving confidence that the test is verifying the correct behavior.
 
 The platform runtime tests also have access to internal Uno.UI members if need be, but when possible they should be restricted to the public API, since this allows them to be run on WinUI as just mentioned.
+
+### Headless Skia xUnit tests
+
+These tests also run in-process against the real Uno UI stack, but they use a dedicated off-screen Skia host and execute through plain `dotnet test`. They are useful when you want desktop Skia automation without launching `SamplesApp`, or when you want to capture rendered frames directly from the test process.
+
+Use headless xUnit tests when you need:
+
+- desktop-only Skia automation
+- deterministic screenshot artifacts
+- direct pointer and keyboard input injection
+- normal xUnit test-runner integration in CI
+
+For setup and authoring details, see [Headless xUnit testing](xref:Uno.Testing.Headless.XUnit).
 
 ### XAML code generation tests (`XamlGenerationTests`)
 

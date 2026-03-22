@@ -36,6 +36,12 @@ The generated solution will contain:
 > [!TIP]
 > If the 'Run Tests' menu item doesn't exist, you need to Rebuild the solution to get Visual Studio to detect the available tests.
 
+### Running headless desktop UI tests
+
+If you want to run Uno UI tests directly from `dotnet test` without `SamplesApp`, use the [Skia headless platform](xref:Uno.Skia.Headless) together with [Headless xUnit testing](xref:Uno.Testing.Headless.XUnit).
+
+This workflow is best suited to desktop Skia automation, screenshot generation, and CI lanes that do not rely on a visible window.
+
 ## 4. Running the UI tests
 
 UI Tests are using the [Uno.UITest nuget package](xref:Uno.UITest.GetStarted), see the documentation for more information on how to create more UI Tests.

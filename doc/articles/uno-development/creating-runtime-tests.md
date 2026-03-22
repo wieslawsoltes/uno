@@ -10,6 +10,9 @@ Tests in Uno.UI.RuntimeTests are easy to write. There are a few special attribut
 
 For other types of automated tests used internally by Uno.UI, [see here](../contributing/guidelines/creating-tests.md).
 
+> [!NOTE]
+> If you want a desktop Skia test workflow that runs through plain `dotnet test` without `SamplesApp`, use [Headless xUnit testing](xref:Uno.Testing.Headless.XUnit). `Uno.UI.RuntimeTests` remains the preferred path when you need the existing SamplesApp runner and broader runtime-test coverage.
+
 ## Running tests locally
 
 Since the Uno.UI.RuntimeTests tests run in the platform environment using the real Uno.UI binaries, they must be run from within SamplesApp.

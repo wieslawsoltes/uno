@@ -35,6 +35,19 @@ host.Run();
 
 This builder allows us to configure the SkiaHost and setup which platforms will be supported at runtime. The builder evaluates the platform's availability one by one, in the order of definition.
 
+## Headless Skia automation
+
+If you need an off-screen Skia host for automation instead of a visible desktop window, use the [Skia headless platform](xref:Uno.Skia.Headless).
+
+The headless host is useful for:
+
+- `dotnet test`-driven UI automation
+- screenshot generation and frame capture
+- pointer and keyboard injection
+- testing windows, popups, and dialogs without opening a native window
+
+For xUnit-based test authoring on top of the headless host, see [Headless xUnit testing](xref:Uno.Testing.Headless.XUnit).
+
 ### Additional setup
 
 #### [**Linux**](#tab/linux)
