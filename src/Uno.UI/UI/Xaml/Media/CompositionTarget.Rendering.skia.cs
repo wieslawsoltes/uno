@@ -75,6 +75,12 @@ public partial class CompositionTarget
 	}
 
 	private void Render()
+		=> Render(invalidateHost: true);
+
+	internal void RenderForImmediateCapture()
+		=> Render(invalidateHost: false);
+
+	private void Render(bool invalidateHost)
 	{
 		this.LogTrace()?.Trace($"CompositionTarget#{GetHashCode()}: {nameof(Render)} begins with timestamp {Stopwatch.GetTimestamp()}");
 
@@ -108,7 +114,7 @@ public partial class CompositionTarget
 			((ICompositionTarget)this).RequestNewFrame();
 		}
 
-		if (rootElement.XamlRoot is not null)
+		if (invalidateHost && rootElement.XamlRoot is not null)
 		{
 			XamlRootMap.GetHostForRoot(rootElement.XamlRoot)?.InvalidateRender();
 		}
