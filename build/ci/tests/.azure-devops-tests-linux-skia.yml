@@ -116,3 +116,39 @@ jobs:
       PathtoPublish: $(build.sourcesdirectory)/build/uitests-failure-results
       ArtifactName: uitests-failure-results
       ArtifactType: Container
+
+- job: Skia_Linux_Headless_XUnit_Tests
+  displayName: 'Headless xUnit Tests'
+  timeoutInMinutes: 60
+  cancelTimeoutInMinutes: 0
+
+  pool:
+    vmImage: ${{ parameters.vmLinuxImage }}
+
+  variables:
+    TEST_RESULTS_FILE: $(build.sourcesdirectory)/build/skia-linux-headless-xunit-tests-results.xml
+    UNO_UWP_BUILD: ${{ parameters.UNO_UWP_BUILD }}
+    XAML_FLAVOR_BUILD: ${{ parameters.XAML_FLAVOR_BUILD }}
+
+  steps:
+  - checkout: self
+    clean: true
+
+  - template: ../templates/dotnet-install.yml
+  - template: ../templates/linux-install-deps.yml
+
+  - script: |
+      chmod +x build/test-scripts/linux-skia-headless-xunit-tests.sh
+      build/test-scripts/linux-skia-headless-xunit-tests.sh
+    displayName: Run Headless xUnit Tests
+    env:
+      TEST_RESULTS_FILE: $(TEST_RESULTS_FILE)
+
+  - task: PublishTestResults@2
+    condition: always()
+    inputs:
+      testRunTitle: 'Linux Skia Headless xUnit Tests'
+      testResultsFormat: 'NUnit'
+      testResultsFiles: '$(TEST_RESULTS_FILE)'
+      failTaskOnFailedTests: true
+      failTaskOnMissingResultsFile: true
