@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFrameworks>$(NetSkiaPreviousAndCurrent)</TargetFrameworks>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<RootNamespace>Uno.UI.RuntimeTests.Testing</RootNamespace>
+	</PropertyGroup>
+
+	<Import Project="../targetframework-override.props" />
+
+	<ItemGroup>
+		<ProjectReference Include="..\Uno.UI.Runtime.Skia.Headless\Uno.UI.Runtime.Skia.Headless.csproj" />
+		<ProjectReference Include="..\Uno.UI\Uno.UI.Skia.csproj" />
+		<ProjectReference Include="..\Uno.UWP\Uno.Skia.csproj" />
+	</ItemGroup>
+
+</Project>
