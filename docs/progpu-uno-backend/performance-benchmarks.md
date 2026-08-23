@@ -11,7 +11,8 @@ parity are mandatory for a performance result to be publishable.
 
 Primary same-framework comparison:
 
-- Uno + Skia GPU backend;
+- Uno + Skia drawing backend (software in the current executable; a GPU lane
+  remains a separate qualification target);
 - Uno + built-in WebGPU backend;
 - Uno + ProGPU backend.
 
@@ -36,6 +37,7 @@ produce the same final state.
 | text-hit | stable 128-run mixed-script/color-font scene | glyph/layout/atlas reuse |
 | text-miss | 127 runs change outside timed mutation boundary | shaping and first-use glyph cost |
 | paths | 1,000 mixed Bézier paths with stable geometry | tessellation/cache behavior |
+| strokes | 1,000 analytic arc/Bézier strokes across solid/dashed cap and join styles | native stroke compilation, quality, and retained replay |
 | images | retained image grid plus one changed upload | texture residency/upload cost |
 | effects | shadows, blur, color matrix, backdrop | pass graph and bandwidth cost |
 | controls-1000 | continuous 1,000-control Uno sample | end-to-end framework throughput |
@@ -165,12 +167,20 @@ remain the authority if a summary or interpretation changes.
 
 ## 11. Current harness and artifacts
 
-`src/Uno.UI.Composition.Backend.Benchmarks` implements seven steady
-micro-scenarios (`cached`, `sparse`, `text`, `paths`, `images`, `clips`, and
-`effects`) for ProGPU, Uno WebGPU where supported, and Uno software Skia. Every
+`src/Uno.UI.Composition.Backend.Benchmarks` implements eight steady
+micro-scenarios (`cached`, `sparse`, `text`, `paths`, `strokes`, `images`,
+`clips`, and `effects`) for ProGPU, Uno WebGPU where supported, and Uno software
+Skia. Every
 frame explicitly clears the target; this prevents translucent antialiasing,
 paths, images, and effects from accumulating across samples. GPU lanes use
 `wgpuDevicePoll(wait=true)` only in the separate completion boundary.
+
+The `strokes` workload repeats four immutable centerlines: rotated elliptical
+arcs and mixed quadratic/cubic paths, with solid and dashed styles covering
+round, square, triangle, and butt caps plus round, bevel, miter, and
+miter-or-bevel joins. It therefore catches both a flattened-curve quality
+regression and a backend that reports a fast result by omitting authored pen
+semantics.
 
 The sparse workload is a retained 24-row tree containing 768 rectangles. One
 row changes per frame. This models immutable subtrees without turning every
@@ -192,8 +202,9 @@ Because the reference Skia path is CPU-intensive, its qualification shape uses
 40 blocking frames plus three batches of 20 frames: 100 measured frames per
 fresh process.
 
-The v2 result contract is
+The v3 result contract is
 [benchmark-result.schema.json](benchmark-result.schema.json). It includes raw
 timing samples, stage-separated ProGPU metrics, retained-picture counters, a
-semantic-state hash, and a BGRA readback hash/path. Current results are in
+forced-redraw state, retained-target-reuse samples, a semantic-state hash, and
+a BGRA readback hash/path. Current results are in
 [performance-results-2026-08-23.md](performance-results-2026-08-23.md).

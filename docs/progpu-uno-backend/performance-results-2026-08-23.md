@@ -271,6 +271,99 @@ label-removal experiment is retained there as negative evidence: it preserved
 pixels but regressed both cached CPU and completed batch time, so it was not
 landed.
 
+## Retained target and queue-completion follow-up
+
+The next trace separated two costs that the earlier retained-picture work did
+not remove:
+
+1. an unchanged retained scene was still submitted into the same populated
+   target; and
+2. the host's explicit completion boundary used a blocking device poll whose
+   approximately 1.52 ms floor dominated tiny frames.
+
+ProGPU `main` commit `63561c7e` supplies retained output stamps and texture
+content generations. The host adapter now reuses a target only when picture
+storage, transform, target object and view, dimensions, clear color, and
+texture-content generation all match. Host-backdrop frames and scene dumps
+remain ineligible. Focused runtime fixtures invalidate reuse after content,
+alpha-mode, clear-color, view-wrapper, and target changes.
+
+The borrowed WebGPU lifetime also requests queue completion through an
+`AllowSpontaneous` callback while continuing non-blocking device progress.
+This preserves the explicit synchronization contract without imposing the old
+blocking-poll quantum on every already-completed queue. An attempted
+`wgpuInstanceWaitAny` route was rejected after wgpu-native aborted; it was not
+landed.
+
+For unchanged retained scenarios, target reuse reduces cached, clips, images,
+paths, and text presentation to approximately 0.0011–0.0012 ms on this machine.
+Effects remains ineligible because it captures host content. A forced-redraw
+matrix alternates two wrapper identities around the same native target view so
+the renderer cannot reuse the populated output:
+
+| Scenario | ProGPU total | Skia total | total speedup | ProGPU CPU | Skia CPU | CPU speedup | completed-batch speedup |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| cached | 0.41650 ms | 0.34385 ms | 0.83× | 0.0196 ms | 0.34385 ms | 17.54× | 5.24× |
+| sparse | 0.53300 ms | 0.34540 ms | 0.65× | 0.0852 ms | 0.34525 ms | 4.05× | 2.87× |
+| text | 0.41270 ms | 4.39835 ms | 10.66× | 0.0211 ms | 4.39835 ms | 208.44× | 54.34× |
+| paths | 0.50700 ms | 2.29905 ms | 4.53× | 0.0209 ms | 2.29905 ms | 110.27× | 20.24× |
+| images | 0.75800 ms | 1.02795 ms | 1.36× | 0.1621 ms | 1.02795 ms | 6.34× | 5.46× |
+| clips | 0.86115 ms | 2.65155 ms | 3.08× | 0.1855 ms | 2.65155 ms | 14.30× | 12.17× |
+| effects | 2.35135 ms | 244.66510 ms | 104.05× | 0.8045 ms | 244.66510 ms | 304.12× | 234.37× |
+
+All forced-redraw semantic hashes match their Skia pair and every ProGPU run
+reports zero unsupported operations. Cached and sparse remain the two honest
+blocking-total gaps: their GPU queue/fence floor is larger than completing the
+tiny software-Skia frame synchronously. Both are nevertheless faster at the
+renderer CPU boundary and completed-batch throughput. These residual latency
+gaps remain open rather than being hidden by target reuse.
+
+Raw results and readbacks are under
+`src/artifacts/performance/2026-08-23-retained-target-reuse-queue-future/`.
+
+## Native analytic stroke follow-up
+
+A real SamplesApp comparison exposed a quality and performance defect that the
+synthetic fill-path workload did not cover. The geometry API correctly
+preserved arcs, but `GetStrokeFillGeometry` flattened the centerline in
+22.5-degree steps before a later solid `DrawPath`. Circular, elliptical, and
+rotated arcs therefore reached ProGPU as faceted fill polygons and bypassed
+its analytic arc/curve stroke compiler.
+
+The backend now returns a deferred stroke geometry for finite, untrimmed,
+non-boolean paths. A direct solid draw maps Uno's complete `StrokeStyle` to a
+native ProGPU pen. Filled-region consumers—bounds, hit testing, transforms,
+combines, clips, streams, trims, or foreign backends—still receive the lazy
+widened fallback, so the public geometry contract is unchanged.
+
+The benchmark suite adds `strokes`: 1,000 repeated rotated-arc and mixed
+Bézier strokes across four solid/dashed cap/join styles. Three fresh paired
+forced-redraw processes used six warmups, 200 blocking samples, and seven
+60-frame batches:
+
+| Boundary | ProGPU process-median | Skia process-median | speedup | paired range |
+|---|---:|---:|---:|---:|
+| blocking total | 0.684100 ms | 10.227800 ms | 14.95× | 14.62×–15.25× |
+| CPU frame | 0.022800 ms | 10.227800 ms | 448.59× | 430.14×–498.92× |
+| completed batch/frame | 0.396895 ms | 10.199105 ms | 25.70× | 25.62×–25.93× |
+| batched CPU/frame | 0.038555 ms | 10.199103 ms | 264.53× | 256.26×–305.48× |
+
+Each backend produced one stable pixel hash across all three processes, both
+reported the same semantic hash, and ProGPU reported zero unsupported
+operations and zero mask passes. The raw benchmark side-by-side measures
+38.07 dB PSNR and 0.9928 SSIM; differences are confined to antialiased stroke
+edges.
+
+The real `Geometry_PathMarkup_Showcase` page was then launched once through
+ProGPU/WebGPU and once through Skia/Metal from the same Release build. The
+previous ProGPU circular arc had a 37-pixel flat top in its capture. The
+corrected ProGPU capture has a 16-pixel top, exactly matching the 16-pixel Skia
+reference, while circular, elliptical, and rotated arcs all remain smooth.
+The content contact sheet confirms matching path topology and layout. Raw JSON,
+BGRA readbacks, and benchmark images are under
+`src/artifacts/performance/2026-08-23-native-strokes/`; live gallery captures
+are under `src/artifacts/performance/2026-08-23-samplesapp-visual-parity/`.
+
 ## Reproduction
 
 Build once with serial MSBuild:
@@ -312,8 +405,10 @@ dotnet Uno.UI.Composition.Backend.Benchmarks/bin/Release/net10.0/Uno.UI.Composit
 ```
 
 Repeat with `--backend skia`. Valid scenarios are `cached`, `sparse`, `text`,
-`paths`, `images`, `clips`, and `effects`. Raw local artifacts for this run are
-under `src/artifacts/performance/2026-08-23-retained-eligibility/`; the
+`paths`, `strokes`, `images`, `clips`, and `effects`. Add `--force-redraw` to
+alternate target wrappers and disable retained populated-target reuse. Raw
+local artifacts for this run are under
+`src/artifacts/performance/2026-08-23-retained-eligibility/`; the
 retained-update follow-up is under
 `src/artifacts/performance/2026-08-23-sparse-update/`.
 

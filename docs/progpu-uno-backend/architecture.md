@@ -203,7 +203,20 @@ metadata.
 - Bounds and hit testing use ProGPU vector algorithms.
 - Transforms produce immutable transformed paths.
 - Boolean combine is represented lazily and evaluated by ProGPU.
-- Stroke widening uses ProGPU's vector stroke geometry implementation.
+- Solid, finite, untrimmed strokes retain their original
+  `ProGPU.Vector.PathGeometry` until draw recording. `ProGpuStrokeGeometry`
+  maps Uno thickness, joins, miter limit, distinct start/end/dash caps, dash
+  intervals, and dash offset to a native ProGPU `Pen`. This lets ProGPU's
+  analytic line, quadratic, cubic, and arc stroke compiler operate on the
+  original centerline instead of receiving a polygonal outline.
+- The deferred stroke remains a complete `IGeometry`: bounds, hit testing,
+  transforms, combines, clipping, streaming, and nested stroke requests lazily
+  materialize the established widened fill geometry. Trimmed, combined, or
+  non-finite styles use that fallback immediately. The split preserves Uno's
+  fill-region contract without paying its flattening cost on the direct solid
+  draw path.
+- Ellipse strokes keep their exact even-odd analytic ring specialization for
+  uses such as clipping, where a native pen is not the consuming operation.
 - Trim produces a new path from ProGPU path-measure data.
 - `StreamSegments` and `StreamFlattened` keep the geometry usable by foreign
   backends and native-host clip consumers.

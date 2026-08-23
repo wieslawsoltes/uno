@@ -43,6 +43,12 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 	private readonly TextureFormat _format;
 	private readonly Vector4 _defaultClearColor;
 	private GpuTexture? _hostBackdropTarget;
+	private IWebGpuRenderTarget? _presentedTarget;
+	private nint _presentedColorView;
+	private int _presentedWidth;
+	private int _presentedHeight;
+	private Vector4 _presentedClearColor;
+	private long _presentedTextureContentVersion;
 	private long _frameNumber;
 	private bool _disposed;
 
@@ -55,7 +61,7 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 			options.MaximumDeferredQueueSubmissions;
 		_context.InitializeExternalNativeDevice(
 			new UnoModernWebGpuApi(),
-			new UnoBorrowedWebGpuLifetime(device.Device),
+			new UnoBorrowedWebGpuLifetime(device.Device, device.Queue),
 			(Device*)device.Device,
 			(Queue*)device.Queue,
 			_format);
@@ -109,11 +115,22 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 			clearColor = explicitClear ?? clearColor;
 		}
 		_compositor.ClearColor = clearColor;
-		_presentVisual.Update(content, transform);
+		var contentChanged = _presentVisual.Update(content, transform);
 		var pixelWidth = Math.Max(1, target.Width);
 		var pixelHeight = Math.Max(1, target.Height);
-		if (hasHostBackdrop)
+		var targetContentReused =
+			!contentChanged &&
+			!hasHostBackdrop &&
+			sceneDumpPath is null &&
+			ReferenceEquals(_presentedTarget, target) &&
+			_presentedColorView == target.ColorView &&
+			_presentedWidth == pixelWidth &&
+			_presentedHeight == pixelHeight &&
+			_presentedClearColor == clearColor &&
+			_presentedTextureContentVersion == _context.TextureContentVersion;
+		if (!targetContentReused && hasHostBackdrop)
 		{
+			_presentedTarget = null;
 			EnsureHostBackdropTarget(pixelWidth, pixelHeight);
 			_compositor.RenderOffscreen(
 				_presentVisual,
@@ -128,20 +145,26 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 				(TextureView*)target.ColorView,
 				_format);
 		}
-		else
+		else if (!targetContentReused)
 		{
 			_compositor.RenderScene(
 				_presentVisual,
 				(uint)pixelWidth,
 				(uint)pixelHeight,
 				(TextureView*)target.ColorView);
+			_presentedTarget = target;
+			_presentedColorView = target.ColorView;
+			_presentedWidth = pixelWidth;
+			_presentedHeight = pixelHeight;
+			_presentedClearColor = clearColor;
+			_presentedTextureContentVersion = _context.TextureContentVersion;
 		}
 		if (sceneDumpPath is not null)
 		{
 			ProGpuDiagnostics.AppendCompositorMetrics(sceneDumpPath, _compositor.Metrics);
 		}
 		submit.Stop();
-		var metrics = _compositor.Metrics;
+		var metrics = targetContentReused ? default : _compositor.Metrics;
 		ProGpuDiagnostics.Publish(new ProGpuFrameMetrics(frame, recordMilliseconds, submit.Elapsed.TotalMilliseconds, picture.CommandCount, metrics.IncrementalSceneUploadBytes, checked((int)ProGpuDiagnostics.UnsupportedOperationCount))
 		{
 			CompositorFrameMilliseconds = metrics.FrameTimeMs,
@@ -163,6 +186,7 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 			RetainedCompositionPictureCompilations = metrics.RetainedCompositionPictureCompilations,
 			SceneCacheHit = metrics.SceneCacheHit,
 			SceneCacheMissReason = metrics.SceneCacheMissReason,
+			TargetContentReused = targetContentReused,
 		});
 	}
 
@@ -369,6 +393,7 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 	{
 		if (_disposed) return;
 		_disposed = true;
+		_presentedTarget = null;
 		_hostBackdropTarget?.Dispose();
 		_hostBackdropTarget = null;
 		_compositor.Dispose();
@@ -406,7 +431,7 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 
 		internal PictureVisual(GpuPicture picture) => _picture = picture;
 
-		internal void Update(GpuPicture picture, Matrix4x4 transform)
+		internal bool Update(GpuPicture picture, Matrix4x4 transform)
 		{
 			if (_picture is { } current &&
 				_transform.Equals(transform) &&
@@ -416,11 +441,12 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 				// Keep the current ownership clone live for synchronous rendering,
 				// but do not invalidate an unchanged retained command stream.
 				_picture = picture;
-				return;
+				return false;
 			}
 			_picture = picture;
 			_transform = transform;
 			Invalidate();
+			return true;
 		}
 
 		public override void OnRender(DrawingContext context)
@@ -816,6 +842,13 @@ internal class ProGpuDrawingSession : IDrawingSession
 	}
 	public void DrawPath(IGeometry geometry, UColor color, bool antialias = false)
 	{
+		if (geometry is ProGpuStrokeGeometry stroke)
+		{
+			IncludeEffectBounds(Inflate(Rect(stroke.Source.Bounds), stroke.EffectOutset));
+			Context.DrawPath(null, stroke.CreatePen(Solid(color)), stroke.Source.Path, _matrix);
+			return;
+		}
+
 		IncludeEffectBounds(Rect(geometry.Bounds));
 		if (geometry is ProGpuGlyphRunGeometry glyphRun)
 		{

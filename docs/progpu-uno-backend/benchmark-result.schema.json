@@ -1,13 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "benchmark-result.schema.json",
-  "title": "Uno drawing backend benchmark result v2",
+  "title": "Uno drawing backend benchmark result v3",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "Schema",
     "Backend",
     "Scenario",
+    "ForceRedraw",
     "Width",
     "Height",
     "Warmups",
@@ -22,9 +23,10 @@
     "Environment"
   ],
   "properties": {
-    "Schema": { "const": "uno-drawing-backend-benchmark/v2" },
+    "Schema": { "const": "uno-drawing-backend-benchmark/v3" },
     "Backend": { "enum": ["progpu", "webgpu", "skia"] },
-    "Scenario": { "enum": ["cached", "sparse", "text", "paths", "images"] },
+    "Scenario": { "enum": ["cached", "sparse", "text", "paths", "strokes", "images", "clips", "effects"] },
+    "ForceRedraw": { "type": "boolean" },
     "Width": { "type": "integer", "minimum": 1 },
     "Height": { "type": "integer", "minimum": 1 },
     "Warmups": { "type": "integer", "minimum": 0 },
@@ -114,7 +116,8 @@
         "RetainedCompositionPictureMisses",
         "RetainedCompositionPictureCompilations",
         "SceneCacheHits",
-        "SceneCacheMissReasons"
+        "SceneCacheMissReasons",
+        "TargetContentReused"
       ],
       "properties": {
         "CpuRecord": { "$ref": "#/$defs/distribution" },
@@ -146,6 +149,11 @@
           "type": "array",
           "minItems": 1,
           "items": { "type": ["string", "null"] }
+        },
+        "TargetContentReused": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "boolean" }
         }
       }
     },

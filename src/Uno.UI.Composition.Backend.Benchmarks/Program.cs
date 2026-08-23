@@ -43,6 +43,7 @@ internal sealed record BenchmarkOptions(
 	int Samples,
 	int BatchSize,
 	int Batches,
+	bool ForceRedraw,
 	string? Output,
 	string? PixelsOutput)
 {
@@ -56,7 +57,7 @@ internal sealed record BenchmarkOptions(
 		var backend = Value("--backend", "progpu").ToLowerInvariant();
 		if (backend is not ("progpu" or "webgpu" or "skia")) throw new ArgumentException("--backend must be progpu, webgpu, or skia.");
 		var scenario = Value("--scenario", "cached").ToLowerInvariant();
-		if (scenario is not ("cached" or "sparse" or "text" or "paths" or "images" or "clips" or "effects")) throw new ArgumentException("--scenario must be cached, sparse, text, paths, images, clips, or effects.");
+		if (scenario is not ("cached" or "sparse" or "text" or "paths" or "strokes" or "images" or "clips" or "effects")) throw new ArgumentException("--scenario must be cached, sparse, text, paths, strokes, images, clips, or effects.");
 		var warmups = int.Parse(Value("--warmups", "4"), CultureInfo.InvariantCulture);
 		var samples = int.Parse(Value("--samples", "100"), CultureInfo.InvariantCulture);
 		var batchSize = int.Parse(Value("--batch-size", "60"), CultureInfo.InvariantCulture);
@@ -72,6 +73,7 @@ internal sealed record BenchmarkOptions(
 			samples,
 			batchSize,
 			batches,
+			Array.IndexOf(args, "--force-redraw") >= 0,
 			Value("--output", string.Empty) is { Length: > 0 } path ? path : null,
 			Value("--pixels-output", string.Empty) is { Length: > 0 } pixelsPath ? pixelsPath : null);
 	}
@@ -86,14 +88,18 @@ internal sealed class BenchmarkHarness : IDisposable
 	private readonly IWebGpuDeviceContext? _device;
 	private readonly IDrawingFactory _factory;
 	private readonly IRenderTarget _target;
+	private readonly IWebGpuRenderTarget? _forcedTargetA;
+	private readonly IWebGpuRenderTarget? _forcedTargetB;
 	private readonly ProGpuGeometryFactory _geometryFactory = new();
 	private readonly ProGpuRenderRecordScope[] _normalRows;
 	private readonly ProGpuRenderRecordScope[] _changedRows;
 	private readonly IGeometry _path;
+	private readonly IGeometry[] _strokes;
 	private readonly ITexture _image;
 	private readonly IReadOnlyList<GlyphRunElement> _text;
 	private readonly IEffectFilter? _backdropBlur;
 	private readonly IEffectFilter? _dropShadow;
+	private int _forcedTargetIndex;
 	private bool _disposed;
 
 	private BenchmarkHarness(BenchmarkOptions options, IDisposable? deviceOwner, IWebGpuDeviceContext? device, IDrawingFactory factory, IRenderTarget target)
@@ -103,8 +109,14 @@ internal sealed class BenchmarkHarness : IDisposable
 		_device = device;
 		_factory = factory;
 		_target = target;
+		if (options.ForceRedraw && target is IWebGpuRenderTarget gpuTarget)
+		{
+			_forcedTargetA = new RenderTargetAlias(gpuTarget);
+			_forcedTargetB = new RenderTargetAlias(gpuTarget);
+		}
 		(_normalRows, _changedRows) = CreateGridRecords();
 		_path = CreatePath();
+		_strokes = CreateStrokes();
 		_image = CreateImage();
 		_text = CreateText();
 		if (options.Scenario == "effects")
@@ -174,9 +186,10 @@ internal sealed class BenchmarkHarness : IDisposable
 		var pixels = ReadPixels();
 		var pixelPath = WritePixels(pixels);
 		return new BenchmarkResult(
-			Schema: "uno-drawing-backend-benchmark/v2",
+			Schema: "uno-drawing-backend-benchmark/v3",
 			Backend: _options.Backend,
 			Scenario: _options.Scenario,
+			ForceRedraw: _options.ForceRedraw,
 			Width,
 			Height,
 			_options.Warmups,
@@ -221,6 +234,16 @@ internal sealed class BenchmarkHarness : IDisposable
 			{
 				recorder.SetMatrix(Matrix4x4.CreateScale(0.5f) * Matrix4x4.CreateTranslation((i % 40) * 32, (i / 40) * 28, 0));
 				recorder.DrawPath(_path, Color.FromArgb(180, 250, 210, 30), true);
+			}
+			recorder.SetMatrix(Matrix4x4.Identity);
+		}
+
+		if (_options.Scenario == "strokes")
+		{
+			for (var i = 0; i < 1000; i++)
+			{
+				recorder.SetMatrix(Matrix4x4.CreateScale(0.5f) * Matrix4x4.CreateTranslation((i % 40) * 32, (i / 40) * 28, 0));
+				recorder.DrawPath(_strokes[i % _strokes.Length], Color.FromArgb(220, 80, 180, 250), true);
 			}
 			recorder.SetMatrix(Matrix4x4.Identity);
 		}
@@ -353,6 +376,7 @@ internal sealed class BenchmarkHarness : IDisposable
 		ProGpuFrameMetrics? metrics;
 		if (_target is IWebGpuRenderTarget gpu)
 		{
+			gpu = GetPresentationTarget(gpu);
 			{
 				using var present = ((IDrawingFactory<IWebGpuRenderTarget>)_factory).BeginPresent(gpu);
 				record.Record.Replay(present);
@@ -441,6 +465,7 @@ internal sealed class BenchmarkHarness : IDisposable
 	{
 		if (_target is IWebGpuRenderTarget gpu)
 		{
+			gpu = GetPresentationTarget(gpu);
 			using var present = ((IDrawingFactory<IWebGpuRenderTarget>)_factory).BeginPresent(gpu);
 			record.Record.Replay(present);
 			return;
@@ -448,6 +473,18 @@ internal sealed class BenchmarkHarness : IDisposable
 
 		using var softwarePresent = ((IDrawingFactory<ISoftwareRenderTarget>)_factory).BeginPresent((ISoftwareRenderTarget)_target);
 		record.Record.Replay(softwarePresent);
+	}
+
+	private IWebGpuRenderTarget GetPresentationTarget(IWebGpuRenderTarget target)
+	{
+		if (_forcedTargetA is null || _forcedTargetB is null)
+		{
+			return target;
+		}
+
+		return (_forcedTargetIndex++ & 1) == 0
+			? _forcedTargetA
+			: _forcedTargetB;
 	}
 
 	private unsafe void WaitForGpu()
@@ -492,6 +529,64 @@ internal sealed class BenchmarkHarness : IDisposable
 		return builder.Build();
 	}
 
+	private IGeometry[] CreateStrokes()
+	{
+		var arcBuilder = _geometryFactory.CreatePathBuilder();
+		arcBuilder.MoveTo(new Vector2(2, 20));
+		arcBuilder.ArcTo(new Vector2(14, 11), 18, false, true, new Vector2(30, 20));
+		using var arc = arcBuilder.Build();
+
+		var curveBuilder = _geometryFactory.CreatePathBuilder();
+		curveBuilder.MoveTo(new Vector2(2, 24));
+		curveBuilder.CubicTo(new Vector2(5, -2), new Vector2(25, 46), new Vector2(30, 4));
+		curveBuilder.QuadraticTo(new Vector2(18, 20), new Vector2(4, 8));
+		using var curve = curveBuilder.Build();
+
+		return
+		[
+			arc.GetStrokeFillGeometry(new StrokeStyle
+			{
+				Thickness = 3,
+				StartCap = StrokeCap.Round,
+				EndCap = StrokeCap.Round,
+				DashCap = StrokeCap.Round,
+				LineJoin = StrokeJoin.Round,
+				MiterLimit = 10,
+			}),
+			arc.GetStrokeFillGeometry(new StrokeStyle
+			{
+				Thickness = 2,
+				StartCap = StrokeCap.Square,
+				EndCap = StrokeCap.Triangle,
+				DashCap = StrokeCap.Round,
+				LineJoin = StrokeJoin.MiterOrBevel,
+				MiterLimit = 4,
+				DashArray = [2, 1, 0.5f, 1],
+				DashOffset = 0.25f,
+			}),
+			curve.GetStrokeFillGeometry(new StrokeStyle
+			{
+				Thickness = 2.5f,
+				StartCap = StrokeCap.Triangle,
+				EndCap = StrokeCap.Square,
+				DashCap = StrokeCap.Butt,
+				LineJoin = StrokeJoin.Bevel,
+				MiterLimit = 3,
+			}),
+			curve.GetStrokeFillGeometry(new StrokeStyle
+			{
+				Thickness = 2,
+				StartCap = StrokeCap.Butt,
+				EndCap = StrokeCap.Round,
+				DashCap = StrokeCap.Square,
+				LineJoin = StrokeJoin.Miter,
+				MiterLimit = 6,
+				DashArray = [3, 1],
+				DashOffset = 0.5f,
+			}),
+		];
+	}
+
 	private ITexture CreateImage()
 	{
 		var pixels = new byte[64 * 64 * 4];
@@ -529,6 +624,7 @@ internal sealed class BenchmarkHarness : IDisposable
 		{
 			"clips" => "|clips=240",
 			"effects" => "|effectCards=12|sourceReplay=true",
+			"strokes" => "|strokes=1000|styles=4|analyticArcs=true|dashes=true",
 			_ => string.Empty,
 		};
 		var bytes = Encoding.UTF8.GetBytes($"v2|clear=FF080C14|retainedRows=24|{_options.Scenario}|{Width}|{Height}|768|{(_options.Scenario == "text" ? 128 : 0)}|{(_options.Scenario == "paths" ? 1000 : 0)}|{(_options.Scenario == "images" ? 240 : 0)}{extension}");
@@ -561,6 +657,10 @@ internal sealed class BenchmarkHarness : IDisposable
 		_disposed = true;
 		_image.Dispose();
 		_path.Dispose();
+		foreach (var stroke in _strokes)
+		{
+			stroke.Dispose();
+		}
 		foreach (var element in _text)
 		{
 			if (element is GlyphOutline outline) outline.Outline.Dispose();
@@ -617,6 +717,7 @@ internal sealed class BenchmarkHarness : IDisposable
 		private readonly long[] _retainedPictureCompilations;
 		private readonly bool[] _sceneCacheHits;
 		private readonly string?[] _sceneCacheMissReasons;
+		private readonly bool[] _targetContentReused;
 
 		internal ProGpuMetricCollector(int count)
 		{
@@ -642,6 +743,7 @@ internal sealed class BenchmarkHarness : IDisposable
 			_retainedPictureCompilations = new long[count];
 			_sceneCacheHits = new bool[count];
 			_sceneCacheMissReasons = new string?[count];
+			_targetContentReused = new bool[count];
 		}
 
 		internal void Add(int index, ProGpuFrameMetrics metrics)
@@ -668,6 +770,7 @@ internal sealed class BenchmarkHarness : IDisposable
 			_retainedPictureCompilations[index] = metrics.RetainedCompositionPictureCompilations;
 			_sceneCacheHits[index] = metrics.SceneCacheHit;
 			_sceneCacheMissReasons[index] = metrics.SceneCacheMissReason;
+			_targetContentReused[index] = metrics.TargetContentReused;
 		}
 
 		internal ProGpuBenchmarkMetrics Build() => new(
@@ -692,7 +795,8 @@ internal sealed class BenchmarkHarness : IDisposable
 			_retainedPictureMisses,
 			_retainedPictureCompilations,
 			_sceneCacheHits,
-			_sceneCacheMissReasons);
+			_sceneCacheMissReasons,
+			_targetContentReused);
 	}
 }
 
@@ -873,10 +977,20 @@ internal sealed unsafe class GpuTarget : IWebGpuRenderTarget
 	}
 }
 
+internal sealed class RenderTargetAlias(IWebGpuRenderTarget target) : IWebGpuRenderTarget
+{
+	public nint ColorView => target.ColorView;
+	public int Width => target.Width;
+	public int Height => target.Height;
+	public GraphicsColorFormat ColorFormat => target.ColorFormat;
+	public void Dispose() { }
+}
+
 internal sealed record BenchmarkResult(
 	string Schema,
 	string Backend,
 	string Scenario,
+	bool ForceRedraw,
 	int Width,
 	int Height,
 	int Warmups,
@@ -927,7 +1041,8 @@ internal sealed record ProGpuBenchmarkMetrics(
 	long[] RetainedCompositionPictureMisses,
 	long[] RetainedCompositionPictureCompilations,
 	bool[] SceneCacheHits,
-	string?[] SceneCacheMissReasons);
+	string?[] SceneCacheMissReasons,
+	bool[] TargetContentReused);
 
 internal sealed record PixelArtifact(
 	string Format,

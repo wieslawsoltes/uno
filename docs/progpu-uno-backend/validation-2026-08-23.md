@@ -5,8 +5,8 @@
 - Uno branch baseline: `6848a67e49`.
 - Uno work branch: `feat/progpu-drawing-backend`; no Uno pull request opened.
 - ProGPU gitlink: merged `main` commit
-  `77a28482b5329700d618a9ce2e4d4cebbd05f0f2`.
-- ProGPU dependency changes: public PRs #125 through #130, all merged.
+  `63561c7ef08d501d7f9cddffdeda379809c8e7b1`.
+- ProGPU dependency changes: public PRs #125 through #131, all merged.
 - Host: macOS 26.6 arm64, Apple M3 Pro, .NET SDK 10.0.201,
   runtime 10.0.5, wgpu-native/Metal.
 
@@ -36,6 +36,9 @@
 | benchmark pixels must represent one frame | measurement correction | explicitly clear every frame and read back the final target after timing |
 | GPU wait must not be mislabeled as renderer CPU time | measurement correction | publish CPU submit, GPU completion, blocking total, batch throughput, and ProGPU internal stages separately |
 | a successful explicit completion wait must advance deferred-submission accounting | root-cause fix | mark the submitted work as drained after the native wait so later cleanup does not repeat the same blocking drain |
+| an unchanged scene must not imply that an arbitrary presentation target still contains it | root-cause fix | reuse populated output only when retained picture storage, transform, target/view identity, size, clear color, and texture-content generation all match; backdrop and scene-dump frames fail closed |
+| an already-completed queue must not pay a blocking device-poll quantum | root-cause fix | register an `AllowSpontaneous` queue-completion callback and make non-blocking device progress until the future resolves; retain the blocking API only as a fallback |
+| a direct stroke must reach the renderer as its authored centerline | root-cause fix | defer stroke-fill materialization, map the complete style to a native ProGPU pen, and lazily widen only for fill-region consumers such as clips, bounds, hit testing, trims, streams, and foreign backends |
 
 Arbitrary/non-uniform geometry, masks, hit testing, unsupported draw commands,
 volatile variants, and stale atlas generations fail closed to normal
@@ -65,7 +68,7 @@ resolved the environmental file-lock race without source changes.
 The current ProGPU branch passes the complete locally available suites:
 
 ```text
-ProGPU.Tests:          3,705 passed, 0 failed, 0 skipped
+ProGPU.Tests:          3,776 passed, 0 failed, 0 skipped
 ProGPU.Tests.Headless:   240 passed, 0 failed, 0 skipped
 ```
 
@@ -89,7 +92,10 @@ picture mutation fixture and strengthens the compact-page source contract.
 The identity-picture follow-up adds five tests covering flattening, retained
 resource lifetime after the source clone is disposed, additional parent
 resources, transformed wrappers, and explicit completion-window reset. The
-full 3,705-test and 240-test suites were rerun after the change.
+retained-output follow-up adds texture mutation/version fixtures. The final
+full 3,776-test and 240-test suites passed. One allocation-sensitive test in an
+earlier full run passed in isolation and on the complete rerun; it is not
+counted as validation evidence for the final revision.
 
 ## Runtime and visual validation
 
@@ -106,7 +112,7 @@ Release run reports:
 
 ```text
 [webgpu] init device — msaa=2x fmtFeatures=True colorFormat=BGRA8Unorm
-ProGPU runtime smoke passed; center=DC5014FF, frame=7.
+ProGPU runtime smoke passed; center=DC5014FF, frame=12.
 ```
 
 SamplesApp was built with
@@ -127,6 +133,15 @@ commented launch-settings parse warning.
 This check caught a launch-configuration trap during validation: setting
 `UNO_PROGPU=1` on a binary compiled with the flag disabled still launches the
 normal Skia backend. Only the negotiation log is accepted as proof.
+
+The expanded geometry smoke preserves an elliptical `ArcTo` centerline through
+a solid native stroke, exercises a dashed arc with distinct square, triangle,
+and round caps, and forces filled-region hit testing plus a trimmed-stroke
+fallback. At 256×256, the rendered analytic centerline stays within 1.25 pixels
+of the ideal ellipse. The path-markup gallery page then caught and verified the
+same behavior end to end: the old faceted circular arc had a 37-pixel top
+plateau, while corrected ProGPU and Skia captures both measure 16 pixels.
+Circular, elliptical, and rotated arcs are smooth in the matched contact sheet.
 
 The final retained-cache smoke renders two stable presentations, performs an
 explicit factory completion wait, renders the same scene again, and performs a
@@ -216,6 +231,17 @@ effects throughput benchmark.
 - A post-merge cached confirmation built from gitlink `77a28482` reports
   0.0474 ms CPU frame, 0.134823 ms completed batched frame, the qualified
   `15DECAB...` pixel hash, and zero unsupported operations.
+- The retained-output/queue-future matrix built from merged ProGPU `63561c7e`
+  keeps all seven forced-redraw CPU and completed-batch boundaries faster than
+  Skia. Five of seven blocking totals also win; cached and sparse remain behind
+  only at the per-frame GPU completion boundary and are reported as residual
+  synchronization gaps.
+- Three fresh forced-redraw stroke pairs cover 1,000 analytic arc/Bézier
+  strokes with four solid/dashed style combinations. ProGPU is 14.95× faster
+  at median blocking total and 25.70× faster at completed-batch throughput;
+  all three runs retain stable backend hashes, equal semantic hashes, zero
+  unsupported operations, and zero mask passes. The raw side-by-side measures
+  0.9928 SSIM.
 
 See [performance-results-2026-08-23.md](performance-results-2026-08-23.md) for
 the exact values and interpretation boundaries.

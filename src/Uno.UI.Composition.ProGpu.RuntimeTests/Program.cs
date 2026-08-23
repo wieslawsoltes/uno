@@ -100,6 +100,7 @@ RunStablePresentCacheSmoke(device, factory);
 await RunNestedRecordClearSmoke(factory);
 await RunDefaultTrimSmoke(factory, geometryFactory);
 await RunAnalyticEllipseStrokeSmoke(factory, geometryFactory);
+await RunNativeArcStrokeSmoke(factory, geometryFactory);
 await RunRoundedDifferenceSmoke(factory, geometryFactory);
 await RunReplayScaleSmoke(factory);
 await RunTransformCompositionSmoke(factory);
@@ -527,6 +528,17 @@ static unsafe void RunStablePresentCacheSmoke(IWebGpuDeviceContext device, ProGp
 	var nativeTexture = N.WGPU.wgpuDeviceCreateTexture(device.Device, &descriptor);
 	var nativeView = N.WGPU.wgpuTextureCreateView(nativeTexture, null);
 	using var target = new SmokeTarget(nativeView, 64, 64);
+	using var replacementTarget = new SmokeTarget(nativeView, 64, 64);
+	var context = (WgpuContext)typeof(ProGpuDrawingFactory)
+		.GetField("_context", BindingFlags.Instance | BindingFlags.NonPublic)!
+		.GetValue(factory)!;
+	using var mutationTexture = new GpuTexture(
+		context,
+		1,
+		1,
+		TextureFormat.Rgba8Unorm,
+		TextureUsage.TextureBinding | TextureUsage.CopyDst,
+		"Uno retained target mutation gate");
 	var recorder = factory.CreateRecording();
 	recorder.DrawRect(new Rect(0, 0, 64, 64), Color.FromArgb(255, 20, 60, 120));
 	using var record = recorder.Finish();
@@ -544,10 +556,67 @@ static unsafe void RunStablePresentCacheSmoke(IWebGpuDeviceContext device, ProGp
 	}
 	factory.WaitForGpuCompletion();
 	var metrics = ProGpuDiagnostics.LastFrame;
-	if (metrics is not { SceneCacheHit: true, DrawCallCount: 1, VectorVertexCount: 4 })
+	if (metrics is not { TargetContentReused: true, DrawCallCount: 0, VectorVertexCount: 0 })
 	{
 		throw new InvalidOperationException(
-			$"A stable retained presentation did not use one cached content draw: hit={metrics?.SceneCacheHit}, reason={metrics?.SceneCacheMissReason ?? "none"}, draws={metrics?.DrawCallCount}, vertices={metrics?.VectorVertexCount}.");
+			$"A stable retained presentation did not reuse its populated target: reused={metrics?.TargetContentReused}, draws={metrics?.DrawCallCount}, vertices={metrics?.VectorVertexCount}.");
+	}
+	mutationTexture.MarkContentsDirty();
+	using (var present = factory.BeginPresent(target))
+	{
+		present.Clear(Color.FromArgb(0, 0, 0, 0));
+		record.Replay(present);
+	}
+	metrics = ProGpuDiagnostics.LastFrame;
+	if (metrics is not { TargetContentReused: false, DrawCallCount: 1, VectorVertexCount: 4 })
+	{
+		throw new InvalidOperationException(
+			$"A texture mutation did not invalidate retained target reuse: reused={metrics?.TargetContentReused}, draws={metrics?.DrawCallCount}, vertices={metrics?.VectorVertexCount}.");
+	}
+	mutationTexture.AlphaMode = GpuTextureAlphaMode.Premultiplied;
+	using (var present = factory.BeginPresent(target))
+	{
+		present.Clear(Color.FromArgb(0, 0, 0, 0));
+		record.Replay(present);
+	}
+	metrics = ProGpuDiagnostics.LastFrame;
+	if (metrics is not { TargetContentReused: false, DrawCallCount: 1, VectorVertexCount: 4 })
+	{
+		throw new InvalidOperationException(
+			$"An alpha-mode mutation did not invalidate retained target reuse: reused={metrics?.TargetContentReused}, draws={metrics?.DrawCallCount}, vertices={metrics?.VectorVertexCount}.");
+	}
+	using (var present = factory.BeginPresent(target))
+	{
+		present.Clear(Color.FromArgb(255, 4, 8, 12));
+		record.Replay(present);
+	}
+	metrics = ProGpuDiagnostics.LastFrame;
+	if (metrics is not { TargetContentReused: false, DrawCallCount: 1, VectorVertexCount: 4 })
+	{
+		throw new InvalidOperationException(
+			$"A clear-color change did not invalidate retained target reuse: reused={metrics?.TargetContentReused}, draws={metrics?.DrawCallCount}, vertices={metrics?.VectorVertexCount}.");
+	}
+	using (var present = factory.BeginPresent(replacementTarget))
+	{
+		present.Clear(Color.FromArgb(255, 4, 8, 12));
+		record.Replay(present);
+	}
+	metrics = ProGpuDiagnostics.LastFrame;
+	if (metrics is not { TargetContentReused: false, DrawCallCount: 1, VectorVertexCount: 4 })
+	{
+		throw new InvalidOperationException(
+			$"A replacement target did not invalidate retained target reuse: reused={metrics?.TargetContentReused}, draws={metrics?.DrawCallCount}, vertices={metrics?.VectorVertexCount}.");
+	}
+	using (var present = factory.BeginPresent(replacementTarget))
+	{
+		present.Clear(Color.FromArgb(255, 4, 8, 12));
+		record.Replay(present);
+	}
+	metrics = ProGpuDiagnostics.LastFrame;
+	if (metrics is not { TargetContentReused: true, DrawCallCount: 0, VectorVertexCount: 0 })
+	{
+		throw new InvalidOperationException(
+			$"A stable replacement target was not reused: reused={metrics?.TargetContentReused}, draws={metrics?.DrawCallCount}, vertices={metrics?.VectorVertexCount}.");
 	}
 	N.WGPU.wgpuTextureViewRelease(nativeView);
 	N.WGPU.wgpuTextureDestroy(nativeTexture);
@@ -694,6 +763,117 @@ static async Task RunAnalyticEllipseStrokeSmoke(ProGpuDrawingFactory factory, Pr
 	{
 		throw new InvalidOperationException(
 			$"The ellipse fast path changed sharp miter-join semantics: corner={Convert.ToHexString(Pixel(rectanglePixels, 8, 8))}, center={Convert.ToHexString(Pixel(rectanglePixels, 32, 32))}.");
+	}
+}
+
+static async Task RunNativeArcStrokeSmoke(ProGpuDrawingFactory factory, ProGpuGeometryFactory geometryFactory)
+{
+	const int size = 256;
+	var builder = geometryFactory.CreatePathBuilder();
+	builder.MoveTo(new Vector2(32, 160));
+	builder.ArcTo(new Vector2(96, 80), 0, false, true, new Vector2(224, 160));
+	using var source = builder.Build();
+	using var stroke = source.GetStrokeFillGeometry(new StrokeStyle
+	{
+		Thickness = 8,
+		StartCap = StrokeCap.Round,
+		EndCap = StrokeCap.Round,
+		DashCap = StrokeCap.Round,
+		LineJoin = StrokeJoin.Round,
+		MiterLimit = 10,
+	});
+
+	// Filled-region operations must retain IGeometry semantics even though a direct
+	// draw can preserve the analytic centerline and defer stroke expansion to ProGPU.
+	if (!stroke.FillContains(new Vector2(128, 80)) || stroke.FillContains(new Vector2(128, 160)))
+	{
+		throw new InvalidOperationException("A deferred native arc stroke did not preserve filled-region hit testing.");
+	}
+
+	using var texture = factory.RenderOffscreen(size, size, drawing =>
+	{
+		drawing.Clear(Color.FromArgb(0, 0, 0, 0));
+		drawing.DrawPath(stroke, Color.FromArgb(255, 30, 80, 220), true);
+	});
+	var pixels = new byte[size * size * 4];
+	(await factory.SnapshotAsync(texture)).CopyPixels(pixels);
+
+	var maximumCenterlineError = 0f;
+	var measuredColumns = 0;
+	for (var x = 44; x <= 212; x++)
+	{
+		var first = -1;
+		var last = -1;
+		for (var y = 64; y <= 164; y++)
+		{
+			if (pixels[(y * size + x) * 4 + 3] >= 128)
+			{
+				first = first < 0 ? y : first;
+				last = y;
+			}
+		}
+		if (first < 0)
+		{
+			continue;
+		}
+
+		var normalizedX = (x - 128f) / 96f;
+		var expectedY = 160f - 80f * MathF.Sqrt(MathF.Max(0, 1f - normalizedX * normalizedX));
+		var actualY = (first + last) * 0.5f;
+		maximumCenterlineError = MathF.Max(maximumCenterlineError, MathF.Abs(actualY - expectedY));
+		measuredColumns++;
+	}
+
+	if (measuredColumns < 160 || maximumCenterlineError > 1.25f)
+	{
+		throw new InvalidOperationException(
+			$"An analytic arc stroke was flattened or lost: columns={measuredColumns}, maxCenterlineError={maximumCenterlineError:F3}px.");
+	}
+
+	using var dashedStroke = source.GetStrokeFillGeometry(new StrokeStyle
+	{
+		Thickness = 6,
+		StartCap = StrokeCap.Square,
+		EndCap = StrokeCap.Triangle,
+		DashCap = StrokeCap.Round,
+		LineJoin = StrokeJoin.MiterOrBevel,
+		MiterLimit = 4,
+		DashArray = [2, 1, 0.5f, 1],
+		DashOffset = 0.25f,
+	});
+	using var dashedTexture = factory.RenderOffscreen(64, 64, drawing =>
+	{
+		drawing.Clear(Color.FromArgb(0, 0, 0, 0));
+		drawing.Scale(0.25f, 0.25f);
+		drawing.DrawPath(dashedStroke, Color.FromArgb(255, 220, 80, 30), true);
+	});
+	var dashedPixels = new byte[64 * 64 * 4];
+	(await factory.SnapshotAsync(dashedTexture)).CopyPixels(dashedPixels);
+	var covered = 0;
+	for (var index = 3; index < dashedPixels.Length; index += 4)
+	{
+		if (dashedPixels[index] >= 32)
+		{
+			covered++;
+		}
+	}
+	if (covered < 80 || covered > 700)
+	{
+		throw new InvalidOperationException($"A native dashed arc stroke produced invalid coverage: pixels={covered}.");
+	}
+
+	using var trimmedStroke = source.GetStrokeFillGeometry(new StrokeStyle
+	{
+		Thickness = 8,
+		LineJoin = StrokeJoin.Round,
+		MiterLimit = 10,
+		TrimStart = 0.2f,
+		TrimEnd = 0.8f,
+	});
+	if (trimmedStroke.SegmentCount <= source.SegmentCount)
+	{
+		throw new InvalidOperationException(
+			$"A trimmed stroke bypassed the filled-geometry fallback: source={source.SegmentCount}, stroke={trimmedStroke.SegmentCount}.");
 	}
 }
 

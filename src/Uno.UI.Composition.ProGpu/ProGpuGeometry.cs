@@ -6,6 +6,7 @@ extern alias unouwp;
 using System;
 using System.Collections.Generic;
 using System.Numerics;
+using System.Threading;
 using Uno.UI.Composition.Drawing;
 using Rect = unofoundation::Windows.Foundation.Rect;
 using PArc = ProGPU.Vector.ArcSegment;
@@ -286,7 +287,37 @@ public sealed class ProGpuGeometry : IGeometry, unouwp::Windows.Graphics.IGeomet
 			return CreateEllipseStroke(roundRect, style.Thickness);
 		}
 
+		if (CanDeferNativeStroke(style))
+		{
+			return new ProGpuStrokeGeometry(this, style);
+		}
+
 		return new ProGpuGeometry(ProGpuGeometryAlgorithms.Widen(Path, style));
+	}
+
+	private bool CanDeferNativeStroke(in StrokeStyle style)
+	{
+		if (Path.IsCombined ||
+			!float.IsFinite(style.Thickness) || style.Thickness <= 0 ||
+			style.TrimStart != default || style.TrimEnd != default ||
+			!float.IsFinite(style.MiterLimit) ||
+			!float.IsFinite(style.DashOffset))
+		{
+			return false;
+		}
+
+		if (style.DashArray is { } dashes)
+		{
+			foreach (var dash in dashes)
+			{
+				if (!float.IsFinite(dash))
+				{
+					return false;
+				}
+			}
+		}
+
+		return true;
 	}
 
 	public RoundRectangle? TryGetRoundRect() => _roundRect;
@@ -398,6 +429,117 @@ public sealed class ProGpuGeometry : IGeometry, unouwp::Windows.Graphics.IGeomet
 			4 => right && !left,
 			_ => false,
 		};
+	}
+}
+
+/// <summary>
+/// Defers materializing a stroke as fill geometry until an operation actually needs the
+/// filled region. A direct solid draw can instead preserve the source path and use
+/// ProGPU's analytic curve, arc, join, cap, and dash stroke compiler.
+/// </summary>
+internal sealed class ProGpuStrokeGeometry : IGeometry
+{
+	private readonly StrokeStyle _style;
+	private readonly double[]? _nativeDashes;
+	private ProGpuGeometry? _fallback;
+
+	internal ProGpuStrokeGeometry(ProGpuGeometry source, in StrokeStyle style)
+	{
+		// PathGeometry is an immutable managed value. Keep an independent geometry
+		// handle over the same value so disposing the caller's source cannot transfer
+		// ownership of this stroke result.
+		Source = new ProGpuGeometry(source.Path, source.TryGetRoundRect());
+		_style = style with
+		{
+			DashArray = style.DashArray is { } dashes ? (float[])dashes.Clone() : null,
+		};
+		if (_style.DashArray is { Length: > 0 } authored)
+		{
+			_nativeDashes = new double[authored.Length];
+			for (var i = 0; i < authored.Length; i++)
+			{
+				_nativeDashes[i] = Math.Abs(authored[i]);
+			}
+		}
+	}
+
+	internal ProGpuGeometry Source { get; }
+
+	internal float EffectOutset
+	{
+		get
+		{
+			var half = _style.Thickness * 0.5f;
+			return _style.LineJoin is StrokeJoin.Miter or StrokeJoin.MiterOrBevel
+				? half * MathF.Max(1, _style.MiterLimit)
+				: half;
+		}
+	}
+
+	public Rect Bounds => Fallback.Bounds;
+
+	public GeometryFillRule FillRule => GeometryFillRule.NonZero;
+
+	public bool IsEmpty => Source.IsEmpty;
+
+	public int SegmentCount => Fallback.SegmentCount;
+
+	public bool FillContains(Vector2 point) => Fallback.FillContains(point);
+
+	public IGeometry Transform(Matrix3x2 matrix) => Fallback.Transform(matrix);
+
+	public IGeometry Combine(IGeometry other, GeometryCombineMode mode) => Fallback.Combine(other, mode);
+
+	public IGeometry GetFilledGeometry(float trimStart, float trimEnd) => Fallback.GetFilledGeometry(trimStart, trimEnd);
+
+	public IGeometry GetStrokeFillGeometry(in StrokeStyle style) => Fallback.GetStrokeFillGeometry(style);
+
+	public RoundRectangle? TryGetRoundRect() => Fallback.TryGetRoundRect();
+
+	public void StreamFlattened(IFlattenedPathSink sink) => Fallback.StreamFlattened(sink);
+
+	public void StreamSegments(IGeometrySink sink) => Fallback.StreamSegments(sink);
+
+	internal ProGPU.Vector.Pen CreatePen(ProGPU.Vector.Brush brush)
+	{
+		return new ProGPU.Vector.Pen(
+			brush,
+			_style.Thickness,
+			ProGpuGeometryAlgorithms.ToProGpu(_style.LineJoin),
+			MathF.Max(1, _style.MiterLimit),
+			ProGpuGeometryAlgorithms.ToProGpu(_style.StartCap),
+			ProGpuGeometryAlgorithms.ToProGpu(_style.EndCap),
+			ProGpuGeometryAlgorithms.ToProGpu(_style.DashCap),
+			_nativeDashes,
+			_style.DashOffset);
+	}
+
+	public void Dispose()
+	{
+		Interlocked.Exchange(ref _fallback, null)?.Dispose();
+		Source.Dispose();
+	}
+
+	private ProGpuGeometry Fallback
+	{
+		get
+		{
+			var fallback = Volatile.Read(ref _fallback);
+			if (fallback is not null)
+			{
+				return fallback;
+			}
+
+			var created = new ProGpuGeometry(ProGpuGeometryAlgorithms.Widen(Source.Path, _style));
+			fallback = Interlocked.CompareExchange(ref _fallback, created, null);
+			if (fallback is not null)
+			{
+				created.Dispose();
+				return fallback;
+			}
+
+			return created;
+		}
 	}
 }
 

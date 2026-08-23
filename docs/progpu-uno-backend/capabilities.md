@@ -18,14 +18,14 @@ Status terms: **working** means exercised on a real macOS/Metal device;
 | clips | working | rect, rounded/path, intersect/difference; nested rounded rings and rounded-plus-rectangular holes are analytic, pixel-qualified, and benchmarked with zero mask passes; broader arbitrary clip corpus remains |
 | layers | partial | balanced save/blend scopes plus translated and nested blur/drop-shadow effect layers work; color-matrix layer isolation and arbitrary effects remain |
 | primitives | working | clear, solid/gradient rect, uniform/non-uniform rounded rect, border, and line routes have direct or effect-bound pixel assertions; broader antialias corpus remains |
-| paths | working | fill/stroke, transformed replay, effect bounds, and backend geometry have runtime assertions; cap/join/dash behavior is supplied through widened geometry and needs a larger corpus |
+| paths | working | fill/stroke, transformed replay, effect bounds, and backend geometry have runtime assertions; eligible solid and dashed strokes preserve native analytic lines/Béziers/arcs with distinct cap/join styles, while trim, clips, hit testing, and foreign consumers retain widened-fill fallback semantics; broader numerical corpus remains |
 | gradients | working | linear/radial, focal point, anisotropy, spread, local matrix, and duplicate-stop hard transitions are pixel-validated; broader fixtures remain |
 | images | working | BGRA upload, sampling, opacity, color matrix/`SrcIn`, source/destination, and nine-slice are benchmarked or real-device smoke-tested, including effect-bound propagation; codec corpus remains |
 | offscreen | working | GPU render target and same-device reuse path exercised |
 | snapshot | working | real GPU readback and byte-channel assertions pass |
 | shadow | partial | translated retained shadows, shadow-only composition, explicit source replay, and nested output-bound propagation are runtime-qualified; anisotropic sigma and additive semantics are not complete |
 | effects | partial | source blur, drop shadow, image matrix/tint and GPU-only ordered HostBackdrop capture are implemented; translated/nested layer bounds, detached texture retirement, and live acrylic placement are qualified, while arbitrary neutral DAG/layer isolation remains |
-| geometry factory | implemented | builders, primitives, host marker, bounds, hit test, transform, combine, trim, widen and streams; solid ellipse strokes retain exact analytic rings while join-aware general geometry uses widening; full numerical corpus remains |
+| geometry factory | working | builders, primitives, host marker, bounds, hit test, transform, combine, trim, widen and streams are real-device exercised; ellipse clips retain exact rings and direct strokes defer to ProGPU's analytic pen stack; full numerical corpus remains |
 | font matching | working | system default selection used by smoke/SamplesApp; byte/family/fallback corpus remains |
 | shaping | working | direct OpenType shaping exercised for LTR; RTL/complex corpus remains |
 | glyph output | implemented | outline, COLR/SVG layers and embedded bitmap routes exist; font corpus remains |
@@ -34,7 +34,7 @@ Status terms: **working** means exercised on a real macOS/Metal device;
 | SVG | implemented | neutral parser emits through ProGPU geometry/drawing; document corpus remains |
 | lifetime | working | deterministic resource disposal is exercised; a real borrowed-device test proves disposing the backend does not release the host WebGPU device, and detached effect textures are retired before later scene-cache admission |
 | device loss | planned | generation counter exists; invalidation/recovery injection remains |
-| diagnostics | implemented | CPU record/submit, compositor compile/upload/pass, draw/vertex/upload/mask/cache and retained-picture metrics are exported in benchmark schema v2; scene dumps can wait for HostBackdrop and include material parameters; atlas residency is not yet exported |
+| diagnostics | implemented | CPU record/submit, compositor compile/upload/pass, draw/vertex/upload/mask/cache, retained-picture, retained-target-reuse, and forced-redraw metrics are exported in benchmark schema v3; scene dumps can wait for HostBackdrop and include material parameters; atlas residency is not yet exported |
 | AOT/trimming | planned | trimmed NativeAOT sample remains |
 | Skia-free lane | partial | backend assembly has no Skia reference, but the current SamplesApp deliberately also packages other selectable backends |
 
@@ -63,7 +63,7 @@ are established.
   and presented through ProGPU without backend exceptions during the observed
   startup interval. The startup log, rather than the selection environment
   variable, proves that `ProGpuGraphicsProvider` won `WebGpu` negotiation.
-- Gate 2: **passed for the expanded real-device smoke and seven benchmark
+- Gate 2: **passed for the expanded real-device smoke and eight benchmark
   scenes**; the systematic SamplesApp page corpus has not run.
 - Gate 3: **passed on macOS/Metal**. The runtime test disposes a factory that
   borrowed the host context, then successfully allocates and releases another
@@ -72,7 +72,8 @@ are established.
   geometry/text/fallback/color-font corpus remains.
 - Gate 5: **partial**. The backend project is Skia-free; a minimal packaged app
   and process-module audit remains.
-- Gate 6: **passed for eight alternating ProGPU/Skia processes across all seven
-  scenarios**. Cached and sparse output is byte-exact; text/path/image/clip and
-  effect differences are quantified. The earlier Uno WebGPU context lane has
-  two processes and still needs eight-process promotion.
+- Gate 6: **passed for eight alternating ProGPU/Skia processes across the seven
+  primary scenarios, plus three fresh forced-redraw pairs for the native-stroke
+  scenario**. Cached and sparse output is byte-exact; text/path/stroke/image/
+  clip and effect differences are quantified. The earlier Uno WebGPU context
+  lane has two processes and still needs eight-process promotion.

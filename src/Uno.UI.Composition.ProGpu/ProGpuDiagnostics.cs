@@ -38,6 +38,7 @@ public sealed record ProGpuFrameMetrics(
 	public long RetainedCompositionPictureCompilations { get; init; }
 	public bool SceneCacheHit { get; init; }
 	public string? SceneCacheMissReason { get; init; }
+	public bool TargetContentReused { get; init; }
 }
 
 public static class ProGpuDiagnostics

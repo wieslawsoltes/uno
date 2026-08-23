@@ -402,14 +402,14 @@ internal static class ProGpuGeometryAlgorithms
 		if (points.Count == 0 || Vector2.DistanceSquared(points[^1], point) > Epsilon * Epsilon) points.Add(point);
 	}
 
-	private static ProGPU.Vector.PenLineJoin ToProGpu(StrokeJoin value) => value switch
+	internal static ProGPU.Vector.PenLineJoin ToProGpu(StrokeJoin value) => value switch
 	{
 		StrokeJoin.Round => ProGPU.Vector.PenLineJoin.Round,
 		StrokeJoin.Bevel => ProGPU.Vector.PenLineJoin.Bevel,
 		_ => ProGPU.Vector.PenLineJoin.Miter,
 	};
 
-	private static ProGPU.Vector.PenLineCap ToProGpu(StrokeCap value) => value switch
+	internal static ProGPU.Vector.PenLineCap ToProGpu(StrokeCap value) => value switch
 	{
 		StrokeCap.Round => ProGPU.Vector.PenLineCap.Round,
 		StrokeCap.Square => ProGPU.Vector.PenLineCap.Square,

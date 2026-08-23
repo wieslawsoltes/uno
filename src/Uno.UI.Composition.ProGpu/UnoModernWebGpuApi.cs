@@ -600,8 +600,56 @@ internal sealed unsafe class UnoModernWebGpuApi : IWebGpuApi
 	private static void Release(nint value, Action<nint> release) { if (value != 0) release(value); }
 }
 
-internal sealed class UnoBorrowedWebGpuLifetime(nint device) : IWebGpuExternalDeviceLifetime
+internal sealed unsafe class UnoBorrowedWebGpuLifetime(nint device, nint queue) : IWebGpuExternalDeviceLifetime
 {
-	public unsafe void Poll(bool wait) => _ = N.WGPU.wgpuDevicePoll(device, wait ? 1u : 0u, null);
+	private struct QueueCompletion
+	{
+		internal int Completed;
+		internal N.WGPUQueueWorkDoneStatus Status;
+	}
+
+	public void Poll(bool wait)
+	{
+		if (!wait)
+		{
+			_ = N.WGPU.wgpuDevicePoll(device, 0, null);
+			return;
+		}
+
+		QueueCompletion completion = default;
+		// The borrowed wgpu-native instance does not advertise TimedWaitAny, and
+		// its blocking device poll has a millisecond-scale scheduling floor. A
+		// queue future plus non-blocking device progress observes the same fence
+		// without allocations or depending on that optional instance feature.
+		_ = N.WGPU.wgpuQueueOnSubmittedWorkDone(queue, new N.WGPUQueueWorkDoneCallbackInfo
+		{
+			Mode = N.WGPUCallbackMode.AllowSpontaneous,
+			Callback = (nint)(delegate* unmanaged[Cdecl]<N.WGPUQueueWorkDoneStatus, N.WGPUStringView, nint, nint, void>)&OnQueueWorkDone,
+			Userdata1 = (nint)(&completion),
+		});
+		while (System.Threading.Volatile.Read(ref completion.Completed) == 0)
+		{
+			_ = N.WGPU.wgpuDevicePoll(device, 0, null);
+			System.Threading.Thread.SpinWait(64);
+		}
+
+		if (completion.Status != N.WGPUQueueWorkDoneStatus.Success)
+		{
+			throw new InvalidOperationException($"WebGPU queue completion failed ({completion.Status}).");
+		}
+	}
+
+	[UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+	private static void OnQueueWorkDone(
+		N.WGPUQueueWorkDoneStatus status,
+		N.WGPUStringView message,
+		nint userdata1,
+		nint userdata2)
+	{
+		var completion = (QueueCompletion*)userdata1;
+		completion->Status = status;
+		System.Threading.Volatile.Write(ref completion->Completed, 1);
+	}
+
 	public void Dispose() { }
 }
