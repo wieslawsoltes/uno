@@ -39,6 +39,7 @@ produce the same final state.
 | paths | 1,000 mixed Bézier paths with stable geometry | tessellation/cache behavior |
 | strokes | 1,000 analytic arc/Bézier strokes across solid/dashed cap and join styles | native stroke compilation, quality, and retained replay |
 | materials | 768 linear/radial gradients spanning focal, anisotropic, spread, local-matrix, and duplicate-stop cases | material batching and shader fidelity |
+| layers | one retained color-matrix layer containing 1,536 overlapping opaque/translucent primitives and a non-identity alpha row | subtree isolation, effect-texture reuse, and whole-layer shader cost |
 | images | retained image grid plus one changed upload | texture residency/upload cost |
 | effects | shadows, blur, color matrix, backdrop | pass graph and bandwidth cost |
 | controls-1000 | continuous 1,000-control Uno sample | end-to-end framework throughput |
@@ -168,10 +169,10 @@ remain the authority if a summary or interpretation changes.
 
 ## 11. Current harness and artifacts
 
-`src/Uno.UI.Composition.Backend.Benchmarks` implements nine steady
+`src/Uno.UI.Composition.Backend.Benchmarks` implements ten steady
 micro-scenarios (`cached`, `sparse`, `text`, `paths`, `strokes`, `materials`,
-`images`, `clips`, and `effects`) for ProGPU, Uno WebGPU where supported, and
-Uno software Skia. Every
+`layers`, `images`, `clips`, and `effects`) for ProGPU, Uno WebGPU where
+supported, and Uno software Skia. Every
 frame explicitly clears the target; this prevents translucent antialiasing,
 paths, images, and effects from accumulating across samples. GPU lanes use
 `wgpuDevicePoll(wait=true)` only in the separate completion boundary.
@@ -189,6 +190,13 @@ clamp, repeat, and mirror spread; focal and anisotropic radial geometry; local
 matrix rotation; translucent stops; and an exact duplicate-stop hard edge.
 Stable semantic and pixel hashes prevent a fast result from dropping a shader
 variant or material transition.
+
+The `layers` workload records 1,536 overlapping rounded and rectangular
+primitives inside one color-matrix `SaveLayer`. Its matrix mixes RGB channels
+and scales the already-composited alpha, making whole-subtree isolation
+observable: applying the matrix independently to each primitive does not
+produce the same overlap pixels. Stable replays additionally exercise retained
+effect-surface reuse without permitting final-target reuse in forced mode.
 
 The sparse workload is a retained 24-row tree containing 768 rectangles. One
 row changes per frame. This models immutable subtrees without turning every

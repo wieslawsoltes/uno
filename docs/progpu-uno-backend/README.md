@@ -3,7 +3,7 @@
 Status: working macOS/Metal implementation and qualification branch,
 2026-08-23. The backend negotiates Uno's WebGPU host context, presents the
 SamplesApp through ProGPU, passes the focused real-device smoke test, and has a
-correctness-gated v2 benchmark matrix. The remaining qualification gaps are
+correctness-gated v3 benchmark matrix. The remaining qualification gaps are
 listed in [capabilities.md](capabilities.md); this status does not claim
 cross-platform or full effect/layer conformance.
 
@@ -25,21 +25,25 @@ Documents:
 - [Initial validation record](validation-2026-08-22.md)
 
 The implementation consumes ProGPU as a git submodule pinned to immutable
-`main` merge commit `77a28482b5329700d618a9ce2e4d4cebbd05f0f2`. Public
+`main` merge commit `ecc9787b8b1055d0d1887e9bf2fab7191cb1e5aa`. Public
 dependency changes
 [#125](https://github.com/wieslawsoltes/ProGPU/pull/125),
 [#126](https://github.com/wieslawsoltes/ProGPU/pull/126),
 [#127](https://github.com/wieslawsoltes/ProGPU/pull/127),
 [#128](https://github.com/wieslawsoltes/ProGPU/pull/128), and
-[#129](https://github.com/wieslawsoltes/ProGPU/pull/129), and
-[#130](https://github.com/wieslawsoltes/ProGPU/pull/130) are merged. Together
+[#129](https://github.com/wieslawsoltes/ProGPU/pull/129),
+[#130](https://github.com/wieslawsoltes/ProGPU/pull/130),
+[#131](https://github.com/wieslawsoltes/ProGPU/pull/131), and
+[#132](https://github.com/wieslawsoltes/ProGPU/pull/132) are merged. Together
 they provide optional WinRT contracts, analytic difference clips, bounded
 retained-picture compilation and eligibility caching, duplicate-stop gradient
 semantics, bounded queue cleanup, GPU-only HostBackdrop capture, translated
 and shadow-only effects, prompt retirement of detached effect textures, and
 in-place merging of compact retained-page draw calls. Identity-only picture
 recordings now share their immutable command storage directly, and explicit
-completion waits advance the bounded submission-drain accounting.
+completion waits advance the bounded submission-drain accounting. Retained
+target stamps prevent unchanged output submission, and color matrices can now
+be applied once to isolated visual subtrees through the GPU image-effect path.
 
 ## Non-negotiable invariants
 

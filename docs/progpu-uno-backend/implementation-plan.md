@@ -4,8 +4,8 @@
 
 - Uno base: immutable head of PR #24153.
 - ProGPU dependency: merged `main` commit
-  `77a28482b5329700d618a9ce2e4d4cebbd05f0f2`, including public dependency
-  changes #125 through #130.
+  `ecc9787b8b1055d0d1887e9bf2fab7191cb1e5aa`, including public dependency
+  changes #125 through #132.
 - Primary validation platform: macOS arm64, .NET 10, Dawn/Metal.
 - Secondary compile/runtime lanes: Windows Dawn/D3D12, Linux
   wgpu-native/Vulkan, and browser WebGPU when the host callback ABI is proven.
@@ -23,7 +23,7 @@ build configuration, exact commands, and raw artifact paths.
 | 2 — drawing core | working vertical slice | real-device smoke, SamplesApp present, analytic clip-hole and broad effect-bound corpus; arbitrary effect DAG isolation remains |
 | 3 — content stack | implemented vertical slice | ProGPU geometry/font/shaping/direct glyph path plus neutral managed image/SVG adapters; full corpus remains |
 | 4 — application correctness | partially qualified | SamplesApp loads and presents 1,413-sample catalog; systematic sample/pixel sweep remains |
-| 5 — benchmarks | primary pair qualified | v3 stage timing, target readback, nine scenarios including analytic strokes and gradient materials, eight alternating ProGPU/Skia process pairs for the primary seven, three-pair stroke/material follow-ups, and an eight-pair retained-presentation follow-up; the earlier Uno WebGPU lane, startup/scrolling/memory scenarios, and cross-framework ports remain |
+| 5 — benchmarks | primary pair qualified | v3 stage timing, target readback, ten scenarios including analytic strokes, gradient materials, and isolated color-matrix layers, eight alternating ProGPU/Skia process pairs for the primary seven, three-pair stroke/material/layer follow-ups, and an eight-pair retained-presentation follow-up; the earlier Uno WebGPU lane, startup/scrolling/memory scenarios, and cross-framework ports remain |
 | 6 — hardening | open | Windows/Linux/browser, device loss, AOT/trimming, leak and long-running stress |
 
 ## Phase 0 — analysis and contracts

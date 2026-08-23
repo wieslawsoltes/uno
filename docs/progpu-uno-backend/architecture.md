@@ -175,13 +175,16 @@ foreign drawing session.
 
 The initial effect compiler recognizes source blur and the backdrop material
 shapes needed by Uno's backdrop recipe. Image color matrices and `SrcIn` tint
-use ProGPU's image-effect pipeline. Blur and drop-shadow `SaveLayer` calls
-record a nested `GpuPicture` and composite it through a retained effect visual,
-so the filter sees the layer as one isolated source. Other neutral DAGs return
-`null` from `CreateEffectFilter`, activating Uno's documented recipe path.
-Calling an unsupported drawing operation records a named diagnostic and, by
-default, throws. No Skia fallback occurs. Full color-filter and arbitrary
-effect-DAG layer conformance remains open.
+use ProGPU's image-effect pipeline. Blur, drop-shadow, and color-matrix
+`SaveLayer` calls record a nested `GpuPicture` and composite it through a
+retained effect visual, so the filter sees the complete layer exactly once as
+an isolated source. The color-matrix visual reuses ProGPU's GPU image-effect
+shader and retains only its source surface; it does not rewrite individual
+brushes or read pixels back to the CPU. Other neutral DAGs return `null` from
+`CreateEffectFilter`, activating Uno's documented recipe path. Calling an
+unsupported drawing operation records a named diagnostic and, by default,
+throws. No Skia fallback occurs. Arbitrary effect-DAG layer conformance remains
+open.
 
 Uno's acrylic graph is lowered to one ProGPU material with blur, luminosity,
 tint, noise, and material opacity. ProGPU implements the Color and Luminosity

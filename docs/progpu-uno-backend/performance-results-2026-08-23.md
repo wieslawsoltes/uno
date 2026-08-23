@@ -5,7 +5,8 @@
 The primary result is an eight-pair, alternating fresh-process comparison of
 the Uno ProGPU and software-Skia drawing backends. It covers the seven primary
 qualification scenarios; later sections add retained-output, native-stroke,
-and gradient-material follow-ups. Every process renders the same semantic state,
+gradient-material, and color-matrix-layer follow-ups. Every process renders the
+same semantic state,
 reports zero unsupported operations, reads back the final target, and preserves
 its raw timing distribution.
 
@@ -407,6 +408,42 @@ operations: 8.6350 ms blocking median for `materials` and 17.1597 ms for
 These 40-sample smokes prove scenario compatibility but are not substituted for
 the balanced ProGPU/Skia qualification distributions.
 
+## Isolated color-matrix layer follow-up
+
+ProGPU `main` merge commit `ecc9787b` adds a reusable `ColorMatrixEffect` that
+renders an entire visual subtree once to a retained source texture, then routes
+that texture through the existing GPU image-effect shader. The Uno adapter now
+maps `SaveLayer(IColorFilter)` matrices to this effect instead of reporting an
+unsupported operation or attempting a per-primitive color rewrite.
+
+The new `layers` workload records one isolated layer containing 1,536
+overlapping rounded/rectangular primitives. Its 4x5 matrix mixes RGB channels
+and scales the already-composited alpha; this makes layer isolation part of the
+pixel contract rather than a performance-only convention. Three alternating
+fresh-process pairs used six warmups, 200 blocking samples, and seven 60-frame
+batches:
+
+| Boundary | ProGPU process-median | Skia process-median | speedup | paired range |
+|---|---:|---:|---:|---:|
+| blocking total | 0.619800 ms | 3.807200 ms | 6.14× | 5.49×–6.82× |
+| CPU frame | 0.083800 ms | 3.807200 ms | 45.43× | 44.34×–48.25× |
+| completed batch/frame | 0.111765 ms | 3.785140 ms | 33.87× | 33.74×–34.41× |
+| batched CPU/frame | 0.093043 ms | 3.785138 ms | 40.68× | 40.24×–42.29× |
+
+Every run reports the same semantic hash, one stable pixel hash per backend,
+and zero unsupported operations. ProGPU composites the retained layer and base
+scene in two draws with no mask passes. The inspected side-by-side preserves
+all 768 overlap cells and measures 55.68 dB PSNR and 0.999721 SSIM; the small
+remaining differences are edge/color-rounding differences rather than missing
+layer content. Raw JSON, BGRA readbacks, PNGs, and the contact sheet are under
+`src/artifacts/performance/2026-08-23-color-matrix-layers/`.
+
+A 40-sample built-in WebGPU integration smoke completes the same forced layer
+workload with the same semantic hash and zero unsupported operations. Its
+blocking median is 3.7880 ms and completed-batch median is 2.84402 ms; these
+short-run values establish compatibility only and are not mixed into the
+balanced ProGPU/Skia table.
+
 ## Reproduction
 
 Build once with serial MSBuild:
@@ -448,7 +485,7 @@ dotnet Uno.UI.Composition.Backend.Benchmarks/bin/Release/net10.0/Uno.UI.Composit
 ```
 
 Repeat with `--backend skia`. Valid scenarios are `cached`, `sparse`, `text`,
-`paths`, `strokes`, `materials`, `images`, `clips`, and `effects`. Add
+`paths`, `strokes`, `materials`, `layers`, `images`, `clips`, and `effects`. Add
 `--force-redraw` to
 alternate target wrappers and disable retained populated-target reuse. Raw
 local artifacts for this run are under

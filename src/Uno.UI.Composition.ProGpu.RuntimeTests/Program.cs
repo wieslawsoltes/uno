@@ -96,6 +96,7 @@ await RunTransformedHostBackdropSmoke(factory);
 await RunEffectLayerBoundsSmoke(factory);
 await RunNestedEffectLayerBoundsSmoke(factory);
 await RunEffectPrimitiveBoundsSmoke(factory, geometryFactory);
+await RunColorMatrixLayerSmoke(factory);
 RunStablePresentCacheSmoke(device, factory);
 await RunNestedRecordClearSmoke(factory);
 await RunDefaultTrimSmoke(factory, geometryFactory);
@@ -134,6 +135,41 @@ static void RunProviderContextContractSmoke(ProGpuGraphicsProvider provider)
 	{
 		throw new InvalidOperationException(
 			"The ProGPU provider must negotiate exactly the typed WebGPU device context.");
+	}
+}
+
+static async Task RunColorMatrixLayerSmoke(ProGpuDrawingFactory factory)
+{
+	var swapRedAndBlue = factory.CreateColorMatrixColorFilter(
+	[
+		0, 0, 1, 0, 0,
+		0, 1, 0, 0, 0,
+		1, 0, 0, 0, 0,
+		0, 0, 0, 1, 0,
+	]);
+	using var texture = factory.RenderOffscreen(64, 64, drawing =>
+	{
+		drawing.Clear(Color.FromArgb(255, 10, 20, 30));
+		drawing.DrawRect(new Rect(4, 4, 12, 12), Color.FromArgb(255, 20, 220, 30));
+		drawing.SaveLayer(swapRedAndBlue);
+		drawing.DrawRect(new Rect(20, 16, 28, 32), Color.FromArgb(255, 240, 20, 10));
+		drawing.SaveLayer(swapRedAndBlue);
+		drawing.DrawRect(new Rect(28, 24, 12, 16), Color.FromArgb(255, 240, 20, 10));
+		drawing.Restore();
+		drawing.Restore();
+	});
+	var pixels = new byte[64 * 64 * 4];
+	(await factory.SnapshotAsync(texture)).CopyPixels(pixels);
+	var outside = Pixel(pixels, 8, 8);
+	var transformed = Pixel(pixels, 24, 32);
+	var nested = Pixel(pixels, 32, 32);
+	if (outside[1] < 200 || outside[0] > 50 || outside[2] > 50 ||
+		transformed[0] < 220 || transformed[1] > 50 || transformed[2] > 50 ||
+		transformed[3] < 245 ||
+		nested[2] < 220 || nested[0] > 50 || nested[1] > 50 || nested[3] < 245)
+	{
+		throw new InvalidOperationException(
+			$"Color-matrix layer lost isolation, nesting, or channel mapping: outside={Convert.ToHexString(outside)}, transformed={Convert.ToHexString(transformed)}, nested={Convert.ToHexString(nested)}.");
 	}
 }
 

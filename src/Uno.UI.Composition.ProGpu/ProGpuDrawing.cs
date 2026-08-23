@@ -593,6 +593,11 @@ internal class ProGpuDrawingSession : IDrawingSession
 			Context.PushBlendMode(ToBlend(blend));
 			return;
 		}
+		if (colorFilter is ProGpuColorFilter { Matrix: { Length: >= 20 } matrix })
+		{
+			BeginEffectLayer(new ColorMatrixEffect(Matrix(matrix)));
+			return;
+		}
 		Unsupported(nameof(SaveLayer));
 		Save();
 	}
@@ -606,6 +611,11 @@ internal class ProGpuDrawingSession : IDrawingSession
 			return;
 		}
 
+		BeginEffectLayer(effect);
+	}
+
+	private void BeginEffectLayer(EffectBase effect)
+	{
 		var parent = Context;
 		var recorder = new GpuPictureRecorder();
 		PushState(Scope.EffectLayer, new EffectLayer(parent, recorder, effect, _effectContentBounds));

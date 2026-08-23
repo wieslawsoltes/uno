@@ -57,7 +57,7 @@ internal sealed record BenchmarkOptions(
 		var backend = Value("--backend", "progpu").ToLowerInvariant();
 		if (backend is not ("progpu" or "webgpu" or "skia")) throw new ArgumentException("--backend must be progpu, webgpu, or skia.");
 		var scenario = Value("--scenario", "cached").ToLowerInvariant();
-		if (scenario is not ("cached" or "sparse" or "text" or "paths" or "strokes" or "materials" or "images" or "clips" or "effects")) throw new ArgumentException("--scenario must be cached, sparse, text, paths, strokes, materials, images, clips, or effects.");
+		if (scenario is not ("cached" or "sparse" or "text" or "paths" or "strokes" or "materials" or "layers" or "images" or "clips" or "effects")) throw new ArgumentException("--scenario must be cached, sparse, text, paths, strokes, materials, layers, images, clips, or effects.");
 		var warmups = int.Parse(Value("--warmups", "4"), CultureInfo.InvariantCulture);
 		var samples = int.Parse(Value("--samples", "100"), CultureInfo.InvariantCulture);
 		var batchSize = int.Parse(Value("--batch-size", "60"), CultureInfo.InvariantCulture);
@@ -96,6 +96,7 @@ internal sealed class BenchmarkHarness : IDisposable
 	private readonly IGeometry _path;
 	private readonly IGeometry[] _strokes;
 	private readonly IShader[] _materials;
+	private readonly IColorFilter? _colorMatrixLayer;
 	private readonly ITexture _image;
 	private readonly IReadOnlyList<GlyphRunElement> _text;
 	private readonly IEffectFilter? _backdropBlur;
@@ -119,6 +120,15 @@ internal sealed class BenchmarkHarness : IDisposable
 		_path = CreatePath();
 		_strokes = CreateStrokes();
 		_materials = options.Scenario == "materials" ? CreateMaterials() : [];
+		_colorMatrixLayer = options.Scenario == "layers"
+			? _factory.CreateColorMatrixColorFilter(
+			[
+				0.15f, 0.15f, 0.70f, 0, 0,
+				0.20f, 0.75f, 0.05f, 0, 0,
+				0.65f, 0.10f, 0.25f, 0, 0,
+				0, 0, 0, 0.85f, 0,
+			])
+			: null;
 		_image = CreateImage();
 		_text = CreateText();
 		if (options.Scenario == "effects")
@@ -262,6 +272,29 @@ internal sealed class BenchmarkHarness : IDisposable
 					recorder.RestoreToCount(restore);
 				}
 			}
+		}
+
+		if (_options.Scenario == "layers")
+		{
+			recorder.SaveLayer(_colorMatrixLayer!);
+			for (var y = 0; y < 24; y++)
+			{
+				for (var x = 0; x < 32; x++)
+				{
+					var left = x * 40 + 3;
+					var top = y * 30 + 2;
+					recorder.DrawRoundedRect(
+						new Rect(left, top, 32, 24),
+						new Vector4(5),
+						Color.FromArgb(190, (byte)(235 - x * 4), (byte)(45 + y * 7), 150),
+						true);
+					recorder.DrawRect(
+						new Rect(left + 12, top + 7, 22, 14),
+						Color.FromArgb(145, 35, (byte)(100 + x * 4), (byte)(235 - y * 6)),
+						true);
+				}
+			}
+			recorder.Restore();
 		}
 
 		if (_options.Scenario == "images")
@@ -680,6 +713,7 @@ internal sealed class BenchmarkHarness : IDisposable
 			"effects" => "|effectCards=12|sourceReplay=true",
 			"strokes" => "|strokes=1000|styles=4|analyticArcs=true|dashes=true",
 			"materials" => "|materials=768|linear=4|radial=4|duplicateStops=true|focal=true|anisotropic=true",
+			"layers" => "|colorMatrixLayers=1|layerPrimitives=1536|overlap=true|alphaTransform=true",
 			_ => string.Empty,
 		};
 		var bytes = Encoding.UTF8.GetBytes($"v2|clear=FF080C14|retainedRows=24|{_options.Scenario}|{Width}|{Height}|768|{(_options.Scenario == "text" ? 128 : 0)}|{(_options.Scenario == "paths" ? 1000 : 0)}|{(_options.Scenario == "images" ? 240 : 0)}{extension}");
