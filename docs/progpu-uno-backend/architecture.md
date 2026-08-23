@@ -134,6 +134,7 @@ The backend maps Uno operations as follows:
 | linear/radial shader | ProGPU gradient brush with tile/local transform |
 | image | same-device `GpuTexture` + source/destination mapping |
 | save/restore | balanced retained transform/clip/blend scopes |
+| unfiltered layer | retained source-only effect surface + one source-over composite |
 | blend layer | retained source-only effect surface + one final ProGPU blend operation |
 | shadow | ProGPU GPU shadow/effect pipeline |
 | backdrop effect | compiled ProGPU backdrop/image-effect parameters |
@@ -175,14 +176,17 @@ foreign drawing session.
 
 The initial effect compiler recognizes source blur and the backdrop material
 shapes needed by Uno's backdrop recipe. Image color matrices and `SrcIn` tint
-use ProGPU's image-effect pipeline. Blur, drop-shadow, color-matrix, and blend
-`SaveLayer` calls record a nested `GpuPicture` and composite it through a
-retained effect visual, so the operation sees the complete layer exactly once
-as an isolated source. Color-matrix and blend visuals retain only their source
-surface. A blend layer commits preceding destination content before switching
-blend state, renders the subtree without contaminating its internal primitive
-composition, then applies the requested mode once while restoring the prior
-state. No effect rewrites individual brushes or reads pixels back to the CPU.
+use ProGPU's image-effect pipeline. Unfiltered, blur, drop-shadow, color-matrix,
+and blend `SaveLayer` calls record a nested `GpuPicture` and composite it
+through a retained effect visual, so the operation sees the complete layer
+exactly once as an isolated source. Parameterless `SaveLayer()` uses a
+source-over blend visual; this contains clipped transparent clears instead of
+applying them directly to the destination. Color-matrix and blend visuals
+retain only their source surface. A blend layer commits preceding destination
+content before switching blend state, renders the subtree without contaminating
+its internal primitive composition, then applies the requested mode once while
+restoring the prior state. No effect rewrites individual brushes or reads
+pixels back to the CPU.
 Other neutral DAGs return `null` from `CreateEffectFilter`, activating Uno's
 documented recipe path. Calling an unsupported drawing operation records a
 named diagnostic and, by default, throws. No Skia fallback occurs. Arbitrary

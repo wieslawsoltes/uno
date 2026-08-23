@@ -40,6 +40,7 @@ produce the same final state.
 | strokes | 1,000 analytic arc/Bézier strokes across solid/dashed cap and join styles | native stroke compilation, quality, and retained replay |
 | materials | 768 linear/radial gradients spanning focal, anisotropic, spread, local-matrix, and duplicate-stop cases | material batching and shader fidelity |
 | layers | one retained color-matrix layer containing 1,536 overlapping opaque/translucent primitives and a non-identity alpha row | subtree isolation, effect-texture reuse, and whole-layer shader cost |
+| isolation-layers | one unfiltered source-over layer containing a clipped transparent clear and 1,536 overlapping opaque primitives over gray | destination isolation, clear containment, restoration, and retained effect-surface reuse |
 | blend-layers | one retained Multiply layer containing 1,536 opaque overlapping primitives over a gray destination | once-per-layer composition versus incorrect per-primitive blending |
 | images | retained image grid plus one changed upload | texture residency/upload cost |
 | effects | shadows, blur, color matrix, backdrop | pass graph and bandwidth cost |
@@ -170,10 +171,10 @@ remain the authority if a summary or interpretation changes.
 
 ## 11. Current harness and artifacts
 
-`src/Uno.UI.Composition.Backend.Benchmarks` implements eleven steady
+`src/Uno.UI.Composition.Backend.Benchmarks` implements twelve steady
 micro-scenarios (`cached`, `sparse`, `text`, `paths`, `strokes`, `materials`,
-`layers`, `blend-layers`, `images`, `clips`, and `effects`) for ProGPU, Uno WebGPU where
-supported, and Uno software Skia. Every
+`layers`, `isolation-layers`, `blend-layers`, `images`, `clips`, and `effects`)
+for ProGPU, Uno WebGPU where supported, and Uno software Skia. Every
 frame explicitly clears the target; this prevents translucent antialiasing,
 paths, images, and effects from accumulating across samples. GPU lanes use
 `wgpuDevicePoll(wait=true)` only in the separate completion boundary.
@@ -198,6 +199,13 @@ and scales the already-composited alpha, making whole-subtree isolation
 observable: applying the matrix independently to each primitive does not
 produce the same overlap pixels. Stable replays additionally exercise retained
 effect-surface reuse without permitting final-target reuse in forced mode.
+
+The `isolation-layers` workload starts with an opaque gray destination, opens
+an unfiltered `SaveLayer`, clips it to the target, clears the isolated source to
+transparent, and records 1,536 overlapping opaque primitives. Correct output
+preserves gray in every undrawn gap when the layer is restored. Treating
+`SaveLayer()` as a state-only save instead clears those gaps on the destination
+and fails both the focused pixel assertion and the final-target readback gate.
 
 The `blend-layers` workload records 1,536 opaque overlapping primitives inside
 one Multiply `SaveLayer` over an opaque gray destination. Correct output

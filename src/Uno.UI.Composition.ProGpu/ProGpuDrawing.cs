@@ -584,7 +584,8 @@ internal class ProGpuDrawingSession : IDrawingSession
 		_clipBounds = state.ClipBounds;
 	}
 	public void RestoreToCount(int count) { if (count < 1 || count > SaveCount) throw new ArgumentOutOfRangeException(nameof(count)); while (SaveCount > count) Restore(); }
-	public void SaveLayer(bool antialias = false) => Save();
+	public void SaveLayer(bool antialias = false) =>
+		BeginEffectLayer(new BlendModeEffect(GpuBlendMode.SrcOver));
 	public void SaveLayer(IColorFilter colorFilter, bool antialias = false)
 	{
 		if (colorFilter is ProGpuColorFilter { Blend: { } blend })

@@ -43,9 +43,9 @@ and shadow-only effects, prompt retirement of detached effect textures, and
 in-place merging of compact retained-page draw calls. Identity-only picture
 recordings now share their immutable command storage directly, and explicit
 completion waits advance the bounded submission-drain accounting. Retained
-target stamps prevent unchanged output submission. Color matrices and blend
-modes can now be applied once to isolated visual subtrees through retained GPU
-effect paths.
+target stamps prevent unchanged output submission. Unfiltered source-over
+layers, color matrices, and blend modes can now isolate complete visual
+subtrees through retained GPU effect paths.
 
 ## Non-negotiable invariants
 

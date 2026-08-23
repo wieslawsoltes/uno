@@ -41,6 +41,7 @@
 | a direct stroke must reach the renderer as its authored centerline | root-cause fix | defer stroke-fill materialization, map the complete style to a native ProGPU pen, and lazily widen only for fill-region consumers such as clips, bounds, hit testing, trims, streams, and foreign backends |
 | a color-filter layer must transform the already-composited subtree exactly once | root-cause fix | record one nested picture, cache it as a ProGPU visual source surface, and apply the 4x5 matrix through the GPU image-effect shader at layer restore |
 | a blend-mode layer must combine with the destination after its subtree is composited | root-cause fix | retain one source-only effect surface, commit earlier destination draws before changing blend state, apply the requested mode exactly once, and restore the prior state |
+| a parameterless layer must isolate a clipped transparent clear from the destination | root-cause fix | route `SaveLayer()` through a retained source-over blend effect so clear and content are recorded on one source surface before restoration composites it once |
 
 Arbitrary/non-uniform geometry, masks, hit testing, unsupported draw commands,
 volatile variants, and stale atlas generations fail closed to normal
@@ -100,6 +101,12 @@ macOS CI job; it passed in the complete local rerun, in isolation, and in five
 consecutive post-merge reruns. The unrelated CI retry is tracked separately and
 is not counted as positive evidence for this revision.
 
+The final merged dependency run is green across all 26 jobs: managed builds and
+tests on macOS, Linux, and Windows; retained compositor, text, image-parity, and
+native Dawn contracts; C++ compiler/browser/native-renderer lanes; portable and
+mobile packaging; and native package consumers on all six OS/architecture
+combinations.
+
 ## Runtime and visual validation
 
 The focused real-device executable covers typed context negotiation,
@@ -109,7 +116,8 @@ compatibility, and zero unsupported operations. It also verifies HostBackdrop
 blur/capture, foreground ordering, translated and nested effect-layer bounds,
 shadow-only source omission, gradient/non-uniform-rounded/border/path/stroke/
 line/image/color-filtered-image/nine-slice content-bound propagation, isolated
-and nested color-matrix layers, isolated Multiply-layer overlap,
+and nested color-matrix layers, unfiltered clipped-clear isolation, isolated
+Multiply-layer overlap,
 rounded-outer/rectangular-hole clip restoration,
 and the conditional present/blit route. Its final
 Release run reports:
@@ -283,6 +291,26 @@ effects throughput benchmark.
   Its timing is excluded from performance claims; this is direct evidence that
   semantic hashes and unsupported-operation counters are necessary but not
   sufficient correctness gates.
+- Three fresh forced-redraw unfiltered-isolation-layer pairs cover a clipped
+  transparent clear and 1,536 opaque overlapping primitives over gray. ProGPU
+  is 5.14× faster at median blocking total and 23.47× faster at completed-batch
+  throughput; all runs retain semantic hash `AD6F2629...BD67`, stable backend
+  hashes, zero unsupported operations, exact alpha, three ProGPU draws, and no
+  mask passes. The inspected output measures 50.65 dB mean per-channel RGB
+  PSNR and 0.999293 RGB SSIM against Skia. The real-device smoke separately
+  proves that an undrawn clipped gap retains the destination and that drawing
+  after restore returns to source-over.
+- The failed-before diagnostic read the isolation gap as transparent, emitted
+  1,539 draws, and measured 10.58 dB PSNR / 0.417786 RGB SSIM against Skia.
+  The built-in WebGPU compatibility smoke preserves the fixed semantics at
+  41.14 dB PSNR / 0.993500 RGB SSIM; its short timing distribution is not used
+  as a qualification claim.
+- A final source rebuild from gitlink `64271d7f` completed the runtime and
+  benchmark dependency graphs with zero warnings or errors. The real-device
+  smoke passed at frame 12, and a fresh short ProGPU/Skia isolation pair
+  preserved semantic hash `AD6F2629...BD67`, pixel hashes
+  `DC65A307...9996` / `CDAFE4F7...CF9D`, three ProGPU draws, zero masks, and
+  zero unsupported operations.
 - Uno's built-in WebGPU lane completes 40-sample forced-redraw smokes for the
   stroke and material scenarios with zero unsupported operations. Its blocking medians are
   17.1597 ms for strokes and 8.6350 ms for materials; balanced eight-process

@@ -57,7 +57,7 @@ internal sealed record BenchmarkOptions(
 		var backend = Value("--backend", "progpu").ToLowerInvariant();
 		if (backend is not ("progpu" or "webgpu" or "skia")) throw new ArgumentException("--backend must be progpu, webgpu, or skia.");
 		var scenario = Value("--scenario", "cached").ToLowerInvariant();
-		if (scenario is not ("cached" or "sparse" or "text" or "paths" or "strokes" or "materials" or "layers" or "blend-layers" or "images" or "clips" or "effects")) throw new ArgumentException("--scenario must be cached, sparse, text, paths, strokes, materials, layers, blend-layers, images, clips, or effects.");
+		if (scenario is not ("cached" or "sparse" or "text" or "paths" or "strokes" or "materials" or "layers" or "isolation-layers" or "blend-layers" or "images" or "clips" or "effects")) throw new ArgumentException("--scenario must be cached, sparse, text, paths, strokes, materials, layers, isolation-layers, blend-layers, images, clips, or effects.");
 		var warmups = int.Parse(Value("--warmups", "4"), CultureInfo.InvariantCulture);
 		var samples = int.Parse(Value("--samples", "100"), CultureInfo.InvariantCulture);
 		var batchSize = int.Parse(Value("--batch-size", "60"), CultureInfo.InvariantCulture);
@@ -301,6 +301,32 @@ internal sealed class BenchmarkHarness : IDisposable
 		{
 			recorder.DrawRect(new Rect(0, 0, Width, Height), Color.FromArgb(255, 128, 128, 128));
 			recorder.SaveLayer(BlendMode.Multiply);
+			for (var y = 0; y < 24; y++)
+			{
+				for (var x = 0; x < 32; x++)
+				{
+					var left = x * 40 + 2;
+					var top = y * 30 + 2;
+					recorder.DrawRoundedRect(
+						new Rect(left, top, 28, 24),
+						new Vector4(5),
+						Color.FromArgb(255, (byte)(235 - x * 4), (byte)(35 + y * 7), 70),
+						true);
+					recorder.DrawRect(
+						new Rect(left + 12, top + 6, 24, 16),
+						Color.FromArgb(255, 35, (byte)(105 + x * 4), (byte)(235 - y * 6)),
+						true);
+				}
+			}
+			recorder.Restore();
+		}
+
+		if (_options.Scenario == "isolation-layers")
+		{
+			recorder.DrawRect(new Rect(0, 0, Width, Height), Color.FromArgb(255, 128, 128, 128));
+			recorder.SaveLayer();
+			recorder.ClipRect(new Rect(0, 0, Width, Height), antialias: true);
+			recorder.Clear(Color.FromArgb(0, 0, 0, 0));
 			for (var y = 0; y < 24; y++)
 			{
 				for (var x = 0; x < 32; x++)
@@ -738,6 +764,7 @@ internal sealed class BenchmarkHarness : IDisposable
 			"strokes" => "|strokes=1000|styles=4|analyticArcs=true|dashes=true",
 			"materials" => "|materials=768|linear=4|radial=4|duplicateStops=true|focal=true|anisotropic=true",
 			"layers" => "|colorMatrixLayers=1|layerPrimitives=1536|overlap=true|alphaTransform=true",
+			"isolation-layers" => "|isolationLayers=1|layerPrimitives=1536|transparentClear=true|opaqueOverlap=true",
 			"blend-layers" => "|blendLayers=1|blendMode=multiply|layerPrimitives=1536|opaqueOverlap=true",
 			_ => string.Empty,
 		};

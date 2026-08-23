@@ -5,8 +5,8 @@
 The primary result is an eight-pair, alternating fresh-process comparison of
 the Uno ProGPU and software-Skia drawing backends. It covers the seven primary
 qualification scenarios; later sections add retained-output, native-stroke,
-gradient-material, color-matrix-layer, and blend-mode-layer follow-ups. Every process renders the
-same semantic state,
+gradient-material, color-matrix-layer, unfiltered-isolation-layer, and
+blend-mode-layer follow-ups. Every process renders the same semantic state,
 reports zero unsupported operations, reads back the final target, and preserves
 its raw timing distribution.
 
@@ -484,6 +484,53 @@ therefore diagnostic values only. Completion and an empty unsupported counter
 do not establish visual conformance. Image metrics were recomputed from the
 stored PNGs with scikit-image 0.26.0 (`data_range=255`, RGB channels only).
 
+## Unfiltered source-over layer follow-up
+
+Uno uses parameterless `SaveLayer()` for composition masks and for isolated
+multi-region drawing. The adapter previously mapped it to `Save()`, which
+preserved only transform/clip state and allowed a transparent clear inside the
+scope to erase the destination. The focused real-device reproduction starts
+with opaque gray, clips the layer, clears its source to transparent, draws
+overlapping red/green content, restores, and draws a following blue primitive.
+Before the fix, the undrawn clipped gap read back as `00000000` instead of gray.
+The root-cause correction routes the parameterless operation through ProGPU's
+retained source-over blend effect, isolating the complete subtree before one
+final composite.
+
+The `isolation-layers` workload records one clipped transparent clear and
+1,536 opaque overlapping primitives inside the unfiltered layer. Three
+alternating fresh-process pairs used six warmups, 200 blocking samples, and
+seven 60-frame batches:
+
+| Boundary | ProGPU process-median | Skia process-median | speedup | paired range |
+|---|---:|---:|---:|---:|
+| blocking total | 0.510700 ms | 2.623800 ms | 5.14× | 3.81×–5.20× |
+| CPU frame | 0.062900 ms | 2.623800 ms | 41.71× | 41.33×–42.65× |
+| completed batch/frame | 0.112073 ms | 2.630628 ms | 23.47× | 23.46×–23.80× |
+| batched CPU/frame | 0.079242 ms | 2.630627 ms | 33.20× | 32.60×–33.42× |
+
+Every process reports semantic hash `AD6F2629...BD67`, stable ProGPU pixel hash
+`DC65A307...9996`, stable Skia pixel hash `CDAFE4F7...CF9D`, zero unsupported
+operations, and exact alpha. ProGPU emits three draws and no mask passes. The
+visually inspected 768-cell outputs align across all cells and measure 50.65 dB
+mean per-channel RGB PSNR and 0.999293 RGB SSIM. The pre-fix diagnostic emitted
+1,539 draws, measured 2.8352 ms blocking, and produced only 10.58 dB PSNR,
+0.417786 RGB SSIM, and non-exact alpha; after isolation the retained scene
+collapses to three draws while restoring correct destination pixels.
+
+A 40-sample built-in WebGPU compatibility smoke preserves the same semantic
+state with zero unsupported operations, exact alpha, 41.14 dB mean per-channel
+RGB PSNR, and 0.993500 RGB SSIM against Skia. Its 3.5126 ms blocking median and
+1.740095 ms completed-batch median are diagnostic only, not a balanced timing
+distribution. Raw JSON, BGRA readbacks, PNGs, and the inspected contact sheet
+are under `src/artifacts/performance/2026-08-23-isolation-layers/`.
+
+A final source rebuild from gitlink `64271d7f` completed both harness graphs
+with zero warnings or errors. The real-device smoke passed at frame 12, and a
+fresh short ProGPU/Skia pair preserved semantic hash `AD6F2629...BD67`, pixel
+hashes `DC65A307...9996` / `CDAFE4F7...CF9D`, three ProGPU draws, zero mask
+passes, and zero unsupported operations.
+
 ## Reproduction
 
 Build once with serial MSBuild:
@@ -525,8 +572,8 @@ dotnet Uno.UI.Composition.Backend.Benchmarks/bin/Release/net10.0/Uno.UI.Composit
 ```
 
 Repeat with `--backend skia`. Valid scenarios are `cached`, `sparse`, `text`,
-`paths`, `strokes`, `materials`, `layers`, `blend-layers`, `images`, `clips`, and `effects`. Add
-`--force-redraw` to
+`paths`, `strokes`, `materials`, `layers`, `isolation-layers`, `blend-layers`,
+`images`, `clips`, and `effects`. Add `--force-redraw` to
 alternate target wrappers and disable retained populated-target reuse. Raw
 local artifacts for this run are under
 `src/artifacts/performance/2026-08-23-retained-eligibility/`; the
