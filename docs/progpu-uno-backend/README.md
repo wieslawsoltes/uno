@@ -3,7 +3,10 @@
 Status: working macOS/Metal implementation and qualification branch,
 2026-08-23. The backend negotiates Uno's WebGPU host context, presents the
 SamplesApp through ProGPU, passes the focused real-device smoke test, and has a
-correctness-gated v3 benchmark matrix. The remaining qualification gaps are
+correctness-gated v3 benchmark matrix. A three-pair, fifteen-scenario
+GPU-to-GPU qualification now compares ProGPU/Metal with Uno's real Skia/Metal
+`GRContext` path and records separate CPU-submit and GPU-completion boundaries.
+The remaining qualification gaps are
 listed in [capabilities.md](capabilities.md); this status does not claim
 cross-platform or full effect/layer conformance.
 

@@ -1,5 +1,75 @@
 # Correctness-gated renderer results — 2026-08-23
 
+## GPU-to-GPU Metal qualification
+
+The current like-for-like GPU comparison is three alternating fresh-process
+pairs of ProGPU/Metal and Skia/Metal on the same Apple M3 Pro. Both backends
+render to retained 1280x720 premultiplied BGRA8 Metal textures. ProGPU uses
+wgpu-native's Metal backend. Skia receives Uno's `IMetalDeviceContext`, creates
+its normal Metal `GRContext`, flushes the frame, and is fenced by an empty
+command buffer committed to the same `MTLCommandQueue`. Pixel readback occurs
+after GPU completion and outside the timed region.
+
+Each ordinary scenario used 6 warmups, 100 blocking samples, and 7 batches of
+60 frames. `effects` used 4 warmups, 40 blocking samples, and 3 batches of 20.
+The values below are medians of the three process medians. Batch speedup is the
+median of the three same-index Skia/ProGPU ratios; its range shows all three
+pairs.
+
+| Scenario | ProGPU completed batch/frame | Skia/Metal completed batch/frame | paired speedup (range) | ProGPU blocking total | Skia/Metal blocking total | total speedup |
+|---|---:|---:|---:|---:|---:|---:|
+| cached | 0.001245 ms | 0.275845 ms | 223.33x (210.95x-252.30x) | 0.0032 ms | 0.5440 ms | 152.05x |
+| sparse | 0.172092 ms | 0.273382 ms | 1.57x (1.37x-1.72x) | 0.4293 ms | 0.5271 ms | 1.23x |
+| text | 0.001180 ms | 0.489477 ms | 414.81x (390.87x-444.68x) | 0.0035 ms | 0.9920 ms | 304.14x |
+| paths | 0.001082 ms | 0.693403 ms | 641.05x (561.67x-645.17x) | 0.0033 ms | 1.0175 ms | 303.48x |
+| strokes | 0.001208 ms | 1.939457 ms | 1,605.03x (1,543.33x-1,882.23x) | 0.0032 ms | 2.8183 ms | 879.13x |
+| materials | 0.001118 ms | 1.234307 ms | 1,103.70x (999.05x-1,131.19x) | 0.0032 ms | 1.5357 ms | 505.66x |
+| layers | 0.001205 ms | 0.826900 ms | 686.22x (656.55x-690.04x) | 0.0035 ms | 1.2625 ms | 364.54x |
+| isolation layers | 0.001247 ms | 0.830947 ms | 665.53x (649.06x-685.79x) | 0.0032 ms | 1.3513 ms | 425.94x |
+| mask layers | 0.001238 ms | 0.827257 ms | 669.17x (634.65x-706.05x) | 0.0034 ms | 1.3672 ms | 369.51x |
+| blend layers | 0.001212 ms | 0.832727 ms | 684.46x (666.18x-715.31x) | 0.0032 ms | 1.4485 ms | 452.66x |
+| blend corpus | 0.002952 ms | 4.047865 ms | 1,337.20x (1,280.08x-1,371.38x) | 0.0044 ms | 5.2236 ms | 1,187.18x |
+| images | 0.001160 ms | 0.406012 ms | 350.01x (294.99x-377.62x) | 0.0034 ms | 0.6467 ms | 190.21x |
+| clips | 0.001225 ms | 1.522812 ms | 1,243.11x (1,234.76x-1,263.37x) | 0.0033 ms | 2.1475 ms | 696.00x |
+| shadows | 0.007932 ms | 0.458542 ms | 57.81x (55.29x-61.55x) | 0.0102 ms | 0.9300 ms | 86.11x |
+| effects | 2.109830 ms | 6.077170 ms | 2.81x (2.81x-2.91x) | 2.4104 ms | 8.2955 ms | 3.41x |
+
+ProGPU wins completed-batch throughput and synchronized blocking total in all
+15 scenarios. It also wins the CPU-submit boundary in every scenario. The
+narrowest GPU-to-GPU margin is the intentionally mutating `sparse` workload;
+the effects workload remains 2.81x faster after both queues are completed.
+Very large retained-scene ratios are real for this harness but should be read
+as integration-path results: ProGPU can reuse an unchanged retained target,
+whereas the Skia drawing contract still replays and flushes the recorded scene.
+
+The first pair retained BGRA readbacks for the GPU-specific pixel gate. All
+alpha bytes match exactly, semantic hashes match per scenario, and both cached
+and sparse frames are byte-identical. RGB differences against Skia/Metal are:
+
+| Scenario | RGB MAE | Max | PSNR |
+|---|---:|---:|---:|
+| text | 0.910325 | 105 | 33.892 dB |
+| paths | 0.356533 | 54 | 41.052 dB |
+| strokes | 0.674864 | 151 | 35.553 dB |
+| materials | 4.507509 | 199 | 28.112 dB |
+| layers | 0.070465 | 4 | 59.503 dB |
+| isolation layers | 0.018131 | 3 | 63.342 dB |
+| mask layers | 0.038623 | 6 | 59.119 dB |
+| blend layers | 0.021881 | 3 | 61.981 dB |
+| blend corpus | 0.061682 | 18 | 58.651 dB |
+| images | 0.115367 | 1 | 57.510 dB |
+| clips | 0.455348 | 76 | 41.520 dB |
+| shadows | 0.357339 | 66 | 43.805 dB |
+| effects | 3.473563 | 56 | 31.988 dB |
+
+All 90 JSON artifacts satisfy the v3 schema invariants used by the harness:
+1280x720 target, 64-digit semantic and pixel hashes, and zero unsupported
+operations. Raw local JSON/readbacks are under
+`src/artifacts/performance/2026-08-23-gpu-vs-gpu-matrix/`. The historical
+software-Skia qualification remains below because it is useful for separating
+Skia CPU raster cost from Skia's GPU integration cost; it is not the basis for
+the GPU-to-GPU claim.
+
 ## Scope
 
 The primary result is an eight-pair, alternating fresh-process comparison of
@@ -759,7 +829,9 @@ dotnet Uno.UI.Composition.Backend.Benchmarks/bin/Release/net10.0/Uno.UI.Composit
   --pixels-output artifacts/performance/progpu-effects.bgra
 ```
 
-Repeat with `--backend skia`. Valid scenarios are `cached`, `sparse`, `text`,
+Repeat with `--backend skia` for software Skia or, on macOS, with
+`--backend skia-metal` for the real Skia `GRContext` Metal path. Valid
+scenarios are `cached`, `sparse`, `text`,
 `paths`, `strokes`, `materials`, `layers`, `isolation-layers`, `mask-layers`,
 `blend-layers`, `blend-corpus`, `images`, `clips`, `shadows`, and `effects`. Add
 `--force-redraw` to

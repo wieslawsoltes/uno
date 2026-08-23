@@ -23,7 +23,7 @@ build configuration, exact commands, and raw artifact paths.
 | 2 — drawing core | working vertical slice | real-device smoke, SamplesApp present, analytic clip-hole and broad effect-bound corpus; arbitrary effect DAG isolation remains |
 | 3 — content stack | implemented vertical slice | ProGPU geometry/font/shaping/direct glyph path plus neutral managed image/SVG adapters; full corpus remains |
 | 4 — application correctness | partially qualified | SamplesApp loads and presents 1,413-sample catalog; systematic sample/pixel sweep remains |
-| 5 — benchmarks | primary pair qualified | v3 stage timing, target readback, fifteen scenarios including analytic strokes, gradient materials, isolated color-matrix layers, unfiltered source-over isolation, destination-in composition masks, single-mode blend layers, a 27-mode blend corpus, and anisotropic/additive shadows; eight alternating ProGPU/Skia process pairs for the primary seven, three-pair stroke/material/color-matrix/unfiltered/mask/blend/all-mode/shadow follow-ups, and an eight-pair retained-presentation follow-up; the earlier Uno WebGPU lane, startup/scrolling/memory scenarios, and cross-framework ports remain |
+| 5 — benchmarks | software and macOS GPU pairs qualified | v3 stage timing, target readback, fifteen scenarios including analytic strokes, gradient materials, isolated color-matrix layers, unfiltered source-over isolation, destination-in composition masks, single-mode blend layers, a 27-mode blend corpus, and anisotropic/additive shadows; eight alternating ProGPU/software-Skia process pairs for the primary seven, focused follow-ups, and three alternating ProGPU/Metal versus Skia/Metal pairs across all fifteen scenarios with explicit GPU completion; the Uno built-in WebGPU promotion, startup/scrolling/memory scenarios, and cross-framework ports remain |
 | 6 — hardening | open | Windows/Linux/browser, device loss, AOT/trimming, leak and long-running stress |
 
 ## Mandatory managed/native optimization gate
@@ -140,6 +140,9 @@ pixel/metric tolerances.
   text miss, image upload, path stress, effects stress, scrolling, and
   control-density scenarios.
 - Run Skia, Uno WebGPU, and ProGPU through identical Uno application state.
+- On macOS, qualify Skia's real Metal `GRContext` and ProGPU's wgpu-native
+  Metal path against retained BGRA8 GPU textures with ordered completion
+  fences; keep software Skia as a separately labeled diagnostic lane.
 - Run equivalent semantic workloads in ProGPU WinUI and ProGPU Avalonia for
   integration-overhead context.
 - Use the C++ UI gate methodology for paired process ordering, completion,

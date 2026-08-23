@@ -55,7 +55,7 @@ internal sealed record BenchmarkOptions(
 			return index >= 0 && index + 1 < args.Length ? args[index + 1] : fallback;
 		}
 		var backend = Value("--backend", "progpu").ToLowerInvariant();
-		if (backend is not ("progpu" or "webgpu" or "skia")) throw new ArgumentException("--backend must be progpu, webgpu, or skia.");
+		if (backend is not ("progpu" or "webgpu" or "skia" or "skia-metal")) throw new ArgumentException("--backend must be progpu, webgpu, skia, or skia-metal.");
 		var scenario = Value("--scenario", "cached").ToLowerInvariant();
 		if (scenario is not ("cached" or "sparse" or "text" or "paths" or "strokes" or "materials" or "layers" or "isolation-layers" or "mask-layers" or "blend-layers" or "blend-corpus" or "images" or "clips" or "shadows" or "effects")) throw new ArgumentException("--scenario must be cached, sparse, text, paths, strokes, materials, layers, isolation-layers, mask-layers, blend-layers, blend-corpus, images, clips, shadows, or effects.");
 		var warmups = int.Parse(Value("--warmups", "4"), CultureInfo.InvariantCulture);
@@ -148,6 +148,18 @@ internal sealed class BenchmarkHarness : IDisposable
 
 	internal static BenchmarkHarness Create(BenchmarkOptions options)
 	{
+		if (options.Backend == "skia-metal")
+		{
+			if (!OperatingSystem.IsMacOS())
+			{
+				throw new PlatformNotSupportedException("The skia-metal benchmark backend requires macOS.");
+			}
+
+			var context = MetalContext.Create(Width, Height);
+			var skiaFactory = new SkiaGraphicsProvider(GraphicsContextKind.Metal).CreateGraphics(context);
+			return new BenchmarkHarness(options, context, null, skiaFactory, context.Target);
+		}
+
 		if (options.Backend == "skia")
 		{
 			var context = new SoftwareContext();
@@ -175,7 +187,9 @@ internal sealed class BenchmarkHarness : IDisposable
 
 		var totalSamples = new double[_options.Samples];
 		var cpuFrameSamples = new double[_options.Samples];
-		var completionWaitSamples = _device is null ? null : new double[_options.Samples];
+		var completionWaitSamples = _device is null && _target is not IMetalRenderTarget
+			? null
+			: new double[_options.Samples];
 		var proGpuSamples = _options.Backend == "progpu" ? new ProGpuMetricCollector(_options.Samples) : null;
 		for (var i = 0; i < totalSamples.Length; i++)
 		{
@@ -582,6 +596,19 @@ internal sealed class BenchmarkHarness : IDisposable
 			total.Stop();
 			return new FrameTiming(total.Elapsed.TotalMilliseconds, cpuFrame.Elapsed.TotalMilliseconds, completion.Elapsed.TotalMilliseconds, metrics);
 		}
+		if (_target is IMetalRenderTarget metal)
+		{
+			using (var present = ((IDrawingFactory<IMetalRenderTarget>)_factory).BeginPresent(metal))
+			{
+				record.Record.Replay(present);
+			}
+			cpuFrame.Stop();
+			var completion = Stopwatch.StartNew();
+			WaitForGpu();
+			completion.Stop();
+			total.Stop();
+			return new FrameTiming(total.Elapsed.TotalMilliseconds, cpuFrame.Elapsed.TotalMilliseconds, completion.Elapsed.TotalMilliseconds, null);
+		}
 
 		using (var present = ((IDrawingFactory<ISoftwareRenderTarget>)_factory).BeginPresent((ISoftwareRenderTarget)_target))
 		{
@@ -600,7 +627,9 @@ internal sealed class BenchmarkHarness : IDisposable
 		}
 
 		var cpuPerFrame = new double[_options.Batches];
-		var completionPerBatch = _device is null ? null : new double[_options.Batches];
+		var completionPerBatch = _device is null && _target is not IMetalRenderTarget
+			? null
+			: new double[_options.Batches];
 		var totalPerFrame = new double[_options.Batches];
 		for (var batch = 0; batch < _options.Batches; batch++)
 		{
@@ -663,6 +692,12 @@ internal sealed class BenchmarkHarness : IDisposable
 			record.Record.Replay(present);
 			return;
 		}
+		if (_target is IMetalRenderTarget metal)
+		{
+			using var metalPresent = ((IDrawingFactory<IMetalRenderTarget>)_factory).BeginPresent(metal);
+			record.Record.Replay(metalPresent);
+			return;
+		}
 
 		using var softwarePresent = ((IDrawingFactory<ISoftwareRenderTarget>)_factory).BeginPresent((ISoftwareRenderTarget)_target);
 		record.Record.Replay(softwarePresent);
@@ -690,12 +725,17 @@ internal sealed class BenchmarkHarness : IDisposable
 		{
 			_ = N.WGPU.wgpuDevicePoll(_device.Device, 1, null);
 		}
+		else if (_deviceOwner is MetalContext metal)
+		{
+			metal.WaitForGpu();
+		}
 	}
 
 	private byte[] ReadPixels() => _target switch
 	{
 		SoftwareTarget software => software.ReadPixels(),
 		GpuTarget gpu => gpu.ReadPixels(_device!),
+		MetalTarget metal => metal.ReadPixels((MetalContext)_deviceOwner!),
 		_ => throw new InvalidOperationException($"Unsupported benchmark target '{_target.GetType().Name}'."),
 	};
 
@@ -1063,6 +1103,212 @@ internal sealed unsafe class SoftwareTarget : ISoftwareRenderTarget
 	public GraphicsColorFormat ColorFormat => GraphicsColorFormat.Bgra8888;
 	internal byte[] ReadPixels() => (byte[])_pixels.Clone();
 	public void Dispose() { if (_pin.IsAllocated) _pin.Free(); }
+}
+
+internal sealed partial class MetalContext : IMetalDeviceContext
+{
+	private const string MetalLibrary = "/System/Library/Frameworks/Metal.framework/Metal";
+	private const string ObjectiveCLibrary = "/usr/lib/libobjc.A.dylib";
+	private const nuint Bgra8Unorm = 80;
+	private const nuint TextureUsageShaderRead = 1;
+	private const nuint TextureUsageRenderTarget = 4;
+	private static readonly nint s_alloc = Selector("alloc");
+	private static readonly nint s_init = Selector("init");
+	private static readonly nint s_drain = Selector("drain");
+	private static readonly nint s_release = Selector("release");
+	private static readonly nint s_newCommandQueue = Selector("newCommandQueue");
+	private static readonly nint s_commandBuffer = Selector("commandBuffer");
+	private static readonly nint s_commit = Selector("commit");
+	private static readonly nint s_waitUntilCompleted = Selector("waitUntilCompleted");
+	private static readonly nint s_textureDescriptor = Selector("texture2DDescriptorWithPixelFormat:width:height:mipmapped:");
+	private static readonly nint s_setStorageMode = Selector("setStorageMode:");
+	private static readonly nint s_setUsage = Selector("setUsage:");
+	private static readonly nint s_newTexture = Selector("newTextureWithDescriptor:");
+	private static readonly nint s_getBytes = Selector("getBytes:bytesPerRow:fromRegion:mipmapLevel:");
+	private nint _pool;
+	private nint _device;
+	private nint _queue;
+	private nint _texture;
+
+	private MetalContext(nint pool, nint device, nint queue, nint texture, int width, int height)
+	{
+		_pool = pool;
+		_device = device;
+		_queue = queue;
+		_texture = texture;
+		Target = new MetalTarget(texture, width, height);
+	}
+
+	public GraphicsContextKind Kind => GraphicsContextKind.Metal;
+	public nint Device => _device;
+	public nint Queue => _queue;
+	internal MetalTarget Target { get; }
+
+	internal static MetalContext Create(int width, int height)
+	{
+		var poolClass = GetClass("NSAutoreleasePool");
+		var descriptorClass = GetClass("MTLTextureDescriptor");
+		var pool = Send(Send(poolClass, s_alloc), s_init);
+		var device = MTLCreateSystemDefaultDevice();
+		if (device == 0)
+		{
+			Send(pool, s_drain);
+			throw new PlatformNotSupportedException("Metal did not expose a default GPU device.");
+		}
+
+		var queue = Send(device, s_newCommandQueue);
+		if (queue == 0)
+		{
+			Send(device, s_release);
+			Send(pool, s_drain);
+			throw new InvalidOperationException("Metal could not create a command queue.");
+		}
+
+		var descriptor = SendTextureDescriptor(
+			descriptorClass,
+			s_textureDescriptor,
+			Bgra8Unorm,
+			checked((nuint)width),
+			checked((nuint)height),
+			0);
+		SendNUInt(descriptor, s_setStorageMode, 0);
+		SendNUInt(descriptor, s_setUsage, TextureUsageShaderRead | TextureUsageRenderTarget);
+		var texture = SendObject(device, s_newTexture, descriptor);
+		if (texture == 0)
+		{
+			Send(queue, s_release);
+			Send(device, s_release);
+			Send(pool, s_drain);
+			throw new InvalidOperationException("Metal could not create the benchmark render texture.");
+		}
+
+		return new MetalContext(pool, device, queue, texture, width, height);
+	}
+
+	internal void WaitForGpu()
+	{
+		var commandBuffer = Send(_queue, s_commandBuffer);
+		if (commandBuffer == 0)
+		{
+			throw new InvalidOperationException("Metal could not create a completion command buffer.");
+		}
+		Send(commandBuffer, s_commit);
+		Send(commandBuffer, s_waitUntilCompleted);
+	}
+
+	internal unsafe byte[] ReadPixels(int width, int height)
+	{
+		WaitForGpu();
+		var pixels = new byte[checked(width * height * 4)];
+		fixed (byte* destination = pixels)
+		{
+			SendGetBytes(
+				_texture,
+				s_getBytes,
+				(nint)destination,
+				checked((nuint)(width * 4)),
+				new MetalRegion(
+					new MetalOrigin(0, 0, 0),
+					new MetalSize(checked((nuint)width), checked((nuint)height), 1)),
+				0);
+		}
+		return pixels;
+	}
+
+	public void Dispose()
+	{
+		if (_texture != 0)
+		{
+			Send(_texture, s_release);
+			_texture = 0;
+		}
+		if (_queue != 0)
+		{
+			Send(_queue, s_release);
+			_queue = 0;
+		}
+		if (_device != 0)
+		{
+			Send(_device, s_release);
+			_device = 0;
+		}
+		if (_pool != 0)
+		{
+			Send(_pool, s_drain);
+			_pool = 0;
+		}
+	}
+
+	private static nint Selector(string name)
+	{
+		var selector = RegisterSelector(name);
+		return selector != 0
+			? selector
+			: throw new InvalidOperationException($"Objective-C selector '{name}' is unavailable.");
+	}
+
+	private static nint GetClass(string name)
+	{
+		var value = ObjectGetClass(name);
+		return value != 0
+			? value
+			: throw new InvalidOperationException($"Objective-C class '{name}' is unavailable.");
+	}
+
+	[LibraryImport(MetalLibrary)]
+	private static partial nint MTLCreateSystemDefaultDevice();
+
+	[LibraryImport(ObjectiveCLibrary, EntryPoint = "objc_getClass", StringMarshalling = StringMarshalling.Utf8)]
+	private static partial nint ObjectGetClass(string name);
+
+	[LibraryImport(ObjectiveCLibrary, EntryPoint = "sel_registerName", StringMarshalling = StringMarshalling.Utf8)]
+	private static partial nint RegisterSelector(string name);
+
+	[LibraryImport(ObjectiveCLibrary, EntryPoint = "objc_msgSend")]
+	private static partial nint Send(nint receiver, nint selector);
+
+	[LibraryImport(ObjectiveCLibrary, EntryPoint = "objc_msgSend")]
+	private static partial nint SendObject(nint receiver, nint selector, nint value);
+
+	[LibraryImport(ObjectiveCLibrary, EntryPoint = "objc_msgSend")]
+	private static partial void SendNUInt(nint receiver, nint selector, nuint value);
+
+	[LibraryImport(ObjectiveCLibrary, EntryPoint = "objc_msgSend")]
+	private static partial nint SendTextureDescriptor(
+		nint receiver,
+		nint selector,
+		nuint pixelFormat,
+		nuint width,
+		nuint height,
+		byte mipmapped);
+
+	[LibraryImport(ObjectiveCLibrary, EntryPoint = "objc_msgSend")]
+	private static partial void SendGetBytes(
+		nint receiver,
+		nint selector,
+		nint bytes,
+		nuint bytesPerRow,
+		MetalRegion region,
+		nuint mipmapLevel);
+
+	[StructLayout(LayoutKind.Sequential)]
+	private readonly record struct MetalOrigin(nuint X, nuint Y, nuint Z);
+
+	[StructLayout(LayoutKind.Sequential)]
+	private readonly record struct MetalSize(nuint Width, nuint Height, nuint Depth);
+
+	[StructLayout(LayoutKind.Sequential)]
+	private readonly record struct MetalRegion(MetalOrigin Origin, MetalSize Size);
+}
+
+internal sealed class MetalTarget(nint texture, int width, int height) : IMetalRenderTarget
+{
+	public nint Texture { get; } = texture;
+	public int Width { get; } = width;
+	public int Height { get; } = height;
+	public GraphicsColorFormat ColorFormat => GraphicsColorFormat.Bgra8888;
+	internal byte[] ReadPixels(MetalContext context) => context.ReadPixels(Width, Height);
+	public void Dispose() { }
 }
 
 internal sealed unsafe class GpuTarget : IWebGpuRenderTarget

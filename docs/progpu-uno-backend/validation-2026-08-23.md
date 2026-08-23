@@ -406,14 +406,31 @@ effects throughput benchmark.
   stroke and material scenarios with zero unsupported operations. Its blocking medians are
   17.1597 ms for strokes and 8.6350 ms for materials; balanced eight-process
   promotion remains part of the cross-backend qualification work.
+- A real Skia/Metal benchmark lane now passes Uno's host Metal device and queue
+  to `SkiaGraphicsProvider(GraphicsContextKind.Metal)`, renders into a retained
+  BGRA8 `MTLTexture`, fences the same queue after each Skia flush, and reads the
+  completed GPU target. Three alternating ProGPU/Metal versus Skia/Metal pairs
+  cover all fifteen v3 scenarios. Both backends used 6 warmups, 100 blocking
+  samples, and 7x60-frame batches except `effects`, which used 4 warmups, 40
+  blocking samples, and 3x20-frame batches. ProGPU wins synchronized blocking
+  total, CPU submit, and completed-batch throughput in every scenario. The
+  narrowest completed-batch result is `sparse` at 1.57x (1.37x-1.72x), while
+  `effects` is 2.81x (2.81x-2.91x). All 90 JSON files have the expected v3
+  contract, dimensions, semantic/pixel hashes, and zero unsupported
+  operations. First-pair readbacks have exact alpha; `cached` and `sparse` are
+  byte-identical, with other RGB PSNR values ranging from 28.112 dB for the
+  intentionally broad gradient-material corpus to 63.342 dB for unfiltered
+  layer isolation. Raw artifacts are under
+  `src/artifacts/performance/2026-08-23-gpu-vs-gpu-matrix/`.
 
 See [performance-results-2026-08-23.md](performance-results-2026-08-23.md) for
 the exact values and interpretation boundaries.
 
 ## Remaining qualification work
 
-1. Promote the earlier Uno WebGPU context lane to eight balanced fresh-process
-   triplets; the primary ProGPU/Skia lane now has eight pairs.
+1. Promote the earlier Uno built-in WebGPU context lane to eight balanced
+   fresh-process triplets; software Skia has eight primary pairs and the
+   Skia/Metal GPU lane has three all-scenario pairs.
 2. Add WebGPU timestamps; managed CPU and Metal traces have been captured, but
    their instrumentation overhead excludes them from comparative timing
    tables.

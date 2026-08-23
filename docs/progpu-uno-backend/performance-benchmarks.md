@@ -11,8 +11,8 @@ parity are mandatory for a performance result to be publishable.
 
 Primary same-framework comparison:
 
-- Uno + Skia drawing backend (software in the current executable; a GPU lane
-  remains a separate qualification target);
+- Uno + Skia software drawing backend (`--backend skia`);
+- Uno + Skia Metal drawing backend on macOS (`--backend skia-metal`);
 - Uno + built-in WebGPU backend;
 - Uno + ProGPU backend.
 
@@ -85,6 +85,14 @@ Comparison runs alternate fresh-process order:
 Skia / Uno WebGPU / ProGPU
 ProGPU / Uno WebGPU / Skia
 ```
+
+The macOS GPU-to-GPU qualification alternates `skia-metal / progpu` and
+`progpu / skia-metal`. Both lanes use retained 1280x720 BGRA8 Metal textures.
+Skia receives Uno's real `IMetalDeviceContext` and creates its normal
+`GRContext` Metal renderer; ProGPU uses wgpu-native's Metal backend. After
+each measured submission, the harness places an empty command buffer on the
+same Metal command queue and waits for it. This fence is ordered after Skia's
+flush, so its completion boundary cannot be mistaken for CPU-only submission.
 
 Context-framework comparisons use the same balanced forward/reverse ordering.
 No backend may reuse a previously presented image without issuing and
@@ -177,10 +185,13 @@ remain the authority if a summary or interpretation changes.
 `src/Uno.UI.Composition.Backend.Benchmarks` implements fifteen steady
 micro-scenarios (`cached`, `sparse`, `text`, `paths`, `strokes`, `materials`,
 `layers`, `isolation-layers`, `mask-layers`, `blend-layers`, `blend-corpus`,
-`images`, `clips`, `shadows`, and `effects`) for ProGPU, Uno WebGPU where supported, and
-Uno software Skia. Every frame explicitly clears the target; this prevents translucent antialiasing,
-paths, images, and effects from accumulating across samples. GPU lanes use
-`wgpuDevicePoll(wait=true)` only in the separate completion boundary.
+`images`, `clips`, `shadows`, and `effects`) for ProGPU, Uno WebGPU where
+supported, Uno software Skia, and Uno Skia/Metal on macOS. Every frame
+explicitly clears the target; this prevents translucent antialiasing, paths,
+images, and effects from accumulating across samples. WebGPU lanes use
+`wgpuDevicePoll(wait=true)` only in the separate completion boundary. The
+Skia/Metal lane uses a command-buffer fence on Skia's own queue at the same
+boundary and reads pixels directly from its retained Metal texture.
 
 The `strokes` workload repeats four immutable centerlines: rotated elliptical
 arcs and mixed quadratic/cubic paths, with solid and dashed styles covering
