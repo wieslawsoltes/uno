@@ -25,16 +25,18 @@ Documents:
 - [Initial validation record](validation-2026-08-22.md)
 
 The implementation consumes ProGPU as a git submodule pinned to immutable
-`main` merge commit `d5d3e977527b25897387345122d7b5688803a69c`. Public
+`main` merge commit `f51cad0f31378e358a4e079e80644cdca6b91c81`. Public
 dependency changes
 [#125](https://github.com/wieslawsoltes/ProGPU/pull/125),
 [#126](https://github.com/wieslawsoltes/ProGPU/pull/126),
-[#127](https://github.com/wieslawsoltes/ProGPU/pull/127), and
-[#128](https://github.com/wieslawsoltes/ProGPU/pull/128) are merged. Together
+[#127](https://github.com/wieslawsoltes/ProGPU/pull/127),
+[#128](https://github.com/wieslawsoltes/ProGPU/pull/128), and
+[#129](https://github.com/wieslawsoltes/ProGPU/pull/129) are merged. Together
 they provide optional WinRT contracts, analytic difference clips, bounded
 retained-picture compilation and eligibility caching, duplicate-stop gradient
 semantics, bounded queue cleanup, GPU-only HostBackdrop capture, translated
-and shadow-only effects, and prompt retirement of detached effect textures.
+and shadow-only effects, prompt retirement of detached effect textures, and
+in-place merging of compact retained-page draw calls.
 
 ## Non-negotiable invariants
 

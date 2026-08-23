@@ -4,8 +4,8 @@
 
 - Uno base: immutable head of PR #24153.
 - ProGPU dependency: merged `main` commit
-  `d5d3e977527b25897387345122d7b5688803a69c`, including public dependency
-  changes #125 through #128.
+  `f51cad0f31378e358a4e079e80644cdca6b91c81`, including public dependency
+  changes #125 through #129.
 - Primary validation platform: macOS arm64, .NET 10, Dawn/Metal.
 - Secondary compile/runtime lanes: Windows Dawn/D3D12, Linux
   wgpu-native/Vulkan, and browser WebGPU when the host callback ABI is proven.

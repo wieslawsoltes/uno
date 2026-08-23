@@ -5,9 +5,8 @@
 - Uno branch baseline: `6848a67e49`.
 - Uno work branch: `feat/progpu-drawing-backend`; no Uno pull request opened.
 - ProGPU gitlink: merged `main` commit
-  `d5d3e977527b25897387345122d7b5688803a69c`.
-- ProGPU dependency changes: public PRs #125 through #128, all merged; PR #128
-  completed all 26 CI checks successfully before merge.
+  `f51cad0f31378e358a4e079e80644cdca6b91c81`.
+- ProGPU dependency changes: public PRs #125 through #129, all merged.
 - Host: macOS 26.6 arm64, Apple M3 Pro, .NET SDK 10.0.201,
   runtime 10.0.5, wgpu-native/Metal.
 
@@ -22,6 +21,7 @@
 | caching must cost less than recompilation | root-cause fix | admit after reuse and reject pictures below a configurable minimum command count |
 | a leading replacement clear must not become a redundant full-target draw | root-cause fix | carry the leading clear as record metadata and apply it as the attachment clear while retaining ordered nested-record replacement semantics |
 | retained solid pages must not scan an empty brush map per vertex | root-cause fix | bulk-copy inline-color vertices and rebase index arrays through contiguous spans |
+| compatible retained-page draws must not expand or copy the full compositor draw-call value | root-cause fix | compare the compact retained projection first and mutate the accumulated call in place through its list span |
 | duplicate gradient stops must make an exact offset select the later stop | root-cause fix | use the previous stop only for strictly smaller offsets in vector and hatch shaders |
 | solid ellipse strokes must retain their analytic curve | root-cause fix | preserve ellipse radii and emit exact even-odd rounded-ring geometry instead of a 22.5-degree flattened outline |
 | queue cleanup must bound residency without serializing every small burst | root-cause fix | expose the conservative drain bound and select a 64-submission window while retaining per-frame non-blocking polling |
@@ -81,6 +81,11 @@ disable profitable subtree reuse. The real-device smoke additionally asserts
 that a cleared cached presentation emits one content draw/four vertices, and
 that replaying a cleared record after existing content still replaces the
 earlier pixels in order.
+
+The retained draw-call follow-up adds a draw-count assertion to the nested
+picture mutation fixture and strengthens the compact-page source contract.
+The focused context/retained/contract selection passes 33 tests. The full
+3,700-test and 240-test suites were rerun after the change.
 
 ## Runtime and visual validation
 
@@ -176,6 +181,15 @@ effects throughput benchmark.
   `143132D5...`, and ProGPU/Skia effects pixel hashes `AAF267FF...` /
   `EE3C6A61...`; the clips frame used zero mask passes/textures and both final
   scenarios reported zero unsupported operations.
+- The `f51cad0f` retained-update follow-up improves sparse CPU submit from
+  0.204890 to 0.191991 ms/frame and sampled retained-page append share from
+  4.09% to 0.22%. Eight sparse pairs remain byte-identical to Skia and retain a
+  1.37× slowest-pair bounded-total lead. A refreshed confirmation matrix keeps
+  ProGPU faster in all seven scenarios with unchanged qualified pixel hashes.
+- A rebuild from the exact merged gitlink completed with zero warnings and
+  errors. The real-device smoke again reported `center=DC5014FF, frame=6`; a
+  standard-shape final sparse run measured 0.261213 ms for ProGPU versus
+  0.375557 ms for Skia and was byte-identical.
 
 See [performance-results-2026-08-23.md](performance-results-2026-08-23.md) for
 the exact values and interpretation boundaries.

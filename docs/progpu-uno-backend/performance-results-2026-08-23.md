@@ -155,6 +155,51 @@ The current result incorporates these root-cause changes:
    conservative transformed content bounds for effect layers.
 10. Cleanup uses a bounded submission window rather than serializing every
     eight-frame burst; per-frame completion polling remains non-blocking.
+11. Retained pages compare their compact draw-call projection before expanding
+    the full compositor draw-call structure, and compatible accumulated calls
+    are mutated in place instead of copied on every page boundary.
+
+## Sparse retained-update follow-up
+
+The narrowest workload was profiled again after the primary qualification.
+The baseline used the `d5d3e977` gitlink in four fresh alternating process
+pairs. The candidate used merged ProGPU `main` commit `f51cad0f` in eight fresh
+pairs with the same 8 warmups, 100 blocking samples, and nine 60-frame batches.
+
+| Sparse metric | baseline | `f51cad0f` | change |
+|---|---:|---:|---:|
+| ProGPU CPU submit | 0.204890 ms | 0.191991 ms | -6.3% |
+| ProGPU scene compile | 0.087950 ms | 0.083850 ms | -4.7% |
+| ProGPU bounded total | 0.260555 ms | 0.260083 ms | -0.2% |
+| Skia bounded total | 0.364835 ms | 0.362112 ms | measurement control |
+
+The full-frame total remains dominated by completion timing at this scale, but
+the CPU boundary improves materially. ProGPU is 1.39× faster than Skia by the
+process-median bounded total; the slowest paired result is 1.37×. A prolonged
+sampled-thread trace reduced `AppendIncrementalScenePage` from 4.09% to 0.22%
+of sampled process time. The optimized path avoids expanding 23 already
+mergeable row calls and avoids copying the large accumulated draw-call value.
+
+The post-change confirmation matrix used four fresh pairs for `cached`,
+`text`, `paths`, `images`, and `clips`, eight for `sparse`, and two for the
+slower `effects` workload:
+
+| Scenario | ProGPU | Skia | speedup |
+|---|---:|---:|---:|
+| cached | 0.157293 ms | 0.363549 ms | 2.31× |
+| sparse | 0.260083 ms | 0.362112 ms | 1.39× |
+| text | 0.163591 ms | 4.520163 ms | 27.63× |
+| paths | 0.267791 ms | 2.359047 ms | 8.81× |
+| images | 0.275967 ms | 1.063436 ms | 3.85× |
+| clips | 0.288429 ms | 2.736351 ms | 9.49× |
+| effects | 2.739260 ms | 251.099025 ms | 91.66× |
+
+Every ProGPU process reports zero unsupported operations. All seven ProGPU
+pixel hashes match the already qualified renderer output. Sparse remains
+byte-identical to Skia, and the representative effects comparison retains the
+same 3.411024 RGB MAE and fixed-tap-versus-Gaussian limitation documented
+above. Raw local measurements, traces, and rendered inspection images are in
+`src/artifacts/performance/2026-08-23-sparse-update/`.
 
 ## Reproduction
 
@@ -198,7 +243,9 @@ dotnet Uno.UI.Composition.Backend.Benchmarks/bin/Release/net10.0/Uno.UI.Composit
 
 Repeat with `--backend skia`. Valid scenarios are `cached`, `sparse`, `text`,
 `paths`, `images`, `clips`, and `effects`. Raw local artifacts for this run are
-under `src/artifacts/performance/2026-08-23-retained-eligibility/`.
+under `src/artifacts/performance/2026-08-23-retained-eligibility/`; the
+retained-update follow-up is under
+`src/artifacts/performance/2026-08-23-sparse-update/`.
 
 A post-merge smoke from the exact final gitlink rebuilt both harnesses and
 preserved the qualified clip and effects semantic/pixel hashes. It is stored
