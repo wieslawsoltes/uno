@@ -4,7 +4,7 @@
 
 - Uno baseline: `c4b1cd24d2c5ba5ac0a472e499f81d0ec22de2f9`.
 - Uno work branch: `feat/progpu-drawing-backend`; no Uno pull request opened.
-- ProGPU gitlink: `13a80069699d99c2ff9d5f8762fd645bfaebb9f8`.
+- ProGPU gitlink: `bf1fe1384dedcf572fc317c5ffc550a601763e0a`.
 - ProGPU dependency changes: public PRs #125 and #126.
 - Host: macOS 26.6 arm64, Apple M3 Pro, .NET SDK 10.0.201,
   runtime 10.0.9, wgpu-native/Metal.
@@ -17,6 +17,8 @@
 | a matching outer rounded clip must not duplicate ring coverage work | root-cause fix | reduce the nested matching pair to the ring analytic mask |
 | unchanged nested pictures must retain compilation identity when their parent record changes | root-cause fix | cache immutable picture pages by full compilation context and replay their arrays/draw calls |
 | caching must cost less than recompilation | root-cause fix | admit after reuse and reject pictures below a configurable minimum command count |
+| a leading replacement clear must not become a redundant full-target draw | root-cause fix | carry the leading clear as record metadata and apply it as the attachment clear while retaining ordered nested-record replacement semantics |
+| retained solid pages must not scan an empty brush map per vertex | root-cause fix | bulk-copy inline-color vertices and rebase index arrays through contiguous spans |
 | benchmark pixels must represent one frame | measurement correction | explicitly clear every frame and read back the final target after timing |
 | GPU wait must not be mislabeled as renderer CPU time | measurement correction | publish CPU submit, GPU completion, blocking total, batch throughput, and ProGPU internal stages separately |
 
@@ -51,7 +53,10 @@ Passed: 39, Failed: 0, Skipped: 0
 The regression verifies final pixels after changing one nested picture while
 unchanged siblings reuse compiled pages. The adaptive-admission variant uses
 four-command pictures and validates that the minimum-command gate does not
-disable profitable subtree reuse.
+disable profitable subtree reuse. The real-device smoke additionally asserts
+that a cleared cached presentation emits one content draw/four vertices, and
+that replaying a cleared record after existing content still replaces the
+earlier pixels in order.
 
 ## Runtime and visual validation
 
@@ -78,8 +83,10 @@ trimming/AOT, leak, and long-duration multi-page sweep remain open.
 - Cached and sparse ProGPU readbacks are byte-identical to Skia.
 - ProGPU reported zero unsupported operations.
 - CPU frame submit is faster than Skia in all five workloads.
-- Saturated batch throughput is faster than Skia for text, paths, and images;
-  cached and sparse fill-only throughput remains slower and is documented.
+- The qualification matrix shows faster saturated throughput for text, paths,
+  and images. A later focused attachment-clear check reduced cached fill-only
+  throughput from 0.4556 to 0.2835 ms/frame, below the matrix's 0.3653 ms Skia
+  result. Sparse fill-only remains the open saturation case.
 - ProGPU text/path raster differences are smaller than Uno WebGPU differences
   against the same Skia reference.
 
@@ -89,7 +96,9 @@ the exact values and interpretation boundaries.
 ## Remaining qualification work
 
 1. Run eight balanced fresh-process triplets with power/thermal controls.
-2. Capture Metal System Trace and GPU timestamps for fill-only saturation.
+2. Add WebGPU timestamps; a Metal System Trace has been captured for the
+   fill-only submission path, but its instrumentation overhead excludes it
+   from comparative timing tables.
 3. Add effects, scrolling, control-density, first-present, startup, allocation,
    settled-memory, and leak scenarios.
 4. Run a systematic SamplesApp page/pixel sweep and a long-duration resize,

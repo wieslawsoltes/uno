@@ -25,7 +25,7 @@ Documents:
 - [Initial validation record](validation-2026-08-22.md)
 
 The implementation consumes ProGPU as a git submodule pinned to immutable
-commit `13a80069699d99c2ff9d5f8762fd645bfaebb9f8`. The integration dependency is
+commit `bf1fe1384dedcf572fc317c5ffc550a601763e0a`. The integration dependency is
 tracked by public ProGPU changes
 [#125](https://github.com/wieslawsoltes/ProGPU/pull/125) and
 [#126](https://github.com/wieslawsoltes/ProGPU/pull/126). The latter adds

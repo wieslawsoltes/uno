@@ -116,6 +116,26 @@ Two root causes were addressed:
 Both changes are outside Uno's drawing SPI and keep unsupported/masked cases on
 the existing correctness path.
 
+## Post-matrix attachment-clear optimization
+
+A Metal trace and scene dump exposed one further root cause after the balanced
+matrix: a leading Uno `Clear` became a two-million-unit source-replacement quad
+whenever retained children followed it. ProGPU already clears the render-pass
+attachment, so this produced a redundant full-target draw. The integration now
+carries a leading clear as recording metadata, applies it as the attachment
+clear, and materializes the replacement quad only when that record is nested
+after existing ordered content.
+
+The focused 20-warmup, 200-sample, 30-by-120-frame check retained the exact
+cached SHA-256 and reduced the steady scene from 3,076 vertices/two draws to
+3,072 vertices/one draw. Cached saturated throughput measured 0.2835 ms/frame,
+below the qualification matrix's 0.3653 ms Skia result. The corresponding
+sparse check measured 0.4584 ms/frame and remains an optimization target; it
+is not folded into the earlier table because the run shape differs. Retained
+solid pages now also skip empty brush-map scans and use contiguous index
+rebasing. A balanced fresh-process rerun is still required before publishing
+replacement matrix values.
+
 ## Reproduction
 
 Build once, then run each backend/scenario in a fresh process:

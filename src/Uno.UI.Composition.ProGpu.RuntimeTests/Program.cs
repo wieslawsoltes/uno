@@ -88,6 +88,7 @@ if (outside[3] > 4 || red[2] < 200 || red[3] < 240 || blue[0] < 180 || blue[3] <
 
 RunPresentSmoke(device, factory);
 RunStablePresentCacheSmoke(device, factory);
+await RunNestedRecordClearSmoke(factory);
 await RunDefaultTrimSmoke(factory, geometryFactory);
 await RunRoundedDifferenceSmoke(factory, geometryFactory);
 await RunReplayScaleSmoke(factory);
@@ -163,14 +164,38 @@ static unsafe void RunStablePresentCacheSmoke(IWebGpuDeviceContext device, ProGp
 	}
 	_ = N.WGPU.wgpuDevicePoll(device.Device, 1, null);
 	var metrics = ProGpuDiagnostics.LastFrame;
-	if (metrics is not { SceneCacheHit: true })
+	if (metrics is not { SceneCacheHit: true, DrawCallCount: 1, VectorVertexCount: 4 })
 	{
 		throw new InvalidOperationException(
-			$"A stable retained presentation missed ProGPU's scene cache: {metrics?.SceneCacheMissReason ?? "no metrics"}.");
+			$"A stable retained presentation did not use one cached content draw: hit={metrics?.SceneCacheHit}, reason={metrics?.SceneCacheMissReason ?? "none"}, draws={metrics?.DrawCallCount}, vertices={metrics?.VectorVertexCount}.");
 	}
 	N.WGPU.wgpuTextureViewRelease(nativeView);
 	N.WGPU.wgpuTextureDestroy(nativeTexture);
 	N.WGPU.wgpuTextureRelease(nativeTexture);
+}
+
+static async Task RunNestedRecordClearSmoke(ProGpuDrawingFactory factory)
+{
+	var recorder = factory.CreateRecording();
+	recorder.Clear(Color.FromArgb(255, 210, 30, 20));
+	recorder.DrawRect(new Rect(20, 20, 24, 24), Color.FromArgb(255, 20, 70, 220));
+	using var record = recorder.Finish();
+	using var texture = factory.RenderOffscreen(64, 64, drawing =>
+	{
+		// A leading clear can become the attachment clear, but the same record
+		// replayed after existing content must retain replacement semantics.
+		drawing.DrawRect(new Rect(0, 0, 64, 64), Color.FromArgb(255, 20, 180, 40));
+		record.Replay(drawing);
+	});
+	var pixels = new byte[64 * 64 * 4];
+	(await factory.SnapshotAsync(texture)).CopyPixels(pixels);
+	var outside = Pixel(pixels, 4, 4);
+	var center = Pixel(pixels, 32, 32);
+	if (outside[2] < 180 || outside[1] > 80 || center[0] < 180 || center[2] > 80)
+	{
+		throw new InvalidOperationException(
+			$"A nested retained clear lost replacement ordering: outside={Convert.ToHexString(outside)}, center={Convert.ToHexString(center)}.");
+	}
 }
 
 static async Task RunDefaultTrimSmoke(ProGpuDrawingFactory factory, ProGpuGeometryFactory geometryFactory)
