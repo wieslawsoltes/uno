@@ -5,8 +5,8 @@
 - Uno branch baseline: `6848a67e49`.
 - Uno work branch: `feat/progpu-drawing-backend`; no Uno pull request opened.
 - ProGPU gitlink: merged `main` commit
-  `f51cad0f31378e358a4e079e80644cdca6b91c81`.
-- ProGPU dependency changes: public PRs #125 through #129, all merged.
+  `77a28482b5329700d618a9ce2e4d4cebbd05f0f2`.
+- ProGPU dependency changes: public PRs #125 through #130, all merged.
 - Host: macOS 26.6 arm64, Apple M3 Pro, .NET SDK 10.0.201,
   runtime 10.0.5, wgpu-native/Metal.
 
@@ -22,6 +22,7 @@
 | a leading replacement clear must not become a redundant full-target draw | root-cause fix | carry the leading clear as record metadata and apply it as the attachment clear while retaining ordered nested-record replacement semantics |
 | retained solid pages must not scan an empty brush map per vertex | root-cause fix | bulk-copy inline-color vertices and rebase index arrays through contiguous spans |
 | compatible retained-page draws must not expand or copy the full compositor draw-call value | root-cause fix | compare the compact retained projection first and mutate the accumulated call in place through its list span |
+| an identity-only retained picture wrapper must not allocate a second command stream or falsely invalidate the presentation visual | root-cause fix | clone the child picture's immutable command storage, preserve independent resource leases, and compare retained storage identity in the host visual |
 | duplicate gradient stops must make an exact offset select the later stop | root-cause fix | use the previous stop only for strictly smaller offsets in vector and hatch shaders |
 | solid ellipse strokes must retain their analytic curve | root-cause fix | preserve ellipse radii and emit exact even-odd rounded-ring geometry instead of a 22.5-degree flattened outline |
 | queue cleanup must bound residency without serializing every small burst | root-cause fix | expose the conservative drain bound and select a 64-submission window while retaining per-frame non-blocking polling |
@@ -34,6 +35,7 @@
 | Uno blur sigma and ProGPU backdrop radius must have a measured conversion | measurement correction | compare identical pixel fixtures at 1.8×, 2.0×, 2.2×, and 3.344× and select the lowest-error 2.0× mapping |
 | benchmark pixels must represent one frame | measurement correction | explicitly clear every frame and read back the final target after timing |
 | GPU wait must not be mislabeled as renderer CPU time | measurement correction | publish CPU submit, GPU completion, blocking total, batch throughput, and ProGPU internal stages separately |
+| a successful explicit completion wait must advance deferred-submission accounting | root-cause fix | mark the submitted work as drained after the native wait so later cleanup does not repeat the same blocking drain |
 
 Arbitrary/non-uniform geometry, masks, hit testing, unsupported draw commands,
 volatile variants, and stale atlas generations fail closed to normal
@@ -63,7 +65,7 @@ resolved the environmental file-lock race without source changes.
 The current ProGPU branch passes the complete locally available suites:
 
 ```text
-ProGPU.Tests:          3,700 passed, 0 failed, 0 skipped
+ProGPU.Tests:          3,705 passed, 0 failed, 0 skipped
 ProGPU.Tests.Headless:   240 passed, 0 failed, 0 skipped
 ```
 
@@ -84,8 +86,10 @@ earlier pixels in order.
 
 The retained draw-call follow-up adds a draw-count assertion to the nested
 picture mutation fixture and strengthens the compact-page source contract.
-The focused context/retained/contract selection passes 33 tests. The full
-3,700-test and 240-test suites were rerun after the change.
+The identity-picture follow-up adds five tests covering flattening, retained
+resource lifetime after the source clone is disposed, additional parent
+resources, transformed wrappers, and explicit completion-window reset. The
+full 3,705-test and 240-test suites were rerun after the change.
 
 ## Runtime and visual validation
 
@@ -102,7 +106,7 @@ Release run reports:
 
 ```text
 [webgpu] init device — msaa=2x fmtFeatures=True colorFormat=BGRA8Unorm
-ProGPU runtime smoke passed; center=DC5014FF, frame=6.
+ProGPU runtime smoke passed; center=DC5014FF, frame=7.
 ```
 
 SamplesApp was built with
@@ -123,6 +127,12 @@ commented launch-settings parse warning.
 This check caught a launch-configuration trap during validation: setting
 `UNO_PROGPU=1` on a binary compiled with the flag disabled still launches the
 normal Skia backend. Only the negotiation log is accepted as proof.
+
+The final retained-cache smoke renders two stable presentations, performs an
+explicit factory completion wait, renders the same scene again, and performs a
+second wait. The third presentation remains a scene-cache hit with one content
+draw and four vector vertices. This covers both host invalidation identity and
+the public completion-accounting path on a real device.
 
 Matched live catalog captures verify the complete shell rather than the blank
 frame in the original failure report. The text sample content crop measures
@@ -187,9 +197,25 @@ effects throughput benchmark.
   1.37× slowest-pair bounded-total lead. A refreshed confirmation matrix keeps
   ProGPU faster in all seven scenarios with unchanged qualified pixel hashes.
 - A rebuild from the exact merged gitlink completed with zero warnings and
-  errors. The real-device smoke again reported `center=DC5014FF, frame=6`; a
+  errors. The real-device smoke again reported `center=DC5014FF, frame=7`; a
   standard-shape final sparse run measured 0.261213 ms for ProGPU versus
   0.375557 ms for Skia and was byte-identical.
+- The retained-presentation follow-up used eight alternating, binary-isolated
+  cached-frame pairs. Relative to `f51cad0f`, the paired medians improve CPU
+  frame by 26.0%, record by 47.1%, submit by 19.4%, scene compile by 37.1%,
+  batched CPU/frame by 62.1%, and completed batched frame by 12.5%. All eight
+  pairs preserve the exact pixel hash and report zero unsupported operations.
+- Against Skia, the final cached path is 7.07× faster at CPU submit, 14.17×
+  faster at batched CPU/frame, and 2.82× faster at completed batched throughput.
+  A forced completion after each tiny submission remains 4.40× slower because
+  approximately 1.52 ms is native Metal/WebGPU completion wait; this is kept as
+  an explicit residual gap rather than folded into a renderer CPU claim.
+- Every final ProGPU hash for cached, sparse, text, paths, images, clips, and
+  effects equals its previously inspected and qualified ProGPU artifact. Cached
+  and sparse remain byte-identical to Skia.
+- A post-merge cached confirmation built from gitlink `77a28482` reports
+  0.0474 ms CPU frame, 0.134823 ms completed batched frame, the qualified
+  `15DECAB...` pixel hash, and zero unsupported operations.
 
 See [performance-results-2026-08-23.md](performance-results-2026-08-23.md) for
 the exact values and interpretation boundaries.

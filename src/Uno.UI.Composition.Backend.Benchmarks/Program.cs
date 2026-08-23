@@ -452,7 +452,11 @@ internal sealed class BenchmarkHarness : IDisposable
 
 	private unsafe void WaitForGpu()
 	{
-		if (_device is not null)
+		if (_factory is ProGpuDrawingFactory proGpu)
+		{
+			proGpu.WaitForGpuCompletion();
+		}
+		else if (_device is not null)
 		{
 			_ = N.WGPU.wgpuDevicePoll(_device.Device, 1, null);
 		}

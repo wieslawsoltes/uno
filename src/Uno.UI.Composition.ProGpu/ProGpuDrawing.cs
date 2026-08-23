@@ -85,6 +85,16 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 		return new ProGpuPresentSession(this, target, Interlocked.Increment(ref _frameNumber));
 	}
 
+	/// <summary>
+	/// Waits for all work submitted through this factory and advances ProGPU's
+	/// bounded resource-retirement window to the completed submission.
+	/// </summary>
+	public void WaitForGpuCompletion()
+	{
+		ThrowIfDisposed();
+		_context.WaitIdle();
+	}
+
 	internal void Present(IWebGpuRenderTarget target, GpuPicture picture, Vector4? leadingClearColor, bool hasHostBackdrop, long frame, double recordMilliseconds)
 	{
 		var submit = Stopwatch.StartNew();
@@ -398,8 +408,14 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 
 		internal void Update(GpuPicture picture, Matrix4x4 transform)
 		{
-			if (ReferenceEquals(_picture, picture) && _transform.Equals(transform))
+			if (_picture is { } current &&
+				_transform.Equals(transform) &&
+				(ReferenceEquals(current, picture) ||
+					current.SharesRetainedCommandStorageWith(picture)))
 			{
+				// Keep the current ownership clone live for synchronous rendering,
+				// but do not invalidate an unchanged retained command stream.
+				_picture = picture;
 				return;
 			}
 			_picture = picture;

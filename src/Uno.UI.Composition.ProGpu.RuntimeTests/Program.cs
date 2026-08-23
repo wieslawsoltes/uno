@@ -536,7 +536,13 @@ static unsafe void RunStablePresentCacheSmoke(IWebGpuDeviceContext device, ProGp
 		present.Clear(Color.FromArgb(0, 0, 0, 0));
 		record.Replay(present);
 	}
-	_ = N.WGPU.wgpuDevicePoll(device.Device, 1, null);
+	factory.WaitForGpuCompletion();
+	using (var present = factory.BeginPresent(target))
+	{
+		present.Clear(Color.FromArgb(0, 0, 0, 0));
+		record.Replay(present);
+	}
+	factory.WaitForGpuCompletion();
 	var metrics = ProGpuDiagnostics.LastFrame;
 	if (metrics is not { SceneCacheHit: true, DrawCallCount: 1, VectorVertexCount: 4 })
 	{

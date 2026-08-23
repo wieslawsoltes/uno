@@ -201,6 +201,76 @@ same 3.411024 RGB MAE and fixed-tap-versus-Gaussian limitation documented
 above. Raw local measurements, traces, and rendered inspection images are in
 `src/artifacts/performance/2026-08-23-sparse-update/`.
 
+## Retained-presentation and explicit-drain follow-up
+
+A prolonged 80,000-frame cached trace against `f51cad0f` showed that the
+framework creates a short-lived identity wrapper around the same retained
+picture on every presentation. Rebuilding that wrapper also changed the visual
+object identity, even though its immutable child command storage was unchanged.
+The same trace confirmed that a host-requested blocking completion did not
+advance ProGPU's deferred-submission accounting, permitting a later cleanup to
+repeat an already satisfied wait.
+
+ProGPU PR #130 flattens an identity-only picture recording to an independently
+leased clone of the child storage and records successful explicit waits as
+drained submissions. The host adapter recognizes shared command storage as an
+unchanged visual and routes the benchmark completion boundary through the
+factory so the wait and ProGPU accounting remain coherent.
+
+The before binary contains `f51cad0f`; the candidate binary contains
+`8e1c39b8`, which merged unchanged as `77a28482`. Eight alternating process
+pairs used 24 warmups, 300 blocking samples, 60 frames per batch, and 15
+batches. Ratios are candidate divided by baseline; values below one are faster.
+
+| Cached metric | paired median ratio | change |
+|---|---:|---:|
+| blocking total | 0.977537 | -2.25% |
+| CPU frame | 0.740217 | -25.98% |
+| GPU completion wait | 0.997377 | -0.26% |
+| batched CPU/frame | 0.379376 | -62.06% |
+| completed batched frame | 0.875304 | -12.47% |
+| ProGPU record | 0.528571 | -47.14% |
+| ProGPU submit | 0.805877 | -19.41% |
+| ProGPU scene compile | 0.629167 | -37.08% |
+
+CPU frame improved in all eight pairs and completed batched throughput improved
+in all eight. Blocking total improved in six; the two small regressions track
+native completion-wait noise rather than CPU work. Every pair produced
+`15DECAB2395CA1F302CBBA88BE4B7B55AE751D4294A241C5B7E1001F3D73F718`
+and zero unsupported operations.
+
+The final cached ProGPU/Skia comparison used a separate eight-pair alternating
+run with the same shape:
+
+| Boundary | paired-median result |
+|---|---:|
+| ProGPU CPU frame versus Skia | 7.07× faster |
+| ProGPU batched CPU/frame versus Skia | 14.17× faster |
+| ProGPU completed batched frame versus Skia | 2.82× faster |
+| ProGPU blocking total versus Skia | 4.40× slower |
+
+The blocking result is intentionally not described as a renderer regression:
+the ProGPU CPU frame is about 0.04–0.06 ms, while each forced Metal/WebGPU drain
+is about 1.52 ms. Software Skia completes the tiny scene synchronously in about
+0.36 ms. Production presentation permits work in flight, so bounded-batch
+completion is the closest sustained-throughput boundary; the forced drain is
+retained as a latency and synchronization diagnostic.
+
+The final comparison matrix keeps ProGPU completed-batch throughput ahead of
+Skia in all seven workloads: approximately 2.82× cached, 1.92× sparse, 29.50×
+text, 10.01× paths, 4.12× images, 11.72× clips, and 114.21× effects. The exact
+ProGPU hashes for cached, sparse, text, paths, images, clips, and effects equal
+the previously inspected qualification artifacts. Cached and sparse remain
+byte-identical to Skia; the documented text, path, image, clip-edge, and
+fixed-tap effect raster differences remain unchanged.
+
+Raw paired JSON, BGRA readbacks, stdout, the baseline sampled-thread trace, and
+the isolated before/candidate binaries are under
+`src/artifacts/performance/2026-08-23-cached-floor/`. A rejected command-buffer
+label-removal experiment is retained there as negative evidence: it preserved
+pixels but regressed both cached CPU and completed batch time, so it was not
+landed.
+
 ## Reproduction
 
 Build once with serial MSBuild:
