@@ -26,7 +26,7 @@ using var deviceOwner = (IDisposable)Activator.CreateInstance(
 	culture: null)!;
 var device = (IWebGpuDeviceContext)deviceOwner;
 
-using var factory = (ProGpuDrawingFactory)new ProGpuGraphicsProvider(new ProGpuBackendOptions
+var backendOptions = new ProGpuBackendOptions
 {
 	FailOnUnsupportedOperation = true,
 	Compositor = ProGPU.Scene.CompositorOptions.Default with
@@ -35,7 +35,11 @@ using var factory = (ProGpuDrawingFactory)new ProGpuGraphicsProvider(new ProGpuB
 		PrecompileBasePipelines = true,
 		EnableGpuHitTesting = false,
 	},
-}).CreateGraphics(device);
+};
+var provider = new ProGpuGraphicsProvider(backendOptions);
+RunProviderContextContractSmoke(provider);
+await RunBorrowedDeviceOwnershipSmoke(device, provider);
+using var factory = (ProGpuDrawingFactory)provider.CreateGraphics(device);
 var geometryFactory = new ProGpuGeometryFactory();
 {
 	var geometryBuilder = geometryFactory.CreatePrimitiveGeometryBuilder();
@@ -89,6 +93,9 @@ if (outside[3] > 4 || red[2] < 200 || red[3] < 240 || blue[0] < 180 || blue[3] <
 RunPresentSmoke(device, factory);
 await RunHostBackdropSmoke(device, factory);
 await RunTransformedHostBackdropSmoke(factory);
+await RunEffectLayerBoundsSmoke(factory);
+await RunNestedEffectLayerBoundsSmoke(factory);
+await RunEffectPrimitiveBoundsSmoke(factory, geometryFactory);
 RunStablePresentCacheSmoke(device, factory);
 await RunNestedRecordClearSmoke(factory);
 await RunDefaultTrimSmoke(factory, geometryFactory);
@@ -100,6 +107,7 @@ await RunStateStackSmoke(factory);
 await RunTransformedStrokeSmoke(factory, geometryFactory);
 await RunRoundedGeometrySmoke(factory);
 await RunRoundedDifferenceClipSmoke(factory);
+await RunRoundedRectangularDifferenceClipSmoke(factory);
 await RunNestedRoundedBorderSmoke(factory);
 await RunTranslatedGeometryClipSmoke(factory);
 RunPrimaryTranslatedGeometryClipSmoke(factory);
@@ -113,6 +121,65 @@ if (ProGpuDiagnostics.UnsupportedOperationCount != 0)
 
 Console.WriteLine($"ProGPU runtime smoke passed; center={Convert.ToHexString(blue)}, frame={ProGpuDiagnostics.LastFrame?.FrameNumber ?? 0}.");
 foreach (var element in glyphElements) if (element is GlyphOutline outline) outline.Outline.Dispose();
+
+static void RunProviderContextContractSmoke(ProGpuGraphicsProvider provider)
+{
+	if (provider.PreferredContexts.Count != 1 ||
+		provider.PreferredContexts[0] != GraphicsContextKind.WebGpu ||
+		(object)provider is not IGraphicsProvider<IWebGpuDeviceContext> ||
+		(object)provider is IGraphicsProvider<IGraphicsContext> ||
+		(object)provider is IGraphicsProvider<IMetalDeviceContext> ||
+		(object)provider is IGraphicsProvider<IGLDeviceContext>)
+	{
+		throw new InvalidOperationException(
+			"The ProGPU provider must negotiate exactly the typed WebGPU device context.");
+	}
+}
+
+static async Task RunBorrowedDeviceOwnershipSmoke(
+	IWebGpuDeviceContext device,
+	ProGpuGraphicsProvider provider)
+{
+	using (var borrowedFactory = (ProGpuDrawingFactory)provider.CreateGraphics(device))
+	using (var texture = borrowedFactory.RenderOffscreen(64, 64, drawing =>
+	{
+		drawing.Clear(Color.FromArgb(255, 25, 50, 100));
+		drawing.DrawRect(new Rect(16, 16, 32, 32), Color.FromArgb(255, 220, 40, 30));
+	}))
+	{
+		var pixels = new byte[64 * 64 * 4];
+		(await borrowedFactory.SnapshotAsync(texture)).CopyPixels(pixels);
+		if (Pixel(pixels, 32, 32)[2] < 180 || Pixel(pixels, 4, 4)[0] < 80)
+		{
+			throw new InvalidOperationException("The disposable borrowed-device factory did not render before release.");
+		}
+	}
+
+	RunPostFactoryDisposeDeviceSmoke(device);
+}
+
+static unsafe void RunPostFactoryDisposeDeviceSmoke(IWebGpuDeviceContext device)
+{
+	var descriptor = new N.WGPUTextureDescriptor
+	{
+		Size = new N.WGPUExtent3D { Width = 4, Height = 4, DepthOrArrayLayers = 1 },
+		Format = N.WGPUTextureFormat.BGRA8Unorm,
+		MipLevelCount = 1,
+		SampleCount = 1,
+		Dimension = N.WGPUTextureDimension._2D,
+		Usage = N.WGPUTextureUsage.RenderAttachment | N.WGPUTextureUsage.CopySrc,
+	};
+	var nativeTexture = N.WGPU.wgpuDeviceCreateTexture(device.Device, &descriptor);
+	if (nativeTexture == 0)
+	{
+		throw new InvalidOperationException(
+			"Disposing ProGPU released the Uno-owned WebGPU device instead of only its borrowed lifetime.");
+	}
+
+	_ = N.WGPU.wgpuDevicePoll(device.Device, 1, null);
+	N.WGPU.wgpuTextureDestroy(nativeTexture);
+	N.WGPU.wgpuTextureRelease(nativeTexture);
+}
 
 static unsafe void RunPresentSmoke(IWebGpuDeviceContext device, ProGpuDrawingFactory factory)
 {
@@ -236,6 +303,213 @@ static async Task RunTransformedHostBackdropSmoke(
 	{
 		throw new InvalidOperationException(
 			$"A transformed host backdrop lost its placement: boundary={Convert.ToHexString(transformedBoundary)}.");
+	}
+}
+
+static async Task RunEffectLayerBoundsSmoke(ProGpuDrawingFactory factory)
+{
+	using var shadow = factory.CreateDropShadowFilter(
+		8,
+		0,
+		0,
+		0,
+		Color.FromArgb(255, 220, 30, 20));
+	using var texture = factory.RenderOffscreen(64, 64, drawing =>
+	{
+		drawing.Clear(Color.FromArgb(0, 0, 0, 0));
+		drawing.SaveLayer(shadow);
+		drawing.Translate(16, 16);
+		drawing.DrawRect(new Rect(4, 4, 16, 12), Color.FromArgb(255, 20, 70, 220));
+		drawing.Restore();
+		// Uno's non-analytic fallback replays the source after the shadow-only layer.
+		drawing.DrawRect(new Rect(20, 20, 16, 12), Color.FromArgb(255, 20, 70, 220));
+	});
+	var pixels = new byte[64 * 64 * 4];
+	(await factory.SnapshotAsync(texture)).CopyPixels(pixels);
+	var content = Pixel(pixels, 24, 26);
+	var shadowOnly = Pixel(pixels, 40, 26);
+	var staleOrigin = Pixel(pixels, 8, 6);
+	if (content[0] < 180 || content[2] > 80 || content[3] < 240 ||
+		shadowOnly[2] < 180 || shadowOnly[0] > 80 || shadowOnly[3] < 240 ||
+		staleOrigin[3] > 4)
+	{
+		throw new InvalidOperationException(
+			$"An effect layer lost its non-zero content bounds: content={Convert.ToHexString(content)}, shadow={Convert.ToHexString(shadowOnly)}, staleOrigin={Convert.ToHexString(staleOrigin)}.");
+	}
+}
+
+static async Task RunNestedEffectLayerBoundsSmoke(ProGpuDrawingFactory factory)
+{
+	using var outerShadow = factory.CreateDropShadowFilter(
+		8,
+		0,
+		0,
+		0,
+		Color.FromArgb(255, 220, 30, 20));
+	using var innerShadow = factory.CreateDropShadowFilter(
+		4,
+		0,
+		0,
+		0,
+		Color.FromArgb(255, 255, 255, 255));
+	using var texture = factory.RenderOffscreen(64, 64, drawing =>
+	{
+		drawing.Clear(Color.FromArgb(0, 0, 0, 0));
+		drawing.SaveLayer(outerShadow);
+		drawing.SaveLayer(innerShadow);
+		drawing.DrawRect(new Rect(12, 20, 12, 8), Color.FromArgb(255, 255, 255, 255));
+		drawing.Restore();
+		drawing.Restore();
+	});
+	var pixels = new byte[64 * 64 * 4];
+	(await factory.SnapshotAsync(texture)).CopyPixels(pixels);
+	var nestedShadow = Pixel(pixels, 30, 24);
+	var omittedSource = Pixel(pixels, 16, 24);
+	var staleOrigin = Pixel(pixels, 4, 4);
+	if (nestedShadow[2] < 180 || nestedShadow[0] > 80 || nestedShadow[3] < 240 ||
+		omittedSource[3] > 4 || staleOrigin[3] > 4)
+	{
+		throw new InvalidOperationException(
+			$"Nested shadow-only layers lost their propagated output bounds: shadow={Convert.ToHexString(nestedShadow)}, source={Convert.ToHexString(omittedSource)}, staleOrigin={Convert.ToHexString(staleOrigin)}.");
+	}
+}
+
+static async Task RunEffectPrimitiveBoundsSmoke(
+	ProGpuDrawingFactory factory,
+	ProGpuGeometryFactory geometryFactory)
+{
+	using var shadow = factory.CreateDropShadowFilter(
+		8,
+		0,
+		0,
+		0,
+		Color.FromArgb(255, 220, 30, 20));
+	var builder = geometryFactory.CreatePrimitiveGeometryBuilder();
+	builder.AddRectangle(new Rect(12, 20, 12, 8));
+	using var geometry = builder.Build();
+	var shader = factory.CreateLinearGradientShader(
+		new Vector2(12, 20),
+		new Vector2(24, 28),
+		[Color.FromArgb(255, 255, 255, 255), Color.FromArgb(255, 180, 220, 255)],
+		[0f, 1f],
+		GradientTileMode.Clamp,
+		Matrix3x2.Identity);
+	var imagePixels = new byte[12 * 8 * 4];
+	Array.Fill(imagePixels, (byte)255);
+	using var image = factory.CreateTexture(12, 8, imagePixels);
+	var tint = factory.CreateBlendModeColorFilter(
+		Color.FromArgb(255, 255, 255, 255),
+		BlendMode.SrcIn);
+
+	await AssertEffectPrimitiveBounds(
+		factory,
+		shadow,
+		"gradient rectangle",
+		drawing => drawing.DrawRect(new Rect(12, 20, 12, 8), shader, true),
+		26,
+		24);
+	await AssertEffectPrimitiveBounds(
+		factory,
+		shadow,
+		"non-uniform rounded rectangle",
+		drawing => drawing.DrawRoundedRect(
+			new Rect(12, 20, 12, 8),
+			new Vector4(1, 2, 3, 2),
+			Color.FromArgb(255, 255, 255, 255),
+			true),
+		26,
+		24);
+	await AssertEffectPrimitiveBounds(
+		factory,
+		shadow,
+		"rounded border",
+		drawing => drawing.DrawRoundedRectBorder(
+			new Rect(12, 20, 12, 8),
+			new Vector4(2, 3, 2, 3),
+			new Rect(14, 22, 8, 4),
+			new Vector4(1),
+			Color.FromArgb(255, 255, 255, 255),
+			true),
+		21,
+		24);
+	await AssertEffectPrimitiveBounds(
+		factory,
+		shadow,
+		"path fill",
+		drawing => drawing.DrawPath(geometry, Color.FromArgb(255, 255, 255, 255), true),
+		26,
+		24);
+	await AssertEffectPrimitiveBounds(
+		factory,
+		shadow,
+		"path stroke",
+		drawing => drawing.StrokePath(geometry, Color.FromArgb(255, 255, 255, 255), 4, true),
+		20,
+		24);
+	await AssertEffectPrimitiveBounds(
+		factory,
+		shadow,
+		"line",
+		drawing => drawing.DrawLine(
+			new Vector2(12, 24),
+			new Vector2(24, 24),
+			Color.FromArgb(255, 255, 255, 255),
+			4,
+			true),
+		26,
+		24);
+	await AssertEffectPrimitiveBounds(
+		factory,
+		shadow,
+		"image",
+		drawing => drawing.DrawImage(image, 12, 20, ImageSampling.Linear, 0.8f, true),
+		26,
+		24);
+	await AssertEffectPrimitiveBounds(
+		factory,
+		shadow,
+		"color-filtered image",
+		drawing => drawing.DrawImage(image, 12, 20, ImageSampling.Linear, tint, true),
+		26,
+		24);
+	await AssertEffectPrimitiveBounds(
+		factory,
+		shadow,
+		"nine-slice image",
+		drawing => drawing.DrawImageNineSlice(
+			image,
+			new Rect(4, 2, 4, 4),
+			new Rect(12, 20, 12, 8),
+			centerHollow: false,
+			antialias: true),
+		26,
+		24);
+}
+
+static async Task AssertEffectPrimitiveBounds(
+	ProGpuDrawingFactory factory,
+	IEffectFilter shadow,
+	string operation,
+	Action<IDrawingSession> draw,
+	int sampleX,
+	int sampleY)
+{
+	using var texture = factory.RenderOffscreen(64, 64, drawing =>
+	{
+		drawing.Clear(Color.FromArgb(0, 0, 0, 0));
+		drawing.SaveLayer(shadow);
+		draw(drawing);
+		drawing.Restore();
+	});
+	var pixels = new byte[64 * 64 * 4];
+	(await factory.SnapshotAsync(texture)).CopyPixels(pixels);
+	var shadowPixel = Pixel(pixels, sampleX, sampleY);
+	var staleOrigin = Pixel(pixels, 4, 4);
+	if (shadowPixel[2] < 120 || shadowPixel[0] > 100 || shadowPixel[3] < 160 ||
+		staleOrigin[3] > 4)
+	{
+		throw new InvalidOperationException(
+			$"The {operation} effect layer lost its content bounds: shadow={Convert.ToHexString(shadowPixel)}, staleOrigin={Convert.ToHexString(staleOrigin)}.");
 	}
 }
 
@@ -692,6 +966,44 @@ static async Task RunRoundedDifferenceClipSmoke(ProGpuDrawingFactory factory)
 	{
 		throw new InvalidOperationException(
 			$"A rounded Difference clip lost its ring semantics: edge={Convert.ToHexString(Pixel(pixels, 6, 32))}, center={Convert.ToHexString(Pixel(pixels, 32, 32))}, corner={Convert.ToHexString(Pixel(pixels, 4, 4))}.");
+	}
+}
+
+static async Task RunRoundedRectangularDifferenceClipSmoke(ProGpuDrawingFactory factory)
+{
+	using var texture = factory.RenderOffscreen(64, 64, drawing =>
+	{
+		drawing.Clear(Color.FromArgb(0, 0, 0, 0));
+		drawing.Save();
+		drawing.ClipRoundRect(
+			new RoundRectangle
+			{
+				Rect = new Rect(4, 4, 56, 56),
+				TopLeft = new Vector2(10),
+				TopRight = new Vector2(10),
+				BottomRight = new Vector2(10),
+				BottomLeft = new Vector2(10),
+			},
+			ClipOperation.Intersect,
+			true);
+		drawing.Save();
+		drawing.ClipRect(new Rect(12, 12, 40, 40), ClipOperation.Difference, true);
+		drawing.DrawRect(new Rect(0, 0, 64, 64), Color.FromArgb(255, 220, 40, 30), true);
+		drawing.Restore();
+		// Restoring the rectangular hole must leave the original rounded outer
+		// clip active rather than retaining the coalesced even-odd ring.
+		drawing.DrawRect(new Rect(24, 24, 16, 16), Color.FromArgb(255, 30, 80, 220), true);
+		drawing.Restore();
+	});
+	var pixels = new byte[64 * 64 * 4];
+	(await factory.SnapshotAsync(texture)).CopyPixels(pixels);
+	var ring = Pixel(pixels, 8, 32);
+	var restoredCenter = Pixel(pixels, 32, 32);
+	var clippedCorner = Pixel(pixels, 4, 4);
+	if (ring[2] < 140 || restoredCenter[0] < 140 || clippedCorner[3] > 16)
+	{
+		throw new InvalidOperationException(
+			$"A rounded/rectangular Difference clip lost its restored outer scope: ring={Convert.ToHexString(ring)}, center={Convert.ToHexString(restoredCenter)}, corner={Convert.ToHexString(clippedCorner)}.");
 	}
 }
 

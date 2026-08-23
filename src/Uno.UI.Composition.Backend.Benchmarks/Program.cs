@@ -56,7 +56,7 @@ internal sealed record BenchmarkOptions(
 		var backend = Value("--backend", "progpu").ToLowerInvariant();
 		if (backend is not ("progpu" or "webgpu" or "skia")) throw new ArgumentException("--backend must be progpu, webgpu, or skia.");
 		var scenario = Value("--scenario", "cached").ToLowerInvariant();
-		if (scenario is not ("cached" or "sparse" or "text" or "paths" or "images")) throw new ArgumentException("--scenario must be cached, sparse, text, paths, or images.");
+		if (scenario is not ("cached" or "sparse" or "text" or "paths" or "images" or "clips" or "effects")) throw new ArgumentException("--scenario must be cached, sparse, text, paths, images, clips, or effects.");
 		var warmups = int.Parse(Value("--warmups", "4"), CultureInfo.InvariantCulture);
 		var samples = int.Parse(Value("--samples", "100"), CultureInfo.InvariantCulture);
 		var batchSize = int.Parse(Value("--batch-size", "60"), CultureInfo.InvariantCulture);
@@ -92,6 +92,8 @@ internal sealed class BenchmarkHarness : IDisposable
 	private readonly IGeometry _path;
 	private readonly ITexture _image;
 	private readonly IReadOnlyList<GlyphRunElement> _text;
+	private readonly IEffectFilter? _backdropBlur;
+	private readonly IEffectFilter? _dropShadow;
 	private bool _disposed;
 
 	private BenchmarkHarness(BenchmarkOptions options, IDisposable? deviceOwner, IWebGpuDeviceContext? device, IDrawingFactory factory, IRenderTarget target)
@@ -105,6 +107,19 @@ internal sealed class BenchmarkHarness : IDisposable
 		_path = CreatePath();
 		_image = CreateImage();
 		_text = CreateText();
+		if (options.Scenario == "effects")
+		{
+			_backdropBlur = _factory.CreateEffectFilter(
+				new BlurEffectNode(new SourceInput(), 8f, true),
+				new Rect(0, 0, Width, Height)) ??
+				throw new InvalidOperationException($"Backend '{options.Backend}' does not support the effects benchmark graph.");
+			_dropShadow = _factory.CreateDropShadowFilter(
+				4,
+				6,
+				6,
+				6,
+				Color.FromArgb(150, 0, 0, 0));
+		}
 	}
 
 	internal static BenchmarkHarness Create(BenchmarkOptions options)
@@ -227,6 +242,74 @@ internal sealed class BenchmarkHarness : IDisposable
 				}
 			}
 			recorder.SetMatrix(Matrix4x4.Identity);
+		}
+
+		if (_options.Scenario == "clips")
+		{
+			for (var y = 0; y < 12; y++) for (var x = 0; x < 20; x++)
+			{
+				var restore = recorder.Save();
+				recorder.Translate(x * 64 + 4, y * 60 + 4);
+				recorder.ClipRoundRect(
+					new RoundRectangle
+					{
+						Rect = new Rect(0, 0, 56, 52),
+						TopLeft = new Vector2(9),
+						TopRight = new Vector2(7),
+						BottomRight = new Vector2(11),
+						BottomLeft = new Vector2(5),
+					},
+					ClipOperation.Intersect,
+					true);
+				recorder.ClipRect(new Rect(12, 12, 32, 28), ClipOperation.Difference, true);
+				recorder.DrawRect(
+					new Rect(0, 0, 56, 52),
+					Color.FromArgb(220, (byte)(40 + x * 7), (byte)(60 + y * 11), 210),
+					true);
+				recorder.RestoreToCount(restore);
+			}
+		}
+
+		if (_options.Scenario == "effects")
+		{
+			for (var y = 0; y < 3; y++) for (var x = 0; x < 4; x++)
+			{
+				var left = 36 + x * 312;
+				var top = 32 + y * 224;
+				var restore = recorder.Save();
+				recorder.ClipRoundRect(
+					new RoundRectangle
+					{
+						Rect = new Rect(left, top, 272, 184),
+						TopLeft = new Vector2(18),
+						TopRight = new Vector2(18),
+						BottomRight = new Vector2(18),
+						BottomLeft = new Vector2(18),
+					},
+					ClipOperation.Intersect,
+					true);
+				recorder.DrawEffectBackdrop(_backdropBlur!, 0.82f);
+				recorder.DrawRoundedRect(
+					new Rect(left, top, 272, 184),
+					new Vector4(18),
+					Color.FromArgb(70, 245, 248, 255),
+					true);
+				recorder.RestoreToCount(restore);
+
+				recorder.SaveLayer(_dropShadow!);
+				recorder.DrawRoundedRect(
+					new Rect(left + 72, top + 56, 128, 72),
+					new Vector4(14),
+					Color.FromArgb(230, 32, 72, 148),
+					true);
+				recorder.Restore();
+				// Uno's fallback applies a shadow-only layer, then replays the source.
+				recorder.DrawRoundedRect(
+					new Rect(left + 72, top + 56, 128, 72),
+					new Vector4(14),
+					Color.FromArgb(230, 32, 72, 148),
+					true);
+			}
 		}
 
 		return new ProGpuRenderRecordScope(recorder.Finish());
@@ -438,7 +521,13 @@ internal sealed class BenchmarkHarness : IDisposable
 
 	private string SemanticHash()
 	{
-		var bytes = Encoding.UTF8.GetBytes($"v2|clear=FF080C14|retainedRows=24|{_options.Scenario}|{Width}|{Height}|768|{(_options.Scenario == "text" ? 128 : 0)}|{(_options.Scenario == "paths" ? 1000 : 0)}|{(_options.Scenario == "images" ? 240 : 0)}");
+		var extension = _options.Scenario switch
+		{
+			"clips" => "|clips=240",
+			"effects" => "|effectCards=12|sourceReplay=true",
+			_ => string.Empty,
+		};
+		var bytes = Encoding.UTF8.GetBytes($"v2|clear=FF080C14|retainedRows=24|{_options.Scenario}|{Width}|{Height}|768|{(_options.Scenario == "text" ? 128 : 0)}|{(_options.Scenario == "paths" ? 1000 : 0)}|{(_options.Scenario == "images" ? 240 : 0)}{extension}");
 		return Convert.ToHexString(SHA256.HashData(bytes));
 	}
 
@@ -481,6 +570,8 @@ internal sealed class BenchmarkHarness : IDisposable
 		{
 			record.Dispose();
 		}
+		_backdropBlur?.Dispose();
+		_dropShadow?.Dispose();
 		_target.Dispose();
 		(_factory as IDisposable)?.Dispose();
 		_deviceOwner?.Dispose();

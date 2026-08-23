@@ -33,6 +33,9 @@ public sealed class ProGpuGraphicsProvider : IGraphicsProvider<IWebGpuDeviceCont
 
 public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderTarget>, IDisposable
 {
+	// Calibrate Uno's explicit sigma contract to ProGPU's fixed-tap backdrop
+	// footprint while retaining the single-pass sampling path.
+	private const float BackdropBlurRadiusPerSigma = 2f;
 	private readonly WgpuContext _context = new();
 	private readonly Compositor _compositor;
 	private readonly PictureVisual _presentVisual = new();
@@ -294,7 +297,7 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 
 	public IColorFilter CreateBlendModeColorFilter(UColor color, BlendMode mode) => new ProGpuColorFilter(Color(color), mode, null);
 	public IColorFilter CreateColorMatrixColorFilter(float[] matrix) => new ProGpuColorFilter(default, null, (float[])matrix.Clone());
-	public IEffectFilter CreateDropShadowFilter(float dx, float dy, float sigmaX, float sigmaY, UColor color) => new ProGpuEffectFilter(new DropShadowEffect(MathF.Max(sigmaX, sigmaY) * 2f) { Offset = new Vector2(dx, dy), Color = Color(color) });
+	public IEffectFilter CreateDropShadowFilter(float dx, float dy, float sigmaX, float sigmaY, UColor color) => new ProGpuEffectFilter(new DropShadowEffect(MathF.Max(sigmaX, sigmaY)) { Offset = new Vector2(dx, dy), Color = Color(color), DrawSource = false });
 
 	public IEffectFilter? CreateEffectFilter(EffectNode tree, URect bounds)
 	{
@@ -305,7 +308,7 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 		}
 		return tree switch
 		{
-			BlurEffectNode blur when blur.Source is SourceInput => new ProGpuEffectFilter(new BlurEffect(blur.Sigma * 2f)),
+			BlurEffectNode blur when blur.Source is SourceInput => new ProGpuEffectFilter(new BlurEffect(blur.Sigma)),
 			_ => null,
 		};
 	}
@@ -323,7 +326,7 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 					sawBackdrop = true;
 					break;
 				case BlurEffectNode blurNode:
-					blur = MathF.Max(blur, blurNode.Sigma * 2f);
+					blur = MathF.Max(blur, blurNode.Sigma * BackdropBlurRadiusPerSigma);
 					Walk(blurNode.Source);
 					break;
 				case ColorInput color:
@@ -479,6 +482,8 @@ internal class ProGpuDrawingSession : IDrawingSession
 	private RoundedClipCommand? _lastRoundedClip;
 	private Vector4? _leadingClearColor;
 	private bool _hasHostBackdrop;
+	private PRect? _effectContentBounds;
+	private int _effectLayerDepth;
 	private bool _finished;
 
 	protected ProGpuDrawingSession(ProGpuDrawingFactory factory)
@@ -517,9 +522,20 @@ internal class ProGpuDrawingSession : IDrawingSession
 			case Scope.EffectLayer:
 				var layer = state.Layer ?? throw new InvalidOperationException("Effect layer state was incomplete.");
 				var picture = layer.Recorder.EndRecording();
+				var contentBounds = _effectContentBounds;
+				_effectContentBounds = layer.ParentContentBounds;
+				_effectLayerDepth--;
 				Context = layer.Parent;
-				Context.RetainResource(picture);
-				Context.DrawVisual(new EffectPictureVisual(picture, layer.Effect));
+				if (contentBounds is { IsEmpty: false } bounds)
+				{
+					Context.RetainResource(picture);
+					Context.DrawVisual(new EffectPictureVisual(picture, layer.Effect, bounds));
+					IncludeEffectBounds(bounds, layer.Effect);
+				}
+				else
+				{
+					picture.Dispose();
+				}
 				break;
 		}
 		_matrix = state.Matrix;
@@ -550,13 +566,23 @@ internal class ProGpuDrawingSession : IDrawingSession
 
 		var parent = Context;
 		var recorder = new GpuPictureRecorder();
-		PushState(Scope.EffectLayer, new EffectLayer(parent, recorder, effect));
+		PushState(Scope.EffectLayer, new EffectLayer(parent, recorder, effect, _effectContentBounds));
+		_effectContentBounds = null;
+		_effectLayerDepth++;
 		Context = recorder.BeginRecording(new PRect(0, 0, 1, 1));
 	}
 
 	public void ClipRect(in URect rect, ClipOperation operation = ClipOperation.Intersect, bool antialias = false)
 	{
-		if (operation == ClipOperation.Difference) { ClipPath(DifferenceRect(rect), operation, antialias); return; }
+		if (operation == ClipOperation.Difference)
+		{
+			if (TryCoalesceRoundedRectangularDifference(rect))
+			{
+				return;
+			}
+			ClipPath(DifferenceRect(rect), operation, antialias);
+			return;
+		}
 		_clipBounds = Intersect(_clipBounds, Rect(rect));
 		Context.PushClip(Rect(rect), _matrix);
 		_clips.Push(new ClipState(ClipScope.Rect));
@@ -656,6 +682,44 @@ internal class ProGpuDrawingSession : IDrawingSession
 		return true;
 	}
 
+	private bool TryCoalesceRoundedRectangularDifference(in URect inner)
+	{
+		if (_lastRoundedClip is not { } previous ||
+			!ReferenceEquals(previous.Context, Context) ||
+			previous.CommandIndex != Context.Commands.Count - 1 ||
+			previous.ClipCount != _clips.Count ||
+			previous.Transform != _matrix ||
+			!Contains(previous.RoundRect.Rect, inner))
+		{
+			return false;
+		}
+		if (previous.RoundRect.Rect == inner)
+		{
+			Context.PushClip(new PRect(0, 0, 0, 0), _matrix);
+			_clips.Push(new ClipState(ClipScope.Rect));
+			_lastRoundedClip = null;
+			return true;
+		}
+
+		Context.Commands.RemoveAt(previous.CommandIndex);
+		using var outerGeometry = RoundedGeometry(previous.RoundRect);
+		using var innerGeometry = DifferenceRect(inner);
+		var outerPath = ProGpuGeometryFactory.Import(outerGeometry).Path;
+		var innerPath = ProGpuGeometryFactory.Import(innerGeometry).Path;
+		var ring = outerPath.CreateTransformed(Matrix4x4.Identity);
+		ring.FillRule = FillRule.EvenOdd;
+		var excluded = innerPath.CreateTransformed(Matrix4x4.Identity);
+		foreach (var figure in excluded.Figures)
+		{
+			ring.Figures.Add(figure);
+		}
+
+		Context.PushGeometryClip(ring, _matrix);
+		_clips.Push(new ClipState(ClipScope.CoalescedRoundedDifference, outerPath, previous.Transform));
+		_lastRoundedClip = null;
+		return true;
+	}
+
 	public void Clear(UColor color)
 	{
 		var clearColor = ProGpuDrawingFactory.Color(color);
@@ -685,12 +749,25 @@ internal class ProGpuDrawingSession : IDrawingSession
 		Context.DrawRectangle(new SolidColorBrush(color), null, new PRect(-1_000_000, -1_000_000, 2_000_000, 2_000_000), Matrix4x4.Identity);
 		Context.PopBlendMode();
 	}
-	public void DrawRect(in URect rect, UColor color, bool antialias = false) => Context.DrawRectangle(Solid(color), null, Rect(rect), _matrix);
-	public void DrawRect(in URect rect, IShader shader, bool antialias = false) => Context.DrawRectangle(Shader(shader), null, Rect(rect), _matrix);
+	public void DrawRect(in URect rect, UColor color, bool antialias = false)
+	{
+		IncludeEffectBounds(Rect(rect));
+		Context.DrawRectangle(Solid(color), null, Rect(rect), _matrix);
+	}
+	public void DrawRect(in URect rect, IShader shader, bool antialias = false)
+	{
+		IncludeEffectBounds(Rect(rect));
+		Context.DrawRectangle(Shader(shader), null, Rect(rect), _matrix);
+	}
 	public void DrawRoundedRect(in URect rect, Vector4 radii, UColor color, bool antialias = false)
 	{
+		IncludeEffectBounds(Rect(rect));
 		if (radii.X == radii.Y && radii.X == radii.Z && radii.X == radii.W) Context.DrawRoundedRectangle(Solid(color), null, Rect(rect), radii.X, radii.X, _matrix);
-		else { using var geometry = RoundedGeometry(rect, radii); DrawPath(geometry, color, antialias); }
+		else
+		{
+			using var geometry = RoundedGeometry(rect, radii);
+			Context.DrawPath(Solid(color), null, ProGpuGeometryFactory.Import(geometry).Path, _matrix);
+		}
 	}
 	public void DrawRoundedRectBorder(in URect outer, Vector4 outerRadii, in URect inner, Vector4 innerRadii, UColor color, bool antialias = false)
 	{
@@ -701,6 +778,7 @@ internal class ProGpuDrawingSession : IDrawingSession
 		if (left > 0f && NearlyEqual(left, top) && NearlyEqual(left, right) && NearlyEqual(left, bottom) &&
 			AllEqual(outerRadii) && AllEqual(innerRadii))
 		{
+			IncludeEffectBounds(Rect(outer));
 			var half = left * 0.5f;
 			var strokeBounds = new PRect(
 				(float)outer.X + half,
@@ -722,6 +800,7 @@ internal class ProGpuDrawingSession : IDrawingSession
 	}
 	public void DrawPath(IGeometry geometry, UColor color, bool antialias = false)
 	{
+		IncludeEffectBounds(Rect(geometry.Bounds));
 		if (geometry is ProGpuGlyphRunGeometry glyphRun)
 		{
 			Context.DrawGlyphRun(
@@ -758,10 +837,26 @@ internal class ProGpuDrawingSession : IDrawingSession
 		child.DrawPath(Solid(color), null, ProGpuGeometryFactory.Import(silhouette).Path, _matrix);
 		var picture = recorder.EndRecording();
 		Context.RetainResource(picture);
-		Context.DrawVisual(new EffectPictureVisual(picture, new DropShadowEffect(MathF.Max(sigmaX, sigmaY) * 2f) { Color = ProGpuDrawingFactory.Color(color) }));
+		var effect = new DropShadowEffect(MathF.Max(sigmaX, sigmaY)) { Color = ProGpuDrawingFactory.Color(color), DrawSource = false };
+		var bounds = TransformBounds(Rect(silhouette.Bounds), _matrix);
+		Context.DrawVisual(new EffectPictureVisual(picture, effect, bounds));
+		IncludeEffectBounds(bounds, effect, alreadyTransformed: true);
 	}
-	public void StrokePath(IGeometry geometry, UColor color, float strokeWidth, bool antialias = false) => Context.DrawPath(null, new Pen(Solid(color), strokeWidth), ProGpuGeometryFactory.Import(geometry).Path, _matrix);
-	public void DrawLine(Vector2 p0, Vector2 p1, UColor color, float strokeWidth, bool antialias = false) => Context.DrawLine(new Pen(Solid(color), strokeWidth), p0, p1, _matrix);
+	public void StrokePath(IGeometry geometry, UColor color, float strokeWidth, bool antialias = false)
+	{
+		IncludeEffectBounds(Inflate(Rect(geometry.Bounds), strokeWidth * 0.5f));
+		Context.DrawPath(null, new Pen(Solid(color), strokeWidth), ProGpuGeometryFactory.Import(geometry).Path, _matrix);
+	}
+	public void DrawLine(Vector2 p0, Vector2 p1, UColor color, float strokeWidth, bool antialias = false)
+	{
+		var half = strokeWidth * 0.5f;
+		IncludeEffectBounds(new PRect(
+			MathF.Min(p0.X, p1.X) - half,
+			MathF.Min(p0.Y, p1.Y) - half,
+			MathF.Abs(p1.X - p0.X) + strokeWidth,
+			MathF.Abs(p1.Y - p0.Y) + strokeWidth));
+		Context.DrawLine(new Pen(Solid(color), strokeWidth), p0, p1, _matrix);
+	}
 	public void DrawImage(ITexture texture, float x, float y, ImageSampling sampling, float opacity = 1, bool antialias = false) => DrawTexture(texture, new URect(x, y, texture.PixelWidth, texture.PixelHeight), sampling, opacity);
 	public void DrawImage(ITexture texture, float x, float y, ImageSampling sampling, IColorFilter colorFilter, bool antialias = false)
 	{
@@ -785,6 +880,7 @@ internal class ProGpuDrawingSession : IDrawingSession
 			sourceRect: new PRect(0, 0, texture.PixelWidth, texture.PixelHeight),
 			samplingMode: sampling == ImageSampling.NearestNeighbor ? TextureSamplingMode.Nearest : TextureSamplingMode.Linear,
 			colorMatrix: matrix, transform: _matrix);
+		IncludeEffectBounds(new PRect(x, y, texture.PixelWidth, texture.PixelHeight));
 	}
 	public void DrawImageNineSlice(ITexture texture, in URect centerSlice, in URect destination, bool centerHollow, bool antialias = false)
 	{
@@ -853,6 +949,7 @@ internal class ProGpuDrawingSession : IDrawingSession
 	private void DrawTexturePart(ITexture texture, PRect source, PRect destination, ImageSampling sampling, float opacity)
 	{
 		if (texture is not ProGpuTexture native || !ReferenceEquals(native.Texture.Context, ((ProGpuDrawingFactory)Factory).Context)) throw new ArgumentException("Texture belongs to another drawing factory.", nameof(texture));
+		IncludeEffectBounds(destination);
 		if (opacity < 1) Context.PushOpacity(Math.Clamp(opacity, 0, 1));
 		Context.DrawTexture(native.Texture, destination, source, _matrix, sampling == ImageSampling.NearestNeighbor ? TextureSamplingMode.Nearest : TextureSamplingMode.Linear);
 		if (opacity < 1) Context.PopOpacity();
@@ -868,6 +965,78 @@ internal class ProGpuDrawingSession : IDrawingSession
 		var rightEdge = MathF.Min(left.Right, right.Right);
 		var bottom = MathF.Min(left.Bottom, right.Bottom);
 		return new PRect(x, y, MathF.Max(0, rightEdge - x), MathF.Max(0, bottom - y));
+	}
+	private void IncludeEffectBounds(PRect bounds, EffectBase? effect = null, bool alreadyTransformed = false)
+	{
+		if (_effectLayerDepth == 0 || bounds.IsEmpty)
+		{
+			return;
+		}
+
+		var transformed = alreadyTransformed ? bounds : TransformBounds(bounds, _matrix);
+		if (effect is not null)
+		{
+			transformed = EffectOutputBounds(transformed, effect);
+		}
+		_effectContentBounds = _effectContentBounds is { } current
+			? Union(current, transformed)
+			: transformed;
+	}
+	private static PRect EffectOutputBounds(PRect content, EffectBase effect)
+	{
+		var padding = effect switch
+		{
+			BlurEffect blur => MathF.Ceiling(MathF.Max(0, blur.BlurRadius) * 2f),
+			DropShadowEffect shadow => MathF.Ceiling(MathF.Max(0, shadow.BlurRadius) * 2f),
+			_ => 0f,
+		};
+		var output = effect is DropShadowEffect { DrawSource: false }
+			? PRect.Empty
+			: Inflate(content, padding);
+		if (effect is DropShadowEffect dropShadow)
+		{
+			var shadowBounds = new PRect(
+				content.X + dropShadow.Offset.X - padding,
+				content.Y + dropShadow.Offset.Y - padding,
+				content.Width + padding * 2f,
+				content.Height + padding * 2f);
+			output = output.IsEmpty ? shadowBounds : Union(output, shadowBounds);
+		}
+		return output;
+	}
+	private static PRect TransformBounds(PRect bounds, Matrix4x4 transform)
+	{
+		var p0 = TransformPoint(bounds.X, bounds.Y, transform);
+		var p1 = TransformPoint(bounds.Right, bounds.Y, transform);
+		var p2 = TransformPoint(bounds.Right, bounds.Bottom, transform);
+		var p3 = TransformPoint(bounds.X, bounds.Bottom, transform);
+		var minX = MathF.Min(MathF.Min(p0.X, p1.X), MathF.Min(p2.X, p3.X));
+		var minY = MathF.Min(MathF.Min(p0.Y, p1.Y), MathF.Min(p2.Y, p3.Y));
+		var maxX = MathF.Max(MathF.Max(p0.X, p1.X), MathF.Max(p2.X, p3.X));
+		var maxY = MathF.Max(MathF.Max(p0.Y, p1.Y), MathF.Max(p2.Y, p3.Y));
+		return new PRect(minX, minY, MathF.Max(0, maxX - minX), MathF.Max(0, maxY - minY));
+	}
+	private static Vector2 TransformPoint(float x, float y, Matrix4x4 transform)
+	{
+		var value = Vector4.Transform(new Vector4(x, y, 0, 1), transform);
+		if (MathF.Abs(value.W) > 0.000001f && value.W != 1f)
+		{
+			value /= value.W;
+		}
+		return new Vector2(value.X, value.Y);
+	}
+	private static PRect Inflate(PRect bounds, float amount) => new(
+		bounds.X - amount,
+		bounds.Y - amount,
+		bounds.Width + amount * 2f,
+		bounds.Height + amount * 2f);
+	private static PRect Union(PRect left, PRect right)
+	{
+		var x = MathF.Min(left.X, right.X);
+		var y = MathF.Min(left.Y, right.Y);
+		var rightEdge = MathF.Max(left.Right, right.Right);
+		var bottom = MathF.Max(left.Bottom, right.Bottom);
+		return new PRect(x, y, rightEdge - x, bottom - y);
 	}
 	private static bool Contains(URect outer, URect inner) =>
 		inner.Left >= outer.Left && inner.Top >= outer.Top &&
@@ -905,13 +1074,18 @@ internal class ProGpuDrawingSession : IDrawingSession
 	private readonly record struct State(Matrix4x4 Matrix, Scope Scope, PRect ClipBounds, int ClipCount, EffectLayer? Layer = null);
 	private readonly record struct ClipState(ClipScope Scope, PathGeometry? RestorePath = null, Matrix4x4 RestoreTransform = default);
 	private readonly record struct RoundedClipCommand(DrawingContext Context, int CommandIndex, RoundRectangle RoundRect, Matrix4x4 Transform, int ClipCount);
-	private sealed record EffectLayer(DrawingContext Parent, GpuPictureRecorder Recorder, EffectBase Effect);
+	private sealed record EffectLayer(DrawingContext Parent, GpuPictureRecorder Recorder, EffectBase Effect, PRect? ParentContentBounds);
 	private enum Scope { None, Blend, EffectLayer }
 	private enum ClipScope { Rect, Geometry, CoalescedRoundedDifference }
 	private sealed class EffectPictureVisual : Visual
 	{
 		private readonly GpuPicture _picture;
-		internal EffectPictureVisual(GpuPicture picture, EffectBase effect) { _picture = picture; Effect = effect; }
+		internal EffectPictureVisual(GpuPicture picture, EffectBase effect, PRect contentBounds)
+		{
+			_picture = picture;
+			Effect = effect;
+			EffectContentBounds = contentBounds;
+		}
 		public override void OnRender(DrawingContext context) => context.DrawPicture(_picture);
 	}
 }
