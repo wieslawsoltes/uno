@@ -57,7 +57,7 @@ internal sealed record BenchmarkOptions(
 		var backend = Value("--backend", "progpu").ToLowerInvariant();
 		if (backend is not ("progpu" or "webgpu" or "skia")) throw new ArgumentException("--backend must be progpu, webgpu, or skia.");
 		var scenario = Value("--scenario", "cached").ToLowerInvariant();
-		if (scenario is not ("cached" or "sparse" or "text" or "paths" or "strokes" or "images" or "clips" or "effects")) throw new ArgumentException("--scenario must be cached, sparse, text, paths, strokes, images, clips, or effects.");
+		if (scenario is not ("cached" or "sparse" or "text" or "paths" or "strokes" or "materials" or "images" or "clips" or "effects")) throw new ArgumentException("--scenario must be cached, sparse, text, paths, strokes, materials, images, clips, or effects.");
 		var warmups = int.Parse(Value("--warmups", "4"), CultureInfo.InvariantCulture);
 		var samples = int.Parse(Value("--samples", "100"), CultureInfo.InvariantCulture);
 		var batchSize = int.Parse(Value("--batch-size", "60"), CultureInfo.InvariantCulture);
@@ -95,6 +95,7 @@ internal sealed class BenchmarkHarness : IDisposable
 	private readonly ProGpuRenderRecordScope[] _changedRows;
 	private readonly IGeometry _path;
 	private readonly IGeometry[] _strokes;
+	private readonly IShader[] _materials;
 	private readonly ITexture _image;
 	private readonly IReadOnlyList<GlyphRunElement> _text;
 	private readonly IEffectFilter? _backdropBlur;
@@ -117,6 +118,7 @@ internal sealed class BenchmarkHarness : IDisposable
 		(_normalRows, _changedRows) = CreateGridRecords();
 		_path = CreatePath();
 		_strokes = CreateStrokes();
+		_materials = options.Scenario == "materials" ? CreateMaterials() : [];
 		_image = CreateImage();
 		_text = CreateText();
 		if (options.Scenario == "effects")
@@ -246,6 +248,20 @@ internal sealed class BenchmarkHarness : IDisposable
 				recorder.DrawPath(_strokes[i % _strokes.Length], Color.FromArgb(220, 80, 180, 250), true);
 			}
 			recorder.SetMatrix(Matrix4x4.Identity);
+		}
+
+		if (_options.Scenario == "materials")
+		{
+			for (var y = 0; y < 24; y++)
+			{
+				for (var x = 0; x < 32; x++)
+				{
+					var restore = recorder.Save();
+					recorder.Translate(x * 40, y * 30);
+					recorder.DrawRect(new Rect(0, 0, 38, 28), _materials[(y * 32 + x) % _materials.Length], true);
+					recorder.RestoreToCount(restore);
+				}
+			}
 		}
 
 		if (_options.Scenario == "images")
@@ -587,6 +603,44 @@ internal sealed class BenchmarkHarness : IDisposable
 		];
 	}
 
+	private IShader[] CreateMaterials()
+	{
+		var warm = new[]
+		{
+			Color.FromArgb(235, 250, 70, 45),
+			Color.FromArgb(220, 250, 195, 35),
+			Color.FromArgb(230, 75, 40, 210),
+		};
+		var cool = new[]
+		{
+			Color.FromArgb(235, 20, 205, 225),
+			Color.FromArgb(220, 35, 80, 235),
+			Color.FromArgb(230, 180, 45, 225),
+		};
+		var hard = new[]
+		{
+			Color.FromArgb(235, 245, 245, 250),
+			Color.FromArgb(235, 30, 40, 65),
+			Color.FromArgb(235, 235, 65, 145),
+			Color.FromArgb(235, 25, 190, 150),
+		};
+		var threeStops = new[] { 0f, 0.45f, 1f };
+		var hardStops = new[] { 0f, 0.5f, 0.5f, 1f };
+		var rotated = Matrix3x2.CreateRotation(0.22f, new Vector2(19, 14));
+
+		return
+		[
+			_factory.CreateLinearGradientShader(new Vector2(0, 0), new Vector2(38, 28), warm, threeStops, GradientTileMode.Clamp, Matrix3x2.Identity),
+			_factory.CreateLinearGradientShader(new Vector2(-8, 14), new Vector2(22, 14), cool, threeStops, GradientTileMode.Repeat, Matrix3x2.Identity),
+			_factory.CreateLinearGradientShader(new Vector2(4, 2), new Vector2(34, 26), hard, hardStops, GradientTileMode.Mirror, Matrix3x2.Identity),
+			_factory.CreateLinearGradientShader(new Vector2(0, 14), new Vector2(38, 14), warm, threeStops, GradientTileMode.Clamp, rotated),
+			_factory.CreateRadialGradientShader(new Vector2(19, 14), new Vector2(19, 14), 20, 15, cool, threeStops, GradientTileMode.Clamp, Matrix3x2.Identity),
+			_factory.CreateRadialGradientShader(new Vector2(19, 14), new Vector2(14, 10), 18, 11, warm, threeStops, GradientTileMode.Repeat, Matrix3x2.Identity),
+			_factory.CreateRadialGradientShader(new Vector2(19, 14), new Vector2(24, 17), 16, 13, hard, hardStops, GradientTileMode.Mirror, Matrix3x2.Identity),
+			_factory.CreateRadialGradientShader(new Vector2(19, 14), new Vector2(16, 12), 21, 9, cool, threeStops, GradientTileMode.Clamp, rotated),
+		];
+	}
+
 	private ITexture CreateImage()
 	{
 		var pixels = new byte[64 * 64 * 4];
@@ -625,6 +679,7 @@ internal sealed class BenchmarkHarness : IDisposable
 			"clips" => "|clips=240",
 			"effects" => "|effectCards=12|sourceReplay=true",
 			"strokes" => "|strokes=1000|styles=4|analyticArcs=true|dashes=true",
+			"materials" => "|materials=768|linear=4|radial=4|duplicateStops=true|focal=true|anisotropic=true",
 			_ => string.Empty,
 		};
 		var bytes = Encoding.UTF8.GetBytes($"v2|clear=FF080C14|retainedRows=24|{_options.Scenario}|{Width}|{Height}|768|{(_options.Scenario == "text" ? 128 : 0)}|{(_options.Scenario == "paths" ? 1000 : 0)}|{(_options.Scenario == "images" ? 240 : 0)}{extension}");

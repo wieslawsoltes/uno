@@ -242,6 +242,16 @@ effects throughput benchmark.
   all three runs retain stable backend hashes, equal semantic hashes, zero
   unsupported operations, and zero mask passes. The raw side-by-side measures
   0.9928 SSIM.
+- Three fresh forced-redraw materials pairs cover 768 linear/radial gradient
+  cells with focal, anisotropic, spread, local-matrix, translucent, and
+  duplicate-stop variants. ProGPU is 6.68× faster at median blocking total and
+  16.33× faster at completed-batch throughput; it uses two draws, zero masks,
+  stable hashes, and zero unsupported operations. The inspected contact sheet
+  retains every material variant and measures 0.9670 SSIM.
+- Uno's built-in WebGPU lane completes 40-sample forced-redraw smokes for both
+  new scenarios with zero unsupported operations. Its blocking medians are
+  17.1597 ms for strokes and 8.6350 ms for materials; balanced eight-process
+  promotion remains part of the cross-backend qualification work.
 
 See [performance-results-2026-08-23.md](performance-results-2026-08-23.md) for
 the exact values and interpretation boundaries.

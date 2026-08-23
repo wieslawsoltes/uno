@@ -63,7 +63,7 @@ are established.
   and presented through ProGPU without backend exceptions during the observed
   startup interval. The startup log, rather than the selection environment
   variable, proves that `ProGpuGraphicsProvider` won `WebGpu` negotiation.
-- Gate 2: **passed for the expanded real-device smoke and eight benchmark
+- Gate 2: **passed for the expanded real-device smoke and nine benchmark
   scenes**; the systematic SamplesApp page corpus has not run.
 - Gate 3: **passed on macOS/Metal**. The runtime test disposes a factory that
   borrowed the host context, then successfully allocates and releases another
@@ -74,6 +74,7 @@ are established.
   and process-module audit remains.
 - Gate 6: **passed for eight alternating ProGPU/Skia processes across the seven
   primary scenarios, plus three fresh forced-redraw pairs for the native-stroke
-  scenario**. Cached and sparse output is byte-exact; text/path/stroke/image/
-  clip and effect differences are quantified. The earlier Uno WebGPU context
-  lane has two processes and still needs eight-process promotion.
+  and materials scenarios**. Cached and sparse output is byte-exact; text/path/
+  stroke/material/image/clip and effect differences are quantified. The earlier
+  Uno WebGPU context lane has two processes and still needs eight-process
+  promotion.

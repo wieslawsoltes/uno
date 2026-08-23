@@ -38,6 +38,7 @@ produce the same final state.
 | text-miss | 127 runs change outside timed mutation boundary | shaping and first-use glyph cost |
 | paths | 1,000 mixed Bézier paths with stable geometry | tessellation/cache behavior |
 | strokes | 1,000 analytic arc/Bézier strokes across solid/dashed cap and join styles | native stroke compilation, quality, and retained replay |
+| materials | 768 linear/radial gradients spanning focal, anisotropic, spread, local-matrix, and duplicate-stop cases | material batching and shader fidelity |
 | images | retained image grid plus one changed upload | texture residency/upload cost |
 | effects | shadows, blur, color matrix, backdrop | pass graph and bandwidth cost |
 | controls-1000 | continuous 1,000-control Uno sample | end-to-end framework throughput |
@@ -167,10 +168,10 @@ remain the authority if a summary or interpretation changes.
 
 ## 11. Current harness and artifacts
 
-`src/Uno.UI.Composition.Backend.Benchmarks` implements eight steady
-micro-scenarios (`cached`, `sparse`, `text`, `paths`, `strokes`, `images`,
-`clips`, and `effects`) for ProGPU, Uno WebGPU where supported, and Uno software
-Skia. Every
+`src/Uno.UI.Composition.Backend.Benchmarks` implements nine steady
+micro-scenarios (`cached`, `sparse`, `text`, `paths`, `strokes`, `materials`,
+`images`, `clips`, and `effects`) for ProGPU, Uno WebGPU where supported, and
+Uno software Skia. Every
 frame explicitly clears the target; this prevents translucent antialiasing,
 paths, images, and effects from accumulating across samples. GPU lanes use
 `wgpuDevicePoll(wait=true)` only in the separate completion boundary.
@@ -181,6 +182,13 @@ round, square, triangle, and butt caps plus round, bevel, miter, and
 miter-or-bevel joins. It therefore catches both a flattened-curve quality
 regression and a backend that reports a fast result by omitting authored pen
 semantics.
+
+The `materials` workload layers 768 independently transformed gradient cells
+over the retained base grid. Four linear and four radial definitions cover
+clamp, repeat, and mirror spread; focal and anisotropic radial geometry; local
+matrix rotation; translucent stops; and an exact duplicate-stop hard edge.
+Stable semantic and pixel hashes prevent a fast result from dropping a shader
+variant or material transition.
 
 The sparse workload is a retained 24-row tree containing 768 rectangles. One
 row changes per frame. This models immutable subtrees without turning every

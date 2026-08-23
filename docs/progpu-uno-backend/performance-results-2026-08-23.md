@@ -3,8 +3,9 @@
 ## Scope
 
 The primary result is an eight-pair, alternating fresh-process comparison of
-the Uno ProGPU and software-Skia drawing backends. It covers all seven current
-steady-state harness scenarios. Every process renders the same semantic state,
+the Uno ProGPU and software-Skia drawing backends. It covers the seven primary
+qualification scenarios; later sections add retained-output, native-stroke,
+and gradient-material follow-ups. Every process renders the same semantic state,
 reports zero unsupported operations, reads back the final target, and preserves
 its raw timing distribution.
 
@@ -321,6 +322,14 @@ gaps remain open rather than being hidden by target reuse.
 Raw results and readbacks are under
 `src/artifacts/performance/2026-08-23-retained-target-reuse-queue-future/`.
 
+Three follow-up queue-loop experiments were rejected. Removing device polling
+stalled because this wgpu-native configuration does not make spontaneous
+callbacks progress independently. Increasing the spin interval from 64 to 256
+cycles completed correctly but regressed cached and sparse blocking medians by
+about 7–9%. Reducing it to 16 cycles was neutral for cached, regressed sparse,
+and increased CPU work. The 64-cycle loop therefore remains the measured safe
+point; no timing-only shortcut weakened explicit completion semantics.
+
 ## Native analytic stroke follow-up
 
 A real SamplesApp comparison exposed a quality and performance defect that the
@@ -364,6 +373,40 @@ BGRA readbacks, and benchmark images are under
 `src/artifacts/performance/2026-08-23-native-strokes/`; live gallery captures
 are under `src/artifacts/performance/2026-08-23-samplesapp-visual-parity/`.
 
+## Gradient material follow-up
+
+The next coverage expansion adds `materials`: the retained base grid plus 768
+independently transformed cells cycling through four linear and four radial
+gradients. The set covers clamp/repeat/mirror spread, focal and anisotropic
+radial geometry, local rotation, translucent stops, and an exact duplicate-stop
+hard transition.
+
+Three fresh paired forced-redraw processes used six warmups, 200 blocking
+samples, and seven 60-frame batches:
+
+| Boundary | ProGPU process-median | Skia process-median | speedup | paired range |
+|---|---:|---:|---:|---:|
+| blocking total | 0.538800 ms | 3.599500 ms | 6.68× | 6.63×–6.82× |
+| CPU frame | 0.019700 ms | 3.599500 ms | 182.72× | 175.69×–187.13× |
+| completed batch/frame | 0.217948 ms | 3.558363 ms | 16.33× | 16.05×–16.68× |
+| batched CPU/frame | 0.034400 ms | 3.558363 ms | 103.44× | 102.24×–114.06× |
+
+ProGPU batches the base grid and all gradient variants into two draws with
+6,144 vertices, zero mask passes, and a retained-scene hit after warmup. Each
+backend produced one stable pixel hash across all three processes, both report
+the same semantic hash, and unsupported operations remain zero. The inspected
+contact sheet preserves every gradient family and hard stop; the raw comparison
+measures 29.32 dB PSNR and 0.9670 SSIM, with differences distributed through
+gradient interpolation rather than missing geometry or variants. Raw JSON,
+BGRA readbacks, and the contact sheet are under
+`src/artifacts/performance/2026-08-23-materials/`.
+
+Short built-in WebGPU integration smokes also complete with zero unsupported
+operations: 8.6350 ms blocking median for `materials` and 17.1597 ms for
+`strokes`, versus the ProGPU process medians above of 0.5388 and 0.6841 ms.
+These 40-sample smokes prove scenario compatibility but are not substituted for
+the balanced ProGPU/Skia qualification distributions.
+
 ## Reproduction
 
 Build once with serial MSBuild:
@@ -405,7 +448,8 @@ dotnet Uno.UI.Composition.Backend.Benchmarks/bin/Release/net10.0/Uno.UI.Composit
 ```
 
 Repeat with `--backend skia`. Valid scenarios are `cached`, `sparse`, `text`,
-`paths`, `strokes`, `images`, `clips`, and `effects`. Add `--force-redraw` to
+`paths`, `strokes`, `materials`, `images`, `clips`, and `effects`. Add
+`--force-redraw` to
 alternate target wrappers and disable retained populated-target reuse. Raw
 local artifacts for this run are under
 `src/artifacts/performance/2026-08-23-retained-eligibility/`; the
