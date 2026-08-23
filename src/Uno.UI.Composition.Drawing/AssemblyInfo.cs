@@ -20,3 +20,9 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("Uno.UI.Runtime.Skia.AppleUIKit")]
 [assembly: InternalsVisibleTo("Uno.UI.Runtime.Skia.Android")]
 [assembly: InternalsVisibleTo("Uno.UI.Runtime.Skia.Headless")]
+
+// The in-repo gallery reports the result of graphics negotiation in its chrome. Keep this diagnostic surface
+// internal: applications select providers through the public host-builder API and do not otherwise depend on
+// the framework's process-wide negotiator.
+[assembly: InternalsVisibleTo("SamplesApp.Skia")]
+[assembly: InternalsVisibleTo("UnoIslandsSamplesApp.Skia")]

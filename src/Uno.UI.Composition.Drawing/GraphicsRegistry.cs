@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Uno.Foundation.Logging;
 
@@ -42,6 +43,23 @@ internal readonly struct GraphicsInitialization
 internal delegate Task<ISwapChain?> GraphicsContextFactory(GraphicsContextKind kind);
 
 /// <summary>
+/// The last successful graphics negotiation, exposed internally for framework diagnostics such as SamplesApp.
+/// </summary>
+internal sealed class GraphicsBackendInfo
+{
+	public GraphicsBackendInfo(string providerTypeName, string drawingFactoryTypeName, GraphicsContextKind contextKind)
+	{
+		ProviderTypeName = providerTypeName;
+		DrawingFactoryTypeName = drawingFactoryTypeName;
+		ContextKind = contextKind;
+	}
+
+	public string ProviderTypeName { get; }
+	public string DrawingFactoryTypeName { get; }
+	public GraphicsContextKind ContextKind { get; }
+}
+
+/// <summary>
 /// Process-wide registry and negotiator for pluggable graphics backends. The app registers its ordered backend
 /// preference; the host sets a single <see cref="ContextFactory"/> that turns a kind into a window+context.
 /// <see cref="Initialize"/> binds the first kind the host can serve to the backend that accepts it.
@@ -50,6 +68,13 @@ internal static class GraphicsRegistry
 {
 	private static readonly object _gate = new();
 	private static IReadOnlyList<IGraphicsProvider> _backends = Array.Empty<IGraphicsProvider>();
+	private static GraphicsBackendInfo? _currentBackend;
+
+	/// <summary>
+	/// The provider, drawing factory, and context kind that won the latest successful negotiation.
+	/// Null until a host has created its graphics context.
+	/// </summary>
+	internal static GraphicsBackendInfo? CurrentBackend => Volatile.Read(ref _currentBackend);
 
 	/// <summary>
 	/// The host's window+context creator (set once by the host): the <em>only</em> platform-specific, GPU-agnostic
@@ -224,6 +249,9 @@ internal static class GraphicsRegistry
 					}
 
 					DrawingFactory.Register(backendFactory);
+					Volatile.Write(
+						ref _currentBackend,
+						new GraphicsBackendInfo(backend.GetType().Name, backendFactory.GetType().Name, kind));
 					if (typeof(GraphicsRegistry).Log().IsEnabled(LogLevel.Information))
 					{
 						typeof(GraphicsRegistry).Log().Info($"Graphics backend '{backend.GetType().Name}' won negotiation on context kind '{kind}'.");

@@ -260,13 +260,6 @@ namespace SampleControl.Presentation
 #if !HAS_UNO
 				return "WinUI";
 #else
-				var renderingType =
-#if __SKIA__
-					"Skia";
-#else
-					"Native";
-#endif
-
 				string targetPlatform;
 				if (OperatingSystem.IsAndroid())
 				{
@@ -301,10 +294,42 @@ namespace SampleControl.Presentation
 					targetPlatform = "Unknown";
 				}
 
-				return $"{renderingType} {targetPlatform}";
+#if __SKIA__
+				if (global::Uno.UI.Composition.Drawing.GraphicsRegistry.CurrentBackend is { } graphics)
+				{
+					return $"{GetBackendDisplayName(graphics.ProviderTypeName)} · {GetGraphicsApiDisplayName(graphics.ContextKind)} · {targetPlatform}";
+				}
+
+				return $"Graphics initializing · {targetPlatform}";
+#else
+				return $"Native · {targetPlatform}";
+#endif
 #endif
 			}
 		}
+
+#if HAS_UNO && __SKIA__
+		internal void RefreshGraphicsDescription() => RaisePropertyChanged(nameof(TargetPlatform));
+
+		private static string GetBackendDisplayName(string providerTypeName) => providerTypeName switch
+		{
+			"ProGpuGraphicsProvider" => "ProGPU",
+			"WebGpuGraphicsProvider" => "WebGPU",
+			"SkiaGraphicsProvider" => "Skia",
+			_ => providerTypeName.EndsWith("GraphicsProvider", StringComparison.Ordinal)
+				? providerTypeName[..^"GraphicsProvider".Length]
+				: providerTypeName,
+		};
+
+		private static string GetGraphicsApiDisplayName(global::Uno.UI.Composition.Drawing.GraphicsContextKind contextKind) => contextKind switch
+		{
+			global::Uno.UI.Composition.Drawing.GraphicsContextKind.WebGpu => "WebGPU",
+			global::Uno.UI.Composition.Drawing.GraphicsContextKind.WebGL => "WebGL",
+			global::Uno.UI.Composition.Drawing.GraphicsContextKind.OpenGL => "OpenGL",
+			global::Uno.UI.Composition.Drawing.GraphicsContextKind.OpenGLES => "OpenGL ES",
+			_ => contextKind.ToString(),
+		};
+#endif
 
 		public static string DefaultAppTitle
 		{

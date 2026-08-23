@@ -294,7 +294,9 @@
                                 HorizontalAlignment="Center"
                                 FontSize="10"
                                 FontWeight="Bold"
-                                Text="{Binding TargetPlatform}" />
+                                Text="{Binding TargetPlatform}"
+                                TextAlignment="Center"
+                                TextWrapping="Wrap" />
                             <TextBlock
                                 HorizontalAlignment="Center"
                                 FontSize="9"
