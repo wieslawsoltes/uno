@@ -80,6 +80,14 @@ The factory initializes one `WgpuContext` with
 queried from the device. ProGPU creates all of its resources in that device
 domain.
 
+The factory also sets the finite deferred-submission safety window to 64 via
+`ProGpuBackendOptions.MaximumDeferredQueueSubmissions`. ProGPU keeps its
+conservative default of eight for other hosts. The wider window is safe here
+because the borrowed device is polled non-blockingly after every submitted
+frame; it prevents short bursts from becoming an artificial CPU/GPU fence
+while still forcing a blocking drain if retirement falls 64 submissions
+behind.
+
 ### 3.3 Presentation ownership
 
 For each frame:
@@ -87,7 +95,7 @@ For each frame:
 1. Uno acquires its target and calls `BeginPresent`.
 2. The returned session records overlay/replay operations into a ProGPU
    `DrawingContext`.
-3. Disposal seals the recording and invokes
+3. Disposal seals the recording and normally invokes
    `Compositor.RenderScene(..., target.ColorView)`.
 4. ProGPU records and submits GPU work, but does not release or present the
    borrowed view.
@@ -95,6 +103,16 @@ For each frame:
 
 The target view is valid only during the frame. It is never stored in a
 recording, texture wrapper, cache, or asynchronous callback.
+
+HostBackdrop is the one conditional presentation variant. A borrowed swapchain
+view is render-attachment-only and cannot be sampled safely. When the command
+tree contains a live HostBackdrop material, the factory renders into a
+persistent same-size ProGPU texture with `TextureBinding` usage, ProGPU splits
+the ordered pass at the backdrop command and captures all preceding content by
+GPU ping-pong, and a final fullscreen GPU blit writes the result to the borrowed
+view. No CPU readback occurs. The command recorder propagates a retained
+HostBackdrop bit through record replay, so frames without HostBackdrop keep the
+direct path without rescanning the retained command tree.
 
 ## 4. Drawing and retention
 
@@ -164,6 +182,14 @@ so the filter sees the layer as one isolated source. Other neutral DAGs return
 Calling an unsupported drawing operation records a named diagnostic and, by
 default, throws. No Skia fallback occurs. Full color-filter and arbitrary
 effect-DAG layer conformance remains open.
+
+Uno's acrylic graph is lowered to one ProGPU material with blur, luminosity,
+tint, noise, and material opacity. ProGPU implements the Color and Luminosity
+operators as non-separable blend modes and captures previously rendered host
+content in submission order. The GPU ownership/order invariant is covered by
+focused pixel tests. The current live SamplesApp acrylic popup still requires
+visual and shader-cost tuning against Skia, so it is not claimed as pixel
+conformant yet.
 
 ## 5. Geometry stack
 

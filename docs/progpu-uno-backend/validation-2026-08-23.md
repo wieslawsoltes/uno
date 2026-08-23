@@ -4,7 +4,7 @@
 
 - Uno baseline: `c4b1cd24d2c5ba5ac0a472e499f81d0ec22de2f9`.
 - Uno work branch: `feat/progpu-drawing-backend`; no Uno pull request opened.
-- ProGPU gitlink: `bf1fe1384dedcf572fc317c5ffc550a601763e0a`.
+- ProGPU gitlink: `5620e1a880d9b819be62b6e714ae79ebb57fab49`.
 - ProGPU dependency changes: public PRs #125 and #126.
 - Host: macOS 26.6 arm64, Apple M3 Pro, .NET SDK 10.0.201,
   runtime 10.0.9, wgpu-native/Metal.
@@ -19,6 +19,10 @@
 | caching must cost less than recompilation | root-cause fix | admit after reuse and reject pictures below a configurable minimum command count |
 | a leading replacement clear must not become a redundant full-target draw | root-cause fix | carry the leading clear as record metadata and apply it as the attachment clear while retaining ordered nested-record replacement semantics |
 | retained solid pages must not scan an empty brush map per vertex | root-cause fix | bulk-copy inline-color vertices and rebase index arrays through contiguous spans |
+| duplicate gradient stops must make an exact offset select the later stop | root-cause fix | use the previous stop only for strictly smaller offsets in vector and hatch shaders |
+| solid ellipse strokes must retain their analytic curve | root-cause fix | preserve ellipse radii and emit exact even-odd rounded-ring geometry instead of a 22.5-degree flattened outline |
+| queue cleanup must bound residency without serializing every small burst | root-cause fix | expose the conservative drain bound and select a 64-submission window while retaining per-frame non-blocking polling |
+| HostBackdrop must sample already-rendered content without sampling the borrowed swapchain view | root-cause fix | conditionally render backdrop frames into a bindable same-device texture, split and ping-pong at ordered backdrop commands, then GPU-blit to the borrowed view |
 | benchmark pixels must represent one frame | measurement correction | explicitly clear every frame and read back the final target after timing |
 | GPU wait must not be mislabeled as renderer CPU time | measurement correction | publish CPU submit, GPU completion, blocking total, batch throughput, and ProGPU internal stages separately |
 
@@ -44,10 +48,17 @@ resolved the environmental file-lock race without source changes.
 
 ## Dependency tests
 
-The ProGPU retained-picture and text-rendering-mode suites pass:
+The focused ProGPU queue-context suite passes:
 
 ```text
-Passed: 39, Failed: 0, Skipped: 0
+Passed: 30, Failed: 0, Skipped: 0
+```
+
+The combined backdrop-material, gradient, layer-render, text-rendering-mode,
+and queue-context suites pass:
+
+```text
+Passed: 78, Failed: 0, Skipped: 0
 ```
 
 The regression verifies final pixels after changing one nested picture while
@@ -63,30 +74,51 @@ earlier pixels in order.
 The focused real-device executable covers borrowed-device initialization,
 offscreen rendering, native glyph recording, effects, GPU readback, retained
 replay, completion, geometry host-marker compatibility, and zero unsupported
-operations. SamplesApp startup confirms provider negotiation with:
+operations. It also verifies HostBackdrop blur/capture, foreground ordering,
+and the conditional present/blit route. SamplesApp was built with
+`UnoDrawingBackendProGpu=true`; startup confirms provider negotiation with:
 
 ```text
 Graphics backend 'ProGpuGraphicsProvider' won negotiation on context kind 'WebGpu'.
 ```
 
-The representative catalog frame visually matches the Skia baseline after the
-rounded-difference fix. The shader path is exercised for vector, text,
-texture, retained glyph, image effect, backdrop, and compatible effect output.
-This is macOS/Metal evidence; Windows, Linux, browser, injected device loss,
-trimming/AOT, leak, and long-duration multi-page sweep remain open.
+This check caught a launch-configuration trap during validation: setting
+`UNO_PROGPU=1` on a binary compiled with the flag disabled still launches the
+normal Skia backend. Only the negotiation log is accepted as proof.
+
+Matched live catalog captures verify the complete shell rather than the blank
+frame in the original failure report. The text sample content crop measures
+0.1559 RGB MAE against Skia. The static rounded-border sample measures 0.4444
+RGB MAE. After duplicate-stop and analytic ellipse-stroke corrections, the
+gradient sample measures 0.9457 RGB MAE over the scene; the 100×100 stroked
+ellipse has 0.8326 RGB MAE and no pixel above a 32-level channel difference.
+The shader path is exercised for vector, text, texture, retained glyph, image
+effect, backdrop, and compatible effect output. This is macOS/Metal evidence;
+Windows, Linux, browser, injected device loss, trimming/AOT, leak, and
+long-duration multi-page sweep remain open.
+
+The live AutoSuggestBox popup produced an opt-in scene dump at frame 34 with
+an Acrylic/HostBackdrop command (`blur=60`, `luminosity alpha=0.847`) and an
+offscreen-render cache-miss reason, proving the GPU capture route was active.
+Its single diagnostic frame took 251.404 ms and the popup remains visibly less
+opaque/blurred than the matched Skia capture. This is an explicit open
+correctness/performance item, not a passed acrylic parity claim.
 
 ## Benchmark validation
 
-- All 15 backend/scenario processes completed with 8 warmups, 100 measured
-  frames, 9 batches of 60 frames, and parseable v2 JSON.
+- All 30 current backend/scenario processes completed as two fresh-process
+  repetitions with 8 warmups, 100 measured frames, 9 batches of 60 frames,
+  and parseable v2 JSON.
 - Every artifact contains semantic and final-target SHA-256 values.
 - Cached and sparse ProGPU readbacks are byte-identical to Skia.
 - ProGPU reported zero unsupported operations.
 - CPU frame submit is faster than Skia in all five workloads.
-- The qualification matrix shows faster saturated throughput for text, paths,
-  and images. A later focused attachment-clear check reduced cached fill-only
-  throughput from 0.4556 to 0.2835 ms/frame, below the matrix's 0.3653 ms Skia
-  result. Sparse fill-only remains the open saturation case.
+- The current qualification matrix shows faster ProGPU saturated throughput
+  than Skia in both repetitions of cached, sparse, text, paths, and images. The
+  conservative speedups range from 1.64× for sparse mutation to 37.71× for
+  text.
+- Every ProGPU final-target hash matches its corresponding pre-optimization
+  artifact, including the text hash.
 - ProGPU text/path raster differences are smaller than Uno WebGPU differences
   against the same Skia reference.
 
@@ -96,9 +128,9 @@ the exact values and interpretation boundaries.
 ## Remaining qualification work
 
 1. Run eight balanced fresh-process triplets with power/thermal controls.
-2. Add WebGPU timestamps; a Metal System Trace has been captured for the
-   fill-only submission path, but its instrumentation overhead excludes it
-   from comparative timing tables.
+2. Add WebGPU timestamps; managed CPU and Metal traces have been captured, but
+   their instrumentation overhead excludes them from comparative timing
+   tables.
 3. Add effects, scrolling, control-density, first-present, startup, allocation,
    settled-memory, and leak scenarios.
 4. Run a systematic SamplesApp page/pixel sweep and a long-duration resize,

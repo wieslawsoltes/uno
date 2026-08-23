@@ -87,9 +87,11 @@ if (outside[3] > 4 || red[2] < 200 || red[3] < 240 || blue[0] < 180 || blue[3] <
 }
 
 RunPresentSmoke(device, factory);
+await RunHostBackdropSmoke(device, factory);
 RunStablePresentCacheSmoke(device, factory);
 await RunNestedRecordClearSmoke(factory);
 await RunDefaultTrimSmoke(factory, geometryFactory);
+await RunAnalyticEllipseStrokeSmoke(factory, geometryFactory);
 await RunRoundedDifferenceSmoke(factory, geometryFactory);
 await RunReplayScaleSmoke(factory);
 await RunTransformCompositionSmoke(factory);
@@ -137,6 +139,75 @@ static unsafe void RunPresentSmoke(IWebGpuDeviceContext device, ProGpuDrawingFac
 	N.WGPU.wgpuTextureViewRelease(nativeView);
 	N.WGPU.wgpuTextureDestroy(nativeTexture);
 	N.WGPU.wgpuTextureRelease(nativeTexture);
+}
+
+static async Task RunHostBackdropSmoke(
+	IWebGpuDeviceContext device,
+	ProGpuDrawingFactory factory)
+{
+	using var effect = factory.CreateEffectFilter(
+		new BlurEffectNode(new SourceInput(), 6f, true),
+		new Rect(8, 8, 48, 48)) ??
+		throw new InvalidOperationException("The ProGPU backend rejected a host-backdrop blur graph.");
+	using var record = CreateHostBackdropRecord(factory, effect);
+	using var texture = factory.RenderOffscreen(64, 64, record.Replay);
+	var pixels = new byte[64 * 64 * 4];
+	(await factory.SnapshotAsync(texture)).CopyPixels(pixels);
+	var outside = Pixel(pixels, 4, 32);
+	var blurredBoundary = Pixel(pixels, 32, 16);
+	var foreground = Pixel(pixels, 31, 31);
+	if (outside[2] < 247 || outside[0] > 8 ||
+		blurredBoundary[2] is < 24 or > 224 ||
+		blurredBoundary[0] is < 24 or > 224 ||
+		foreground[1] < 247 || foreground[0] > 8 || foreground[2] > 8)
+	{
+		throw new InvalidOperationException(
+			$"Host backdrop capture lost blur or ordering: outside={Convert.ToHexString(outside)}, blurred={Convert.ToHexString(blurredBoundary)}, foreground={Convert.ToHexString(foreground)}.");
+	}
+
+	RunHostBackdropPresentSmoke(device, factory, record);
+}
+
+static unsafe void RunHostBackdropPresentSmoke(
+	IWebGpuDeviceContext device,
+	ProGpuDrawingFactory factory,
+	IRenderRecord record)
+{
+	var descriptor = new N.WGPUTextureDescriptor
+	{
+		Size = new N.WGPUExtent3D { Width = 64, Height = 64, DepthOrArrayLayers = 1 },
+		Format = N.WGPUTextureFormat.BGRA8Unorm,
+		MipLevelCount = 1,
+		SampleCount = 1,
+		Dimension = N.WGPUTextureDimension._2D,
+		Usage = N.WGPUTextureUsage.RenderAttachment | N.WGPUTextureUsage.CopySrc,
+	};
+	var nativeTexture = N.WGPU.wgpuDeviceCreateTexture(device.Device, &descriptor);
+	var nativeView = N.WGPU.wgpuTextureCreateView(nativeTexture, null);
+	using var target = new SmokeTarget(nativeView, 64, 64);
+	using (var present = factory.BeginPresent(target))
+	{
+		record.Replay(present);
+	}
+	_ = N.WGPU.wgpuDevicePoll(device.Device, 1, null);
+	N.WGPU.wgpuTextureViewRelease(nativeView);
+	N.WGPU.wgpuTextureDestroy(nativeTexture);
+	N.WGPU.wgpuTextureRelease(nativeTexture);
+}
+
+static IRenderRecord CreateHostBackdropRecord(
+	ProGpuDrawingFactory factory,
+	IEffectFilter effect)
+{
+	var recorder = factory.CreateRecording();
+	recorder.DrawRect(new Rect(0, 0, 32, 64), Color.FromArgb(255, 255, 0, 0));
+	recorder.DrawRect(new Rect(32, 0, 32, 64), Color.FromArgb(255, 0, 0, 255));
+	var restoreCount = recorder.Save();
+	recorder.ClipRect(new Rect(8, 8, 48, 48));
+	recorder.DrawEffectBackdrop(effect, 1f);
+	recorder.RestoreToCount(restoreCount);
+	recorder.DrawRect(new Rect(28, 28, 8, 8), Color.FromArgb(255, 0, 255, 0));
+	return recorder.Finish();
 }
 
 static unsafe void RunStablePresentCacheSmoke(IWebGpuDeviceContext device, ProGpuDrawingFactory factory)
@@ -252,6 +323,68 @@ static async Task RunDefaultTrimSmoke(ProGpuDrawingFactory factory, ProGpuGeomet
 	{
 		throw new InvalidOperationException(
 			$"An untrimmed widened stroke was lost or filled: edge={Convert.ToHexString(Pixel(strokePixels, 12, 32))}, center={Convert.ToHexString(Pixel(strokePixels, 32, 32))}.");
+	}
+}
+
+static async Task RunAnalyticEllipseStrokeSmoke(ProGpuDrawingFactory factory, ProGpuGeometryFactory geometryFactory)
+{
+	var builder = geometryFactory.CreatePrimitiveGeometryBuilder();
+	builder.AddEllipse(new Vector2(32, 32), 24, 20);
+	using var ellipse = builder.Build();
+	using var stroke = ellipse.GetStrokeFillGeometry(new StrokeStyle
+	{
+		Thickness = 16,
+		StartCap = StrokeCap.Butt,
+		EndCap = StrokeCap.Butt,
+		DashCap = StrokeCap.Butt,
+		LineJoin = StrokeJoin.Round,
+		MiterLimit = 10,
+	});
+	if (stroke.SegmentCount != 16)
+	{
+		throw new InvalidOperationException(
+			$"A solid ellipse stroke was flattened instead of preserving its analytic ring: segments={stroke.SegmentCount}.");
+	}
+
+	using var texture = factory.RenderOffscreen(64, 64, drawing =>
+	{
+		drawing.Clear(Color.FromArgb(0, 0, 0, 0));
+		drawing.Save();
+		drawing.ClipPath(stroke, antialias: true);
+		drawing.DrawRect(new Rect(0, 0, 64, 64), Color.FromArgb(255, 30, 80, 220), true);
+		drawing.Restore();
+	});
+	var pixels = new byte[64 * 64 * 4];
+	(await factory.SnapshotAsync(texture)).CopyPixels(pixels);
+	if (Pixel(pixels, 32, 12)[0] < 180 || Pixel(pixels, 32, 32)[3] > 4 || Pixel(pixels, 4, 4)[3] > 4)
+	{
+		throw new InvalidOperationException(
+			$"An analytic ellipse stroke lost its ring or hole: edge={Convert.ToHexString(Pixel(pixels, 32, 12))}, center={Convert.ToHexString(Pixel(pixels, 32, 32))}, outside={Convert.ToHexString(Pixel(pixels, 4, 4))}.");
+	}
+
+	var rectangleBuilder = geometryFactory.CreatePrimitiveGeometryBuilder();
+	rectangleBuilder.AddRectangle(new Rect(16, 16, 32, 32));
+	using var rectangle = rectangleBuilder.Build();
+	using var miterStroke = rectangle.GetStrokeFillGeometry(new StrokeStyle
+	{
+		Thickness = 16,
+		LineJoin = StrokeJoin.Miter,
+		MiterLimit = 10,
+	});
+	using var rectangleTexture = factory.RenderOffscreen(64, 64, drawing =>
+	{
+		drawing.Clear(Color.FromArgb(0, 0, 0, 0));
+		drawing.Save();
+		drawing.ClipPath(miterStroke, antialias: true);
+		drawing.DrawRect(new Rect(0, 0, 64, 64), Color.FromArgb(255, 30, 80, 220), true);
+		drawing.Restore();
+	});
+	var rectanglePixels = new byte[64 * 64 * 4];
+	(await factory.SnapshotAsync(rectangleTexture)).CopyPixels(rectanglePixels);
+	if (Pixel(rectanglePixels, 8, 8)[3] < 180 || Pixel(rectanglePixels, 32, 32)[3] > 4)
+	{
+		throw new InvalidOperationException(
+			$"The ellipse fast path changed sharp miter-join semantics: corner={Convert.ToHexString(Pixel(rectanglePixels, 8, 8))}, center={Convert.ToHexString(Pixel(rectanglePixels, 32, 32))}.");
 	}
 }
 

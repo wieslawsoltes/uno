@@ -39,6 +39,7 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 	private readonly ProGpuBackendOptions _options;
 	private readonly TextureFormat _format;
 	private readonly Vector4 _defaultClearColor;
+	private GpuTexture? _hostBackdropTarget;
 	private long _frameNumber;
 	private bool _disposed;
 
@@ -47,6 +48,8 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 		ArgumentNullException.ThrowIfNull(device);
 		_options = options;
 		_format = ToSilkFormat(device.ColorFormat);
+		_context.MaximumDeferredQueueSubmissions =
+			options.MaximumDeferredQueueSubmissions;
 		_context.InitializeExternalNativeDevice(
 			new UnoModernWebGpuApi(),
 			new UnoBorrowedWebGpuLifetime(device.Device),
@@ -79,7 +82,7 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 		return new ProGpuPresentSession(this, target, Interlocked.Increment(ref _frameNumber));
 	}
 
-	internal void Present(IWebGpuRenderTarget target, GpuPicture picture, Vector4? leadingClearColor, long frame, double recordMilliseconds)
+	internal void Present(IWebGpuRenderTarget target, GpuPicture picture, Vector4? leadingClearColor, bool hasHostBackdrop, long frame, double recordMilliseconds)
 	{
 		var submit = Stopwatch.StartNew();
 		var sceneDumpPath = ProGpuDiagnostics.TryDumpScene(picture, frame);
@@ -94,7 +97,32 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 		}
 		_compositor.ClearColor = clearColor;
 		_presentVisual.Update(content, transform);
-		_compositor.RenderScene(_presentVisual, (uint)Math.Max(1, target.Width), (uint)Math.Max(1, target.Height), (TextureView*)target.ColorView);
+		var pixelWidth = Math.Max(1, target.Width);
+		var pixelHeight = Math.Max(1, target.Height);
+		if (hasHostBackdrop)
+		{
+			EnsureHostBackdropTarget(pixelWidth, pixelHeight);
+			_compositor.RenderOffscreen(
+				_presentVisual,
+				(uint)pixelWidth,
+				(uint)pixelHeight,
+				_hostBackdropTarget!,
+				0f,
+				1f,
+				clearColor);
+			GpuTextureBlitter.Blit(
+				_hostBackdropTarget!,
+				(TextureView*)target.ColorView,
+				_format);
+		}
+		else
+		{
+			_compositor.RenderScene(
+				_presentVisual,
+				(uint)pixelWidth,
+				(uint)pixelHeight,
+				(TextureView*)target.ColorView);
+		}
 		if (sceneDumpPath is not null)
 		{
 			ProGpuDiagnostics.AppendCompositorMetrics(sceneDumpPath, _compositor.Metrics);
@@ -165,6 +193,19 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 		}
 
 		return false;
+	}
+
+	private void EnsureHostBackdropTarget(int width, int height)
+	{
+		if (_hostBackdropTarget is { } target &&
+			target.Width == (uint)width &&
+			target.Height == (uint)height)
+		{
+			return;
+		}
+
+		_hostBackdropTarget?.Dispose();
+		_hostBackdropTarget = NewTexture(width, height);
 	}
 
 	public ITexture RenderOffscreen(int pixelWidth, int pixelHeight, Action<IDrawingSession> render)
@@ -302,6 +343,7 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 			TintColor = colors.Count > 0 ? colors[^1] : Vector4.Zero,
 			LuminosityColor = colors.Count > 1 ? colors[^2] : Vector4.Zero,
 			NoiseOpacity = colors.Count > 1 ? 0.02f : 0,
+			Saturation = 1f,
 		};
 		return sawBackdrop && (blur > 0 || colors.Count > 0);
 	}
@@ -314,6 +356,8 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 	{
 		if (_disposed) return;
 		_disposed = true;
+		_hostBackdropTarget?.Dispose();
+		_hostBackdropTarget = null;
 		_compositor.Dispose();
 		_context.Dispose();
 	}
@@ -391,11 +435,12 @@ internal sealed class ProGpuTexture(GpuTexture texture) : ITexture
 	public void Dispose() { if (Interlocked.Exchange(ref _disposed, 1) == 0) Texture.Dispose(); }
 }
 
-internal sealed class ProGpuRenderRecord(GpuPicture picture, Vector4? leadingClearColor) : IRenderRecord
+internal sealed class ProGpuRenderRecord(GpuPicture picture, Vector4? leadingClearColor, bool hasHostBackdrop) : IRenderRecord
 {
 	private int _disposed;
 	internal GpuPicture Picture { get; } = picture;
 	internal Vector4? LeadingClearColor { get; } = leadingClearColor;
+	internal bool HasHostBackdrop { get; } = hasHostBackdrop;
 	public void Replay(IDrawingSession into)
 	{
 		if (_disposed != 0) throw new ObjectDisposedException(nameof(ProGpuRenderRecord));
@@ -403,6 +448,10 @@ internal sealed class ProGpuRenderRecord(GpuPicture picture, Vector4? leadingCle
 		if (LeadingClearColor is { } clearColor && !session.TryAdoptLeadingClear(clearColor))
 		{
 			session.RecordReplacementClear(clearColor);
+		}
+		if (HasHostBackdrop)
+		{
+			session.MarkHostBackdrop();
 		}
 		var transform = session.TotalMatrix;
 		if (transform == Matrix4x4.Identity)
@@ -429,6 +478,7 @@ internal class ProGpuDrawingSession : IDrawingSession
 	private readonly GpuPictureRecorder _recorder = new();
 	private RoundedClipCommand? _lastRoundedClip;
 	private Vector4? _leadingClearColor;
+	private bool _hasHostBackdrop;
 	private bool _finished;
 
 	protected ProGpuDrawingSession(ProGpuDrawingFactory factory)
@@ -439,6 +489,8 @@ internal class ProGpuDrawingSession : IDrawingSession
 
 	internal DrawingContext Context { get; private set; }
 	internal Vector4? LeadingClearColor => _leadingClearColor;
+	internal bool HasHostBackdrop => _hasHostBackdrop;
+	internal void MarkHostBackdrop() => _hasHostBackdrop = true;
 	public Matrix4x4 TotalMatrix => _matrix;
 	public object NativeSurface => Context;
 	public IDrawingFactory Factory { get; }
@@ -751,6 +803,10 @@ internal class ProGpuDrawingSession : IDrawingSession
 		if (filter is ProGpuEffectFilter { Value: ProGpuBackdropEffect backdrop })
 		{
 			var material = backdrop.Material;
+			if (material.Source == BackdropMaterialSource.HostBackdrop && !material.UseFallback)
+			{
+				_hasHostBackdrop = true;
+			}
 			var originalOpacity = material.MaterialOpacity;
 			material.MaterialOpacity = originalOpacity * Math.Clamp(opacity, 0, 1);
 			Context.DrawBackdropMaterial(material, _clipBounds, transform: Matrix4x4.Identity);
@@ -868,7 +924,7 @@ internal sealed class ProGpuCommandRecorder : ProGpuDrawingSession, ICommandReco
 	{
 		if (_finished) throw new InvalidOperationException("Recording already finished.");
 		_finished = true;
-		return new ProGpuRenderRecord(FinishPicture(), LeadingClearColor);
+		return new ProGpuRenderRecord(FinishPicture(), LeadingClearColor, HasHostBackdrop);
 	}
 	public void Dispose() { if (!_finished) ((ProGpuRenderRecord)Finish()).Dispose(); }
 }
@@ -886,6 +942,6 @@ internal sealed class ProGpuPresentSession : ProGpuDrawingSession, IPresentSessi
 		if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
 		_record.Stop();
 		using var picture = FinishPicture();
-		_factory.Present(_target, picture, LeadingClearColor, _frame, _record.Elapsed.TotalMilliseconds);
+		_factory.Present(_target, picture, LeadingClearColor, HasHostBackdrop, _frame, _record.Elapsed.TotalMilliseconds);
 	}
 }

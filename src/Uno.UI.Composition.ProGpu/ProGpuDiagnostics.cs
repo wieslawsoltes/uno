@@ -77,6 +77,10 @@ public static class ProGpuDiagnostics
 	internal static string? TryDumpScene(GpuPicture picture, long frame)
 	{
 		var path = Environment.GetEnvironmentVariable("UNO_PROGPU_DUMP_SCENE");
+		var waitForHostBackdrop = string.Equals(
+			Environment.GetEnvironmentVariable("UNO_PROGPU_DUMP_HOST_BACKDROP"),
+			"1",
+			StringComparison.Ordinal);
 		var requestedFrame = long.TryParse(
 			Environment.GetEnvironmentVariable("UNO_PROGPU_DUMP_FRAME"),
 			NumberStyles.Integer,
@@ -84,7 +88,9 @@ public static class ProGpuDiagnostics
 			out var parsedFrame)
 			? Math.Max(1, parsedFrame)
 			: 1;
-		if (string.IsNullOrWhiteSpace(path) || frame < requestedFrame || Interlocked.Exchange(ref _sceneDumped, 1) != 0)
+		if (string.IsNullOrWhiteSpace(path) || frame < requestedFrame ||
+			(waitForHostBackdrop && !ContainsHostBackdrop(picture)) ||
+			Interlocked.Exchange(ref _sceneDumped, 1) != 0)
 		{
 			return null;
 		}
@@ -97,6 +103,32 @@ public static class ProGpuDiagnostics
 			$"FINAL rectClip={state.RectangleClipDepth} geometryClip={state.GeometryClipDepth} opacity={state.OpacityDepth} blend={state.BlendDepth}"));
 		File.WriteAllText(path, output.ToString());
 		return path;
+	}
+
+	private static bool ContainsHostBackdrop(GpuPicture picture) =>
+		ContainsHostBackdrop(picture, new HashSet<GpuPicture>());
+
+	private static bool ContainsHostBackdrop(GpuPicture picture, HashSet<GpuPicture> visited)
+	{
+		if (!visited.Add(picture))
+		{
+			return false;
+		}
+
+		for (var index = 0; index < picture.CommandCount; index++)
+		{
+			var command = picture.GetCommand(index);
+			if (command.Type == RenderCommandType.DrawExtension &&
+				command.DataParam is BackdropMaterialParams { Source: ProGPU.Vector.BackdropMaterialSource.HostBackdrop })
+			{
+				return true;
+			}
+			if (command.Picture is { } child && ContainsHostBackdrop(child, visited))
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 
 	internal static void AppendCompositorMetrics(string path, in CompositorMetrics metrics)
@@ -163,6 +195,17 @@ public static class ProGpuDiagnostics
 			{
 				output.Append(" color=").Append(Color(solid.Color))
 					.Append(" brushOpacity=").Append(solid.Opacity.ToString("F3", CultureInfo.InvariantCulture));
+			}
+			if (command.Type == RenderCommandType.DrawExtension && command.DataParam is BackdropMaterialParams backdrop)
+			{
+				output.Append(" extension=").Append(command.ExtensionId)
+					.Append(" backdropKind=").Append(backdrop.Kind)
+					.Append(" source=").Append(backdrop.Source)
+					.Append(" blur=").Append(backdrop.BlurRadius.ToString("F3", CultureInfo.InvariantCulture))
+					.Append(" saturation=").Append(backdrop.Saturation.ToString("F3", CultureInfo.InvariantCulture))
+					.Append(" tint=").Append(Color(backdrop.TintColor))
+					.Append(" luminosity=").Append(Color(backdrop.LuminosityColor))
+					.Append(" opacity=").Append(backdrop.MaterialOpacity.ToString("F3", CultureInfo.InvariantCulture));
 			}
 			output.AppendLine();
 

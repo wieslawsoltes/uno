@@ -25,13 +25,15 @@ Documents:
 - [Initial validation record](validation-2026-08-22.md)
 
 The implementation consumes ProGPU as a git submodule pinned to immutable
-commit `bf1fe1384dedcf572fc317c5ffc550a601763e0a`. The integration dependency is
+commit `5620e1a880d9b819be62b6e714ae79ebb57fab49`. The integration dependency is
 tracked by public ProGPU changes
 [#125](https://github.com/wieslawsoltes/ProGPU/pull/125) and
 [#126](https://github.com/wieslawsoltes/ProGPU/pull/126). The latter adds
-analytic rounded difference clips and bounded retained-picture compilation
-pages. The gitlink remains reproducible while those dependency changes are
-under review.
+analytic rounded difference clips, bounded retained-picture compilation
+pages, duplicate-stop gradient semantics, a configurable bounded queue
+window, GPU-only HostBackdrop capture, and non-separable backdrop blend
+semantics. The gitlink remains reproducible while those dependency changes
+are under review.
 
 ## Non-negotiable invariants
 
@@ -86,6 +88,12 @@ UNO_PROGPU=1 dotnet run \
   --project SamplesApp/SamplesApp.Skia.Generic/SamplesApp.Skia.Generic.csproj \
   -c Release -p:UnoDrawingBackendProGpu=true --no-build --no-restore
 ```
+
+`UNO_PROGPU=1` selects ProGPU only in an application compiled with
+`UnoDrawingBackendProGpu=true`. The definitive runtime check is the startup
+message `Graphics backend 'ProGpuGraphicsProvider' won negotiation on context
+kind 'WebGpu'.`; the environment variable alone is not proof of backend
+selection.
 
 On macOS, launching the bare executable instead of the generated app bundle
 may require the build output's `runtimes/osx/native` directory in

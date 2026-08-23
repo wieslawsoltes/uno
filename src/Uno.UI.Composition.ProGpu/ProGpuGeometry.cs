@@ -273,10 +273,78 @@ public sealed class ProGpuGeometry : IGeometry, unouwp::Windows.Graphics.IGeomet
 		return new ProGpuGeometry(ProGpuGeometryAlgorithms.Trim(Path, trimStart, trimEnd));
 	}
 
-	public IGeometry GetStrokeFillGeometry(in StrokeStyle style) =>
-		new ProGpuGeometry(ProGpuGeometryAlgorithms.Widen(Path, style));
+	public IGeometry GetStrokeFillGeometry(in StrokeStyle style)
+	{
+		if (_roundRect is { } roundRect &&
+			IsEllipse(roundRect) &&
+			style.Thickness > 0 &&
+			float.IsFinite(style.Thickness) &&
+			style.DashArray is not { Length: > 0 } &&
+			style.TrimStart == default &&
+			style.TrimEnd == default)
+		{
+			return CreateEllipseStroke(roundRect, style.Thickness);
+		}
+
+		return new ProGpuGeometry(ProGpuGeometryAlgorithms.Widen(Path, style));
+	}
 
 	public RoundRectangle? TryGetRoundRect() => _roundRect;
+
+	private static bool IsEllipse(in RoundRectangle source)
+	{
+		var radius = new Vector2(
+			(float)source.Rect.Width * 0.5f,
+			(float)source.Rect.Height * 0.5f);
+		return source.TopLeft == radius &&
+			source.TopRight == radius &&
+			source.BottomRight == radius &&
+			source.BottomLeft == radius;
+	}
+
+	private static ProGpuGeometry CreateEllipseStroke(in RoundRectangle source, float thickness)
+	{
+		var half = thickness * 0.5f;
+		var outer = Inflate(source, half);
+		var outerPath = ProGpuGeometryAlgorithms.CreateRoundedRectangle(outer);
+		var inner = Inflate(source, -half);
+		if (inner.Rect.Width <= 0 || inner.Rect.Height <= 0)
+		{
+			return new ProGpuGeometry(outerPath, outer);
+		}
+
+		var innerPath = ProGpuGeometryAlgorithms.CreateRoundedRectangle(inner);
+		var ring = new PGeometry { FillRule = PFillRule.EvenOdd };
+		foreach (var figure in outerPath.Figures)
+		{
+			ring.Figures.Add(figure);
+		}
+		foreach (var figure in innerPath.Figures)
+		{
+			ring.Figures.Add(figure);
+		}
+		return new ProGpuGeometry(ring);
+	}
+
+	private static RoundRectangle Inflate(in RoundRectangle source, float amount)
+	{
+		var rect = source.Rect;
+		return new RoundRectangle
+		{
+			Rect = new Rect(
+				rect.X - amount,
+				rect.Y - amount,
+				Math.Max(0, rect.Width + amount * 2),
+				Math.Max(0, rect.Height + amount * 2)),
+			TopLeft = InflateRadius(source.TopLeft, amount),
+			TopRight = InflateRadius(source.TopRight, amount),
+			BottomRight = InflateRadius(source.BottomRight, amount),
+			BottomLeft = InflateRadius(source.BottomLeft, amount),
+		};
+	}
+
+	private static Vector2 InflateRadius(Vector2 radius, float amount) =>
+		new(MathF.Max(0, radius.X + amount), MathF.Max(0, radius.Y + amount));
 
 	public void StreamFlattened(IFlattenedPathSink sink)
 	{
@@ -417,7 +485,16 @@ internal sealed class ProGpuPrimitiveGeometryBuilder : IPrimitiveGeometryBuilder
 	public void AddEllipse(Vector2 center, float radiusX, float radiusY)
 	{
 		Append(ProGPU.Vector.PrimitivePathGeometry.CreateEllipse(center, radiusX, radiusY));
-		_singleRoundRect = null;
+		_singleRoundRect = _path.Figures.Count == 1
+			? new RoundRectangle
+			{
+				Rect = new Rect(center.X - radiusX, center.Y - radiusY, radiusX * 2, radiusY * 2),
+				TopLeft = new Vector2(radiusX, radiusY),
+				TopRight = new Vector2(radiusX, radiusY),
+				BottomRight = new Vector2(radiusX, radiusY),
+				BottomLeft = new Vector2(radiusX, radiusY),
+			}
+			: null;
 	}
 
 	public void AddGeometry(IGeometry geometry)

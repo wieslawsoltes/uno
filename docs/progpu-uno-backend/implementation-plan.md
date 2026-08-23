@@ -3,7 +3,7 @@
 ## Baselines
 
 - Uno base: immutable head of PR #24153.
-- ProGPU dependency: `bf1fe1384dedcf572fc317c5ffc550a601763e0a`, based on
+- ProGPU dependency: `5620e1a880d9b819be62b6e714ae79ebb57fab49`, based on
   the latest observed `main` plus public dependency changes #125 and #126.
 - Primary validation platform: macOS arm64, .NET 10, Dawn/Metal.
 - Secondary compile/runtime lanes: Windows Dawn/D3D12, Linux
@@ -22,7 +22,7 @@ build configuration, exact commands, and raw artifact paths.
 | 2 — drawing core | working vertical slice | real-device smoke and SamplesApp present; layer/effect isolation corpus remains |
 | 3 — content stack | implemented vertical slice | ProGPU geometry/font/shaping/direct glyph path plus neutral managed image/SVG adapters; full corpus remains |
 | 4 — application correctness | partially qualified | SamplesApp loads and presents 1,413-sample catalog; systematic sample/pixel sweep remains |
-| 5 — benchmarks | qualification harness complete | v2 stage timing, target readback, five scenarios and raw three-lane 100-sample artifacts; balanced multi-process publication run and cross-framework ports remain |
+| 5 — benchmarks | qualification harness complete | v2 stage timing, target readback, five scenarios and two raw three-lane 100-sample repetitions; balanced eight-triplet publication run and cross-framework ports remain |
 | 6 — hardening | open | Windows/Linux/browser, device loss, AOT/trimming, leak and long-running stress |
 
 ## Phase 0 — analysis and contracts

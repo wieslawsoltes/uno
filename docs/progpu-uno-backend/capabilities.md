@@ -19,13 +19,13 @@ Status terms: **working** means exercised on a real macOS/Metal device;
 | layers | partial | balanced save/blend scopes and isolated blur/drop-shadow effect layers work; color-filter and arbitrary-effect isolation remain |
 | primitives | working | clear, rect and rounded rect have pixel assertions; border/line corpus remains |
 | paths | implemented | fill/stroke and backend geometry work; cap/join/dash behavior is supplied through widened geometry and needs corpus coverage |
-| gradients | implemented | linear/radial, focal point, anisotropy, spread and local matrix; pixel fixtures remain |
+| gradients | working | linear/radial, focal point, anisotropy, spread, local matrix, and duplicate-stop hard transitions are pixel-validated; broader fixtures remain |
 | images | implemented | BGRA upload, sampling, opacity, color matrix/`SrcIn`, source/destination, nine-slice; corpus remains |
 | offscreen | working | GPU render target and same-device reuse path exercised |
 | snapshot | working | real GPU readback and byte-channel assertions pass |
 | shadow | partial | retained drop-shadow visual works; anisotropic sigma and additive semantics are not complete |
-| effects | partial | source blur, drop shadow, image matrix/tint and backdrop material are implemented; arbitrary neutral DAG/layer isolation remains |
-| geometry factory | implemented | builders, primitives, host marker, bounds, hit test, transform, combine, trim, widen and streams; full numerical corpus remains |
+| effects | partial | source blur, drop shadow, image matrix/tint and GPU-only ordered HostBackdrop capture are implemented; the live acrylic popup still differs from Skia and needs shader-cost tuning, while arbitrary neutral DAG/layer isolation remains |
+| geometry factory | implemented | builders, primitives, host marker, bounds, hit test, transform, combine, trim, widen and streams; solid ellipse strokes retain exact analytic rings while join-aware general geometry uses widening; full numerical corpus remains |
 | font matching | working | system default selection used by smoke/SamplesApp; byte/family/fallback corpus remains |
 | shaping | working | direct OpenType shaping exercised for LTR; RTL/complex corpus remains |
 | glyph output | implemented | outline, COLR/SVG layers and embedded bitmap routes exist; font corpus remains |
@@ -34,7 +34,7 @@ Status terms: **working** means exercised on a real macOS/Metal device;
 | SVG | implemented | neutral parser emits through ProGPU geometry/drawing; document corpus remains |
 | lifetime | partial | deterministic disposal and borrowed lifetime implementation exist; host-handle release mock test remains |
 | device loss | planned | generation counter exists; invalidation/recovery injection remains |
-| diagnostics | implemented | CPU record/submit, compositor compile/upload/pass, draw/vertex/upload/mask/cache and retained-picture metrics are exported in benchmark schema v2; atlas residency is not yet exported |
+| diagnostics | implemented | CPU record/submit, compositor compile/upload/pass, draw/vertex/upload/mask/cache and retained-picture metrics are exported in benchmark schema v2; scene dumps can wait for HostBackdrop and include material parameters; atlas residency is not yet exported |
 | AOT/trimming | planned | trimmed NativeAOT sample remains |
 | Skia-free lane | partial | backend assembly has no Skia reference, but the current SamplesApp deliberately also packages other selectable backends |
 
@@ -61,7 +61,8 @@ are established.
 
 - Gate 1: **passed on macOS/Metal**. SamplesApp loaded its 1,413-sample catalog
   and presented through ProGPU without backend exceptions during the observed
-  startup interval.
+  startup interval. The startup log, rather than the selection environment
+  variable, proves that `ProGpuGraphicsProvider` won `WebGpu` negotiation.
 - Gate 2: **passed only for the focused smoke and five diagnostic benchmark
   scenes**; the complete runtime capability corpus has not run.
 - Gate 3: **presentation path passes by implementation and runtime observation;
@@ -70,7 +71,7 @@ are established.
   geometry/text/fallback/color-font corpus remains.
 - Gate 5: **partial**. The backend project is Skia-free; a minimal packaged app
   and process-module audit remains.
-- Gate 6: **passed for one full 100-sample process per lane/scenario**. Cached
-  and sparse output is byte-exact; text/path/image differences are quantified.
-  Eight balanced independent process triplets remain before publication-level
-  confidence.
+- Gate 6: **passed for two full 100-sample processes per lane/scenario**.
+  Cached and sparse output is byte-exact; text/path/image differences are
+  quantified. Eight balanced independent process triplets remain before
+  publication-level confidence.
