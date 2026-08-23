@@ -5,7 +5,7 @@
 The primary result is an eight-pair, alternating fresh-process comparison of
 the Uno ProGPU and software-Skia drawing backends. It covers the seven primary
 qualification scenarios; later sections add retained-output, native-stroke,
-gradient-material, and color-matrix-layer follow-ups. Every process renders the
+gradient-material, color-matrix-layer, and blend-mode-layer follow-ups. Every process renders the
 same semantic state,
 reports zero unsupported operations, reads back the final target, and preserves
 its raw timing distribution.
@@ -444,6 +444,46 @@ blocking median is 3.7880 ms and completed-batch median is 2.84402 ms; these
 short-run values establish compatibility only and are not mixed into the
 balanced ProGPU/Skia table.
 
+## Isolated blend-mode layer follow-up
+
+ProGPU `main` merge commit `64271d7f` supplies the retained blend effect. The
+next layer gate fixes a semantic invariant in the adapter: `SaveLayer`'s
+blend mode applies once to the already-composited isolated subtree, not to each
+primitive recorded inside the scope. ProGPU's retained blend effect stores one
+source surface, commits preceding destination draws before switching blend
+state, composites the source once, and restores the previous mode. Focused GPU
+tests cover Multiply overlap and live mutation to Screen.
+
+The `blend-layers` workload places 1,536 opaque overlapping primitives inside
+one Multiply layer over an opaque gray destination. Three alternating
+fresh-process pairs used six warmups, 200 blocking samples, and seven 60-frame
+batches:
+
+| Boundary | ProGPU process-median | Skia process-median | speedup | paired range |
+|---|---:|---:|---:|---:|
+| blocking total | 0.512700 ms | 2.667500 ms | 5.20× | 5.11×–5.40× |
+| CPU frame | 0.064500 ms | 2.667500 ms | 41.36× | 40.29×–41.90× |
+| completed batch/frame | 0.116472 ms | 2.682465 ms | 23.03× | 22.84×–23.69× |
+| batched CPU/frame | 0.077272 ms | 2.682462 ms | 34.72× | 34.10×–35.18× |
+
+Every process reports semantic hash `9537804D...716D9`, one stable pixel hash
+per backend, and zero unsupported operations. ProGPU emits three draws and no
+mask passes. The inspected 768-cell contact sheet preserves the destination,
+single-source, and overlap regions and measures 49.04 dB mean per-channel RGB
+PSNR and 0.999077 RGB SSIM, with byte-exact alpha. Raw JSON, BGRA readbacks,
+PNGs, stdout, and the contact sheet are under
+`src/artifacts/performance/2026-08-23-blend-mode-layers/`.
+
+The built-in WebGPU lane also completes a 40-sample smoke with the same
+semantic hash and zero unsupported operations, but its 13.47 dB mean
+per-channel RGB PSNR and 0.494672 RGB SSIM against
+Skia exposes a correctness failure: the current lane maps this Multiply layer
+to source-over. Its 3.5384 ms blocking median, 1.9427 ms CPU median,
+2.114397 ms completed-batch median, and 2.062037 ms batched CPU median are
+therefore diagnostic values only. Completion and an empty unsupported counter
+do not establish visual conformance. Image metrics were recomputed from the
+stored PNGs with scikit-image 0.26.0 (`data_range=255`, RGB channels only).
+
 ## Reproduction
 
 Build once with serial MSBuild:
@@ -485,7 +525,7 @@ dotnet Uno.UI.Composition.Backend.Benchmarks/bin/Release/net10.0/Uno.UI.Composit
 ```
 
 Repeat with `--backend skia`. Valid scenarios are `cached`, `sparse`, `text`,
-`paths`, `strokes`, `materials`, `layers`, `images`, `clips`, and `effects`. Add
+`paths`, `strokes`, `materials`, `layers`, `blend-layers`, `images`, `clips`, and `effects`. Add
 `--force-redraw` to
 alternate target wrappers and disable retained populated-target reuse. Raw
 local artifacts for this run are under

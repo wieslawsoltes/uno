@@ -5,8 +5,8 @@
 - Uno branch baseline: `6848a67e49`.
 - Uno work branch: `feat/progpu-drawing-backend`; no Uno pull request opened.
 - ProGPU gitlink: merged `main` commit
-  `ecc9787b8b1055d0d1887e9bf2fab7191cb1e5aa`.
-- ProGPU dependency changes: public PRs #125 through #132, all merged.
+  `64271d7fd2ca8a059e80d9af46e3de003f8409f5`.
+- ProGPU dependency changes: public PRs #125 through #133, all merged.
 - Host: macOS 26.6 arm64, Apple M3 Pro, .NET SDK 10.0.201,
   runtime 10.0.5, wgpu-native/Metal.
 
@@ -40,6 +40,7 @@
 | an already-completed queue must not pay a blocking device-poll quantum | root-cause fix | register an `AllowSpontaneous` queue-completion callback and make non-blocking device progress until the future resolves; retain the blocking API only as a fallback |
 | a direct stroke must reach the renderer as its authored centerline | root-cause fix | defer stroke-fill materialization, map the complete style to a native ProGPU pen, and lazily widen only for fill-region consumers such as clips, bounds, hit testing, trims, streams, and foreign backends |
 | a color-filter layer must transform the already-composited subtree exactly once | root-cause fix | record one nested picture, cache it as a ProGPU visual source surface, and apply the 4x5 matrix through the GPU image-effect shader at layer restore |
+| a blend-mode layer must combine with the destination after its subtree is composited | root-cause fix | retain one source-only effect surface, commit earlier destination draws before changing blend state, apply the requested mode exactly once, and restore the prior state |
 
 Arbitrary/non-uniform geometry, masks, hit testing, unsupported draw commands,
 volatile variants, and stale atlas generations fail closed to normal
@@ -66,20 +67,20 @@ resolved the environmental file-lock race without source changes.
 
 ## Dependency tests
 
-The current ProGPU branch passes the complete locally available suites:
+The current blend-effect branch passes the complete locally available suites:
 
 ```text
-ProGPU.Tests:          3,777 passed, 0 failed, 0 skipped
+ProGPU.Tests:          3,712 passed, 0 failed, 0 skipped
 ProGPU.Tests.Headless:   240 passed, 0 failed, 0 skipped
 ```
 
 `ShapingContractsTests` is excluded from the first command because that lane
 depends on separately provisioned upstream source contracts; the dedicated CI
-text-contract job supplies that coverage. The 28-test focused effect and visual
+text-contract job supplies that coverage. The 29-test focused effect and visual
 change-version run also passes. It covers
 translated effect placement, shadow-only output, detached resource retirement,
-cache invalidation, GPU color-matrix channel transforms, and live matrix
-mutation. The regression verifies final pixels after changing one nested
+cache invalidation, GPU color-matrix channel transforms, isolated Multiply
+overlap, and live matrix/blend mutation. The regression verifies final pixels after changing one nested
 picture while unchanged siblings reuse compiled pages. The adaptive-admission
 variant uses four-command pictures and validates that the minimum-command gate
 does not disable profitable subtree reuse. The real-device smoke additionally
@@ -93,7 +94,7 @@ The identity-picture follow-up adds five tests covering flattening, retained
 resource lifetime after the source clone is disposed, additional parent
 resources, transformed wrappers, and explicit completion-window reset. The
 retained-output follow-up adds texture mutation/version fixtures. The final
-full 3,777-test and 240-test suites passed. One allocation-sensitive MotionMark
+full 3,712-test and 240-test suites passed. One allocation-sensitive MotionMark
 test failed once in an earlier local full run and once in the merged PR's
 macOS CI job; it passed in the complete local rerun, in isolation, and in five
 consecutive post-merge reruns. The unrelated CI retry is tracked separately and
@@ -108,7 +109,8 @@ compatibility, and zero unsupported operations. It also verifies HostBackdrop
 blur/capture, foreground ordering, translated and nested effect-layer bounds,
 shadow-only source omission, gradient/non-uniform-rounded/border/path/stroke/
 line/image/color-filtered-image/nine-slice content-bound propagation, isolated
-and nested color-matrix layers, rounded-outer/rectangular-hole clip restoration,
+and nested color-matrix layers, isolated Multiply-layer overlap,
+rounded-outer/rectangular-hole clip restoration,
 and the conditional present/blit route. Its final
 Release run reports:
 
@@ -262,6 +264,25 @@ effects throughput benchmark.
   smoke with the same semantic hash, zero unsupported operations, a 3.7880 ms
   blocking median, and a 2.84402 ms completed-batch median. It remains
   compatibility evidence rather than a balanced qualification distribution.
+- Three fresh forced-redraw blend-layer pairs cover one isolated Multiply layer
+  with 1,536 opaque overlapping primitives over gray. ProGPU is 5.20× faster
+  at median blocking total and 23.03× faster at completed-batch throughput;
+  all runs preserve the semantic workload, stable backend hashes, zero
+  unsupported operations, and zero mask passes. The inspected contact sheet
+  measures 0.999077 RGB SSIM, and the real-device smoke rejects the former
+  per-primitive blend semantics through its overlap pixel while a following
+  blue draw proves that restore returns to source-over.
+- A post-merge rebuild from gitlink `64271d7f` completed with zero warnings or
+  errors. The real-device smoke again passed at frame 12; a short blend-layer
+  pair preserved semantic hash `9537804D...716D9`, ProGPU pixel hash
+  `2DA4C129...194D`, Skia pixel hash `D91EDA15...C56E`, and zero unsupported
+  operations.
+- The built-in WebGPU blend-layer smoke completes but measures only 13.47 dB
+  mean per-channel RGB PSNR and 0.494672 RGB SSIM against Skia because that
+  lane currently treats Multiply as source-over.
+  Its timing is excluded from performance claims; this is direct evidence that
+  semantic hashes and unsupported-operation counters are necessary but not
+  sufficient correctness gates.
 - Uno's built-in WebGPU lane completes 40-sample forced-redraw smokes for the
   stroke and material scenarios with zero unsupported operations. Its blocking medians are
   17.1597 ms for strokes and 8.6350 ms for materials; balanced eight-process
@@ -282,5 +303,5 @@ the exact values and interpretation boundaries.
 4. Run a systematic SamplesApp page/pixel sweep and a long-duration resize,
    DPI, occlusion, minimize/restore, and device-loss sequence.
 5. Run Windows/D3D12, Linux/Vulkan, browser, trimming, and NativeAOT lanes.
-6. Complete anisotropic/additive shadows and arbitrary color-filter/effect DAG
-   layer isolation.
+6. Complete anisotropic/additive shadows, clip-wide transparent-source blend
+   modes, and arbitrary color-filter/effect DAG layer isolation.

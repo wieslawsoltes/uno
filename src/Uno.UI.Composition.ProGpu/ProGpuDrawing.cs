@@ -601,7 +601,8 @@ internal class ProGpuDrawingSession : IDrawingSession
 		Unsupported(nameof(SaveLayer));
 		Save();
 	}
-	public void SaveLayer(BlendMode blendMode, bool antialias = false) { PushState(Scope.Blend); Context.PushBlendMode(ToBlend(blendMode)); }
+	public void SaveLayer(BlendMode blendMode, bool antialias = false) =>
+		BeginEffectLayer(new BlendModeEffect(ToBlend(blendMode)));
 	public void SaveLayer(IEffectFilter filter)
 	{
 		if (filter is not ProGpuEffectFilter { Value: EffectBase effect })

@@ -16,7 +16,7 @@ Status terms: **working** means exercised on a real macOS/Metal device;
 | recording/replay | working | smoke replays retained `GpuPicture`; nested/resource-pressure corpus remains |
 | transforms | working | set/concat/translate/scale, transformed retained records, clips, strokes, and HostBackdrop placement have pixel fixtures |
 | clips | working | rect, rounded/path, intersect/difference; nested rounded rings and rounded-plus-rectangular holes are analytic, pixel-qualified, and benchmarked with zero mask passes; broader arbitrary clip corpus remains |
-| layers | partial | balanced save/blend scopes plus translated and nested blur/drop-shadow/color-matrix effect layers work; color matrices isolate the complete subtree on one retained GPU surface and preserve nested scope restoration; unfiltered `SaveLayer` isolation and arbitrary effects remain |
+| layers | partial | balanced save scopes plus translated and nested blur/drop-shadow/color-matrix effects work; color-matrix and blend-mode layers isolate the complete subtree on one retained GPU surface and preserve nested scope restoration; Multiply overlap and live Screen mutation are pixel-qualified, while unfiltered `SaveLayer`, clip-wide transparent-source blend modes, and arbitrary effects remain |
 | primitives | working | clear, solid/gradient rect, uniform/non-uniform rounded rect, border, and line routes have direct or effect-bound pixel assertions; broader antialias corpus remains |
 | paths | working | fill/stroke, transformed replay, effect bounds, and backend geometry have runtime assertions; eligible solid and dashed strokes preserve native analytic lines/Béziers/arcs with distinct cap/join styles, while trim, clips, hit testing, and foreign consumers retain widened-fill fallback semantics; broader numerical corpus remains |
 | gradients | working | linear/radial, focal point, anisotropy, spread, local matrix, and duplicate-stop hard transitions are pixel-validated; broader fixtures remain |
@@ -24,7 +24,7 @@ Status terms: **working** means exercised on a real macOS/Metal device;
 | offscreen | working | GPU render target and same-device reuse path exercised |
 | snapshot | working | real GPU readback and byte-channel assertions pass |
 | shadow | partial | translated retained shadows, shadow-only composition, explicit source replay, and nested output-bound propagation are runtime-qualified; anisotropic sigma and additive semantics are not complete |
-| effects | partial | source blur, drop shadow, image matrix/tint and GPU-only ordered HostBackdrop capture are implemented; translated/nested layer bounds, detached texture retirement, and live acrylic placement are qualified, while arbitrary neutral DAG/layer isolation remains |
+| effects | partial | source blur, drop shadow, image matrix/tint, isolated subtree blend, and GPU-only ordered HostBackdrop capture are implemented; translated/nested layer bounds, detached texture retirement, Multiply/Screen blend state, and live acrylic placement are qualified, while arbitrary neutral DAG and full blend-mode conformance remain |
 | geometry factory | working | builders, primitives, host marker, bounds, hit test, transform, combine, trim, widen and streams are real-device exercised; ellipse clips retain exact rings and direct strokes defer to ProGPU's analytic pen stack; full numerical corpus remains |
 | font matching | working | system default selection used by smoke/SamplesApp; byte/family/fallback corpus remains |
 | shaping | working | direct OpenType shaping exercised for LTR; RTL/complex corpus remains |
@@ -63,7 +63,7 @@ are established.
   and presented through ProGPU without backend exceptions during the observed
   startup interval. The startup log, rather than the selection environment
   variable, proves that `ProGpuGraphicsProvider` won `WebGpu` negotiation.
-- Gate 2: **passed for the expanded real-device smoke and ten benchmark
+- Gate 2: **passed for the expanded real-device smoke and eleven benchmark
   scenes**; the systematic SamplesApp page corpus has not run.
 - Gate 3: **passed on macOS/Metal**. The runtime test disposes a factory that
   borrowed the host context, then successfully allocates and releases another
@@ -74,7 +74,7 @@ are established.
   and process-module audit remains.
 - Gate 6: **passed for eight alternating ProGPU/Skia processes across the seven
   primary scenarios, plus three fresh forced-redraw pairs for the native-stroke,
-  materials, and color-matrix-layer scenarios**. Cached and sparse output is
+  materials, color-matrix-layer, and blend-mode-layer scenarios**. Cached and sparse output is
   byte-exact; text/path/stroke/material/layer/image/clip and effect differences
   are quantified. The earlier Uno WebGPU context lane has two processes and
   still needs eight-process promotion.

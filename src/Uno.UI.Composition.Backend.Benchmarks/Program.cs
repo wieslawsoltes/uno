@@ -57,7 +57,7 @@ internal sealed record BenchmarkOptions(
 		var backend = Value("--backend", "progpu").ToLowerInvariant();
 		if (backend is not ("progpu" or "webgpu" or "skia")) throw new ArgumentException("--backend must be progpu, webgpu, or skia.");
 		var scenario = Value("--scenario", "cached").ToLowerInvariant();
-		if (scenario is not ("cached" or "sparse" or "text" or "paths" or "strokes" or "materials" or "layers" or "images" or "clips" or "effects")) throw new ArgumentException("--scenario must be cached, sparse, text, paths, strokes, materials, layers, images, clips, or effects.");
+		if (scenario is not ("cached" or "sparse" or "text" or "paths" or "strokes" or "materials" or "layers" or "blend-layers" or "images" or "clips" or "effects")) throw new ArgumentException("--scenario must be cached, sparse, text, paths, strokes, materials, layers, blend-layers, images, clips, or effects.");
 		var warmups = int.Parse(Value("--warmups", "4"), CultureInfo.InvariantCulture);
 		var samples = int.Parse(Value("--samples", "100"), CultureInfo.InvariantCulture);
 		var batchSize = int.Parse(Value("--batch-size", "60"), CultureInfo.InvariantCulture);
@@ -291,6 +291,30 @@ internal sealed class BenchmarkHarness : IDisposable
 					recorder.DrawRect(
 						new Rect(left + 12, top + 7, 22, 14),
 						Color.FromArgb(145, 35, (byte)(100 + x * 4), (byte)(235 - y * 6)),
+						true);
+				}
+			}
+			recorder.Restore();
+		}
+
+		if (_options.Scenario == "blend-layers")
+		{
+			recorder.DrawRect(new Rect(0, 0, Width, Height), Color.FromArgb(255, 128, 128, 128));
+			recorder.SaveLayer(BlendMode.Multiply);
+			for (var y = 0; y < 24; y++)
+			{
+				for (var x = 0; x < 32; x++)
+				{
+					var left = x * 40 + 2;
+					var top = y * 30 + 2;
+					recorder.DrawRoundedRect(
+						new Rect(left, top, 28, 24),
+						new Vector4(5),
+						Color.FromArgb(255, (byte)(235 - x * 4), (byte)(35 + y * 7), 70),
+						true);
+					recorder.DrawRect(
+						new Rect(left + 12, top + 6, 24, 16),
+						Color.FromArgb(255, 35, (byte)(105 + x * 4), (byte)(235 - y * 6)),
 						true);
 				}
 			}
@@ -714,6 +738,7 @@ internal sealed class BenchmarkHarness : IDisposable
 			"strokes" => "|strokes=1000|styles=4|analyticArcs=true|dashes=true",
 			"materials" => "|materials=768|linear=4|radial=4|duplicateStops=true|focal=true|anisotropic=true",
 			"layers" => "|colorMatrixLayers=1|layerPrimitives=1536|overlap=true|alphaTransform=true",
+			"blend-layers" => "|blendLayers=1|blendMode=multiply|layerPrimitives=1536|opaqueOverlap=true",
 			_ => string.Empty,
 		};
 		var bytes = Encoding.UTF8.GetBytes($"v2|clear=FF080C14|retainedRows=24|{_options.Scenario}|{Width}|{Height}|768|{(_options.Scenario == "text" ? 128 : 0)}|{(_options.Scenario == "paths" ? 1000 : 0)}|{(_options.Scenario == "images" ? 240 : 0)}{extension}");
