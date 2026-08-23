@@ -5,8 +5,9 @@
 The primary result is an eight-pair, alternating fresh-process comparison of
 the Uno ProGPU and software-Skia drawing backends. It covers the seven primary
 qualification scenarios; later sections add retained-output, native-stroke,
-gradient-material, color-matrix-layer, unfiltered-isolation-layer, and
-blend-mode-layer follow-ups. Every process renders the same semantic state,
+gradient-material, color-matrix-layer, unfiltered-isolation-layer,
+destination-in-mask-layer, and blend-mode-layer follow-ups. Every process
+renders the same semantic state,
 reports zero unsupported operations, reads back the final target, and preserves
 its raw timing distribution.
 
@@ -531,6 +532,47 @@ fresh short ProGPU/Skia pair preserved semantic hash `AD6F2629...BD67`, pixel
 hashes `DC65A307...9996` / `CDAFE4F7...CF9D`, three ProGPU draws, zero mask
 passes, and zero unsupported operations.
 
+## Destination-in composition-mask follow-up
+
+Uno's composition-mask brush records its source in an outer source-over layer,
+then restores a nested DstIn layer containing the alpha mask. A retained blend
+surface must evaluate transparent source across the preceding destination
+bounds: outside the mask, DstIn clears the source rather than leaving it
+unchanged. The failed-before real-device fixture instead retained opaque red at
+the masked-out pixel (`0000FFFF`).
+
+The root-cause correction makes replacement clears inside explicitly clipped
+effect layers contribute their clip to retained bounds, then expands blend
+surfaces to the preceding destination bounds for the six Porter-Duff modes
+whose transparent source clears destination. Focused pixels cover `Src`,
+`Modulate`, `DstIn`, `SrcIn`, `SrcOut`, and `DstAtop`, plus a completely empty
+DstIn mask and state restoration after the nested layers.
+
+The `mask-layers` workload records 768 colored source cells and 768 smaller
+rounded alpha masks inside nested source-over/DstIn layers. Three alternating
+fresh-process pairs used six warmups, 200 blocking samples, and seven 60-frame
+batches:
+
+| Boundary | ProGPU process-median | Skia process-median | speedup | paired range |
+|---|---:|---:|---:|---:|
+| blocking total | 0.554600 ms | 2.739200 ms | 4.94× | 4.83×–4.97× |
+| CPU frame | 0.066100 ms | 2.739200 ms | 41.44× | 41.15×–42.04× |
+| completed batch/frame | 0.113120 ms | 2.725747 ms | 24.10× | 23.96×–24.19× |
+| batched CPU/frame | 0.080617 ms | 2.725745 ms | 33.81× | 32.65×–33.95× |
+
+Every process reports semantic hash `055E3B4D...BCAA`, stable ProGPU pixel hash
+`13FAAC2D...B08D`, stable Skia pixel hash `BE4411CA...6C3A`, and zero unsupported
+operations. ProGPU emits three draws and no mask passes. The inspected outputs
+preserve all 768 rounded masks and exact alpha, measuring 49.73 dB mean
+per-channel RGB PSNR and 0.998704 RGB SSIM against Skia.
+
+A 40-sample built-in WebGPU compatibility smoke preserves the same semantic
+state with zero unsupported operations and exact alpha. It measures 43.58 dB
+mean per-channel RGB PSNR and 0.993545 RGB SSIM against Skia; its 2.5052 ms
+blocking median and 1.077125 ms completed-batch median are diagnostic only.
+Raw JSON, BGRA readbacks, PNGs, stdout, and the visually inspected outputs are
+under `src/artifacts/performance/2026-08-23-mask-layers/`.
+
 ## Reproduction
 
 Build once with serial MSBuild:
@@ -572,8 +614,8 @@ dotnet Uno.UI.Composition.Backend.Benchmarks/bin/Release/net10.0/Uno.UI.Composit
 ```
 
 Repeat with `--backend skia`. Valid scenarios are `cached`, `sparse`, `text`,
-`paths`, `strokes`, `materials`, `layers`, `isolation-layers`, `blend-layers`,
-`images`, `clips`, and `effects`. Add `--force-redraw` to
+`paths`, `strokes`, `materials`, `layers`, `isolation-layers`, `mask-layers`,
+`blend-layers`, `images`, `clips`, and `effects`. Add `--force-redraw` to
 alternate target wrappers and disable retained populated-target reuse. Raw
 local artifacts for this run are under
 `src/artifacts/performance/2026-08-23-retained-eligibility/`; the

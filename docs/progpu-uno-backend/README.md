@@ -44,8 +44,8 @@ in-place merging of compact retained-page draw calls. Identity-only picture
 recordings now share their immutable command storage directly, and explicit
 completion waits advance the bounded submission-drain accounting. Retained
 target stamps prevent unchanged output submission. Unfiltered source-over
-layers, color matrices, and blend modes can now isolate complete visual
-subtrees through retained GPU effect paths.
+layers, destination-in masks, color matrices, and blend modes can now isolate
+complete visual subtrees through retained GPU effect paths.
 
 ## Non-negotiable invariants
 

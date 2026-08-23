@@ -41,6 +41,7 @@ produce the same final state.
 | materials | 768 linear/radial gradients spanning focal, anisotropic, spread, local-matrix, and duplicate-stop cases | material batching and shader fidelity |
 | layers | one retained color-matrix layer containing 1,536 overlapping opaque/translucent primitives and a non-identity alpha row | subtree isolation, effect-texture reuse, and whole-layer shader cost |
 | isolation-layers | one unfiltered source-over layer containing a clipped transparent clear and 1,536 overlapping opaque primitives over gray | destination isolation, clear containment, restoration, and retained effect-surface reuse |
+| mask-layers | 768 colored source cells and 768 smaller rounded masks inside nested source-over/DstIn layers | transparent-source destination coverage, composition-mask fidelity, and nested effect-surface reuse |
 | blend-layers | one retained Multiply layer containing 1,536 opaque overlapping primitives over a gray destination | once-per-layer composition versus incorrect per-primitive blending |
 | images | retained image grid plus one changed upload | texture residency/upload cost |
 | effects | shadows, blur, color matrix, backdrop | pass graph and bandwidth cost |
@@ -171,10 +172,10 @@ remain the authority if a summary or interpretation changes.
 
 ## 11. Current harness and artifacts
 
-`src/Uno.UI.Composition.Backend.Benchmarks` implements twelve steady
+`src/Uno.UI.Composition.Backend.Benchmarks` implements thirteen steady
 micro-scenarios (`cached`, `sparse`, `text`, `paths`, `strokes`, `materials`,
-`layers`, `isolation-layers`, `blend-layers`, `images`, `clips`, and `effects`)
-for ProGPU, Uno WebGPU where supported, and Uno software Skia. Every
+`layers`, `isolation-layers`, `mask-layers`, `blend-layers`, `images`, `clips`,
+and `effects`) for ProGPU, Uno WebGPU where supported, and Uno software Skia. Every
 frame explicitly clears the target; this prevents translucent antialiasing,
 paths, images, and effects from accumulating across samples. GPU lanes use
 `wgpuDevicePoll(wait=true)` only in the separate completion boundary.
@@ -206,6 +207,13 @@ transparent, and records 1,536 overlapping opaque primitives. Correct output
 preserves gray in every undrawn gap when the layer is restored. Treating
 `SaveLayer()` as a state-only save instead clears those gaps on the destination
 and fails both the focused pixel assertion and the final-target readback gate.
+
+The `mask-layers` workload mirrors Uno's composition-mask sequence: an outer
+source-over layer is clipped and cleared, 768 colored source cells are
+recorded, and a nested DstIn layer supplies 768 smaller rounded alpha masks.
+Correct output removes every source pixel outside those masks. Restricting the
+final DstIn draw to mask content bounds leaves rectangular source cells behind
+and fails the focused pixel and final-target readback gates.
 
 The `blend-layers` workload records 1,536 opaque overlapping primitives inside
 one Multiply `SaveLayer` over an opaque gray destination. Correct output

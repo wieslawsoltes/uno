@@ -99,6 +99,8 @@ await RunEffectPrimitiveBoundsSmoke(factory, geometryFactory);
 await RunColorMatrixLayerSmoke(factory);
 await RunBlendModeLayerSmoke(factory);
 await RunUnfilteredLayerSmoke(factory);
+await RunDestinationInLayerSmoke(factory);
+await RunTransparentSourceBlendCoverageSmoke(factory);
 RunStablePresentCacheSmoke(device, factory);
 await RunNestedRecordClearSmoke(factory);
 await RunDefaultTrimSmoke(factory, geometryFactory);
@@ -230,6 +232,107 @@ static async Task RunUnfilteredLayerSmoke(ProGpuDrawingFactory factory)
 	{
 		throw new InvalidOperationException(
 			$"Unfiltered layer was not isolated/restored before compositing: outside={Convert.ToHexString(outside)}, isolationGap={Convert.ToHexString(isolationGap)}, redOnly={Convert.ToHexString(redOnly)}, overlap={Convert.ToHexString(overlap)}, following={Convert.ToHexString(followingContent)}.");
+	}
+}
+
+static async Task RunDestinationInLayerSmoke(ProGpuDrawingFactory factory)
+{
+	using var texture = factory.RenderOffscreen(64, 64, drawing =>
+	{
+		drawing.Clear(Color.FromArgb(255, 128, 128, 128));
+		drawing.SaveLayer();
+		drawing.ClipRect(new Rect(8, 8, 48, 48), antialias: true);
+		drawing.Clear(Color.FromArgb(0, 0, 0, 0));
+		drawing.DrawRect(new Rect(12, 12, 40, 40), Color.FromArgb(255, 255, 0, 0));
+		drawing.SaveLayer(BlendMode.DstIn, antialias: true);
+		drawing.DrawRect(new Rect(28, 16, 16, 32), Color.FromArgb(255, 255, 255, 255));
+		drawing.Restore();
+		drawing.Restore();
+		drawing.DrawRect(new Rect(56, 16, 6, 24), Color.FromArgb(255, 0, 0, 255));
+	});
+	var pixels = new byte[64 * 64 * 4];
+	(await factory.SnapshotAsync(texture)).CopyPixels(pixels);
+	var outside = Pixel(pixels, 4, 4);
+	var outerGap = Pixel(pixels, 10, 10);
+	var maskedOut = Pixel(pixels, 20, 24);
+	var maskedIn = Pixel(pixels, 36, 24);
+	var followingContent = Pixel(pixels, 58, 24);
+	if (outside[0] is < 120 or > 136 || outside[1] is < 120 or > 136 || outside[2] is < 120 or > 136 || outside[3] < 245 ||
+		outerGap[0] is < 120 or > 136 || outerGap[1] is < 120 or > 136 || outerGap[2] is < 120 or > 136 || outerGap[3] < 245 ||
+		maskedOut[0] is < 120 or > 136 || maskedOut[1] is < 120 or > 136 || maskedOut[2] is < 120 or > 136 || maskedOut[3] < 245 ||
+		maskedIn[2] < 245 || maskedIn[0] > 12 || maskedIn[1] > 12 || maskedIn[3] < 245 ||
+		followingContent[0] < 245 || followingContent[1] > 12 || followingContent[2] > 12 || followingContent[3] < 245)
+	{
+		throw new InvalidOperationException(
+			$"Destination-in layer did not clear source pixels outside the mask: outside={Convert.ToHexString(outside)}, outerGap={Convert.ToHexString(outerGap)}, maskedOut={Convert.ToHexString(maskedOut)}, maskedIn={Convert.ToHexString(maskedIn)}, following={Convert.ToHexString(followingContent)}.");
+	}
+
+	using var emptyMaskTexture = factory.RenderOffscreen(64, 64, drawing =>
+	{
+		drawing.Clear(Color.FromArgb(255, 128, 128, 128));
+		drawing.SaveLayer();
+		drawing.ClipRect(new Rect(8, 8, 48, 48), antialias: true);
+		drawing.Clear(Color.FromArgb(0, 0, 0, 0));
+		drawing.DrawRect(new Rect(12, 12, 40, 40), Color.FromArgb(255, 255, 0, 0));
+		drawing.SaveLayer(BlendMode.DstIn, antialias: true);
+		drawing.Restore();
+		drawing.Restore();
+	});
+	Array.Clear(pixels);
+	(await factory.SnapshotAsync(emptyMaskTexture)).CopyPixels(pixels);
+	var emptyMaskResult = Pixel(pixels, 20, 24);
+	if (emptyMaskResult[0] is < 120 or > 136 || emptyMaskResult[1] is < 120 or > 136 || emptyMaskResult[2] is < 120 or > 136 || emptyMaskResult[3] < 245)
+	{
+		throw new InvalidOperationException($"An empty destination-in mask did not clear the isolated source: result={Convert.ToHexString(emptyMaskResult)}.");
+	}
+}
+
+static async Task RunTransparentSourceBlendCoverageSmoke(ProGpuDrawingFactory factory)
+{
+	var cases = new[]
+	{
+		(BlendMode.Src, "green"),
+		(BlendMode.Modulate, "black"),
+		(BlendMode.DstIn, "red"),
+		(BlendMode.SrcIn, "green"),
+		(BlendMode.SrcOut, "gray"),
+		(BlendMode.DstATop, "red"),
+	};
+	foreach (var (mode, expectedInside) in cases)
+	{
+		using var texture = factory.RenderOffscreen(64, 64, drawing =>
+		{
+			drawing.Clear(Color.FromArgb(255, 128, 128, 128));
+			drawing.SaveLayer();
+			drawing.ClipRect(new Rect(8, 8, 48, 48), antialias: true);
+			drawing.Clear(Color.FromArgb(0, 0, 0, 0));
+			drawing.DrawRect(new Rect(12, 12, 40, 40), Color.FromArgb(255, 255, 0, 0));
+			drawing.SaveLayer(mode, antialias: true);
+			drawing.DrawRect(new Rect(28, 16, 16, 32), Color.FromArgb(255, 0, 255, 0));
+			drawing.Restore();
+			drawing.Restore();
+		});
+		var pixels = new byte[64 * 64 * 4];
+		(await factory.SnapshotAsync(texture)).CopyPixels(pixels);
+		var outsideSource = Pixel(pixels, 20, 24);
+		var insideSource = Pixel(pixels, 36, 24);
+		var outsideIsGray = outsideSource[0] is >= 120 and <= 136 &&
+			outsideSource[1] is >= 120 and <= 136 &&
+			outsideSource[2] is >= 120 and <= 136 &&
+			outsideSource[3] >= 245;
+		var insideMatches = expectedInside switch
+		{
+			"green" => insideSource[1] >= 245 && insideSource[0] <= 12 && insideSource[2] <= 12 && insideSource[3] >= 245,
+			"red" => insideSource[2] >= 245 && insideSource[0] <= 12 && insideSource[1] <= 12 && insideSource[3] >= 245,
+			"black" => insideSource[0] <= 12 && insideSource[1] <= 12 && insideSource[2] <= 12 && insideSource[3] >= 245,
+			"gray" => insideSource[0] is >= 120 and <= 136 && insideSource[1] is >= 120 and <= 136 && insideSource[2] is >= 120 and <= 136 && insideSource[3] >= 245,
+			_ => false,
+		};
+		if (!outsideIsGray || !insideMatches)
+		{
+			throw new InvalidOperationException(
+				$"Transparent-source coverage failed for {mode}: outside={Convert.ToHexString(outsideSource)}, inside={Convert.ToHexString(insideSource)}, expectedInside={expectedInside}.");
+		}
 	}
 }
 

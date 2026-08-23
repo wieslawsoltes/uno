@@ -564,7 +564,7 @@ internal class ProGpuDrawingSession : IDrawingSession
 			case Scope.EffectLayer:
 				var layer = state.Layer ?? throw new InvalidOperationException("Effect layer state was incomplete.");
 				var picture = layer.Recorder.EndRecording();
-				var contentBounds = _effectContentBounds;
+				var contentBounds = CompositeEffectBounds(_effectContentBounds, layer.Effect, layer.ParentContentBounds);
 				_effectContentBounds = layer.ParentContentBounds;
 				_effectLayerDepth--;
 				Context = layer.Parent;
@@ -799,6 +799,10 @@ internal class ProGpuDrawingSession : IDrawingSession
 	{
 		// Clear is replacement, including when the requested alpha is zero. SrcOver
 		// would leave destination pixels behind for transparent and translucent colors.
+		if (_effectLayerDepth > 0 && _clips.Count > 0)
+		{
+			IncludeEffectBounds(_clipBounds);
+		}
 		Context.PushBlendMode(GpuBlendMode.Src);
 		Context.DrawRectangle(new SolidColorBrush(color), null, new PRect(-1_000_000, -1_000_000, 2_000_000, 2_000_000), Matrix4x4.Identity);
 		Context.PopBlendMode();
@@ -1065,6 +1069,29 @@ internal class ProGpuDrawingSession : IDrawingSession
 		}
 		return output;
 	}
+
+	private static PRect? CompositeEffectBounds(PRect? source, EffectBase effect, PRect? destination)
+	{
+		if (effect is not BlendModeEffect blend ||
+			!BlendModeNeedsDestinationCoverage(blend.BlendMode) ||
+			destination is not { IsEmpty: false } destinationBounds)
+		{
+			return source;
+		}
+
+		return source is { IsEmpty: false } sourceBounds
+			? Union(sourceBounds, destinationBounds)
+			: destinationBounds;
+	}
+
+	private static bool BlendModeNeedsDestinationCoverage(GpuBlendMode mode) => mode is
+		GpuBlendMode.Src or
+		GpuBlendMode.Modulate or
+		GpuBlendMode.DstIn or
+		GpuBlendMode.SrcIn or
+		GpuBlendMode.SrcOut or
+		GpuBlendMode.DstAtop;
+
 	private static PRect TransformBounds(PRect bounds, Matrix4x4 transform)
 	{
 		var p0 = TransformPoint(bounds.X, bounds.Y, transform);

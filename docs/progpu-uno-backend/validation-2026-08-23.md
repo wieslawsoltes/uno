@@ -42,6 +42,8 @@
 | a color-filter layer must transform the already-composited subtree exactly once | root-cause fix | record one nested picture, cache it as a ProGPU visual source surface, and apply the 4x5 matrix through the GPU image-effect shader at layer restore |
 | a blend-mode layer must combine with the destination after its subtree is composited | root-cause fix | retain one source-only effect surface, commit earlier destination draws before changing blend state, apply the requested mode exactly once, and restore the prior state |
 | a parameterless layer must isolate a clipped transparent clear from the destination | root-cause fix | route `SaveLayer()` through a retained source-over blend effect so clear and content are recorded on one source surface before restoration composites it once |
+| a replacement clear inside a clipped effect layer must establish the affected retained bounds | root-cause fix | contribute the active explicit clip to effect content bounds before recording the replacement draw |
+| a transparent layer source must still affect the preceding destination for Porter-Duff modes that clear it | root-cause fix | expand `Src`, `Modulate`, `DstIn`, `SrcIn`, `SrcOut`, and `DstAtop` effect surfaces to the parent destination bounds, including an empty source picture |
 
 Arbitrary/non-uniform geometry, masks, hit testing, unsupported draw commands,
 volatile variants, and stale atlas generations fail closed to normal
@@ -116,8 +118,9 @@ compatibility, and zero unsupported operations. It also verifies HostBackdrop
 blur/capture, foreground ordering, translated and nested effect-layer bounds,
 shadow-only source omission, gradient/non-uniform-rounded/border/path/stroke/
 line/image/color-filtered-image/nine-slice content-bound propagation, isolated
-and nested color-matrix layers, unfiltered clipped-clear isolation, isolated
-Multiply-layer overlap,
+and nested color-matrix layers, unfiltered clipped-clear isolation, DstIn
+composition masks, empty masks, six transparent-source Porter-Duff modes,
+isolated Multiply-layer overlap,
 rounded-outer/rectangular-hole clip restoration,
 and the conditional present/blit route. Its final
 Release run reports:
@@ -311,6 +314,23 @@ effects throughput benchmark.
   preserved semantic hash `AD6F2629...BD67`, pixel hashes
   `DC65A307...9996` / `CDAFE4F7...CF9D`, three ProGPU draws, zero masks, and
   zero unsupported operations.
+- Three fresh forced-redraw destination-in-mask-layer pairs cover 768 colored
+  source cells and 768 smaller rounded masks inside nested source-over/DstIn
+  layers. ProGPU is 4.94× faster at median blocking total and 24.10× faster at
+  completed-batch throughput; all runs retain semantic hash
+  `055E3B4D...BCAA`, stable backend hashes, zero unsupported operations, exact
+  alpha, three ProGPU draws, and no mask passes. The inspected outputs measure
+  49.73 dB mean per-channel RGB PSNR and 0.998704 RGB SSIM against Skia.
+- The failed-before runtime fixture retained opaque red outside the DstIn mask.
+  The corrected fixture covers non-empty and empty masks plus all six blend
+  modes whose transparent source clears destination. The built-in WebGPU
+  compatibility smoke measures 43.58 dB PSNR / 0.993545 RGB SSIM; its short
+  timing distribution is not used as a qualification claim.
+- A final serial Release rebuild after the mask-layer correction completed the
+  runtime and benchmark dependency graphs with zero warnings and zero errors.
+  The real-device smoke passed at frame 12 with the non-empty mask, empty mask,
+  six transparent-source modes, and post-restore drawing assertions enabled;
+  all nine mask-layer JSON artifacts validate against benchmark schema v3.
 - Uno's built-in WebGPU lane completes 40-sample forced-redraw smokes for the
   stroke and material scenarios with zero unsupported operations. Its blocking medians are
   17.1597 ms for strokes and 8.6350 ms for materials; balanced eight-process
@@ -331,5 +351,6 @@ the exact values and interpretation boundaries.
 4. Run a systematic SamplesApp page/pixel sweep and a long-duration resize,
    DPI, occlusion, minimize/restore, and device-loss sequence.
 5. Run Windows/D3D12, Linux/Vulkan, browser, trimming, and NativeAOT lanes.
-6. Complete anisotropic/additive shadows, clip-wide transparent-source blend
-   modes, and arbitrary color-filter/effect DAG layer isolation.
+6. Complete anisotropic/additive shadows, the remaining Porter-Duff and
+   non-separable blend corpus, and arbitrary color-filter/effect DAG layer
+   isolation.

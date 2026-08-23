@@ -135,6 +135,7 @@ The backend maps Uno operations as follows:
 | image | same-device `GpuTexture` + source/destination mapping |
 | save/restore | balanced retained transform/clip/blend scopes |
 | unfiltered layer | retained source-only effect surface + one source-over composite |
+| destination-sensitive layer | retained source surface expanded to the preceding destination bounds |
 | blend layer | retained source-only effect surface + one final ProGPU blend operation |
 | shadow | ProGPU GPU shadow/effect pipeline |
 | backdrop effect | compiled ProGPU backdrop/image-effect parameters |
@@ -187,10 +188,17 @@ content before switching blend state, renders the subtree without contaminating
 its internal primitive composition, then applies the requested mode once while
 restoring the prior state. No effect rewrites individual brushes or reads
 pixels back to the CPU.
+Porter-Duff modes whose transparent source clears destination (`Src`,
+`Modulate`, `DstIn`, `SrcIn`, `SrcOut`, and `DstAtop`) expand the effect surface
+to the preceding destination bounds. A replacement clear inside an explicitly
+clipped effect layer contributes that clip to the retained bounds. Together
+these rules preserve Uno composition masks outside a non-empty mask and when
+the mask picture is empty, without allocating a CPU bitmap or an arbitrary
+geometry mask.
 Other neutral DAGs return `null` from `CreateEffectFilter`, activating Uno's
 documented recipe path. Calling an unsupported drawing operation records a
 named diagnostic and, by default, throws. No Skia fallback occurs. Arbitrary
-effect-DAG and clip-wide transparent-source blend conformance remain open.
+effect-DAG and broader Porter-Duff/non-separable blend conformance remain open.
 
 Uno's acrylic graph is lowered to one ProGPU material with blur, luminosity,
 tint, noise, and material opacity. ProGPU implements the Color and Luminosity

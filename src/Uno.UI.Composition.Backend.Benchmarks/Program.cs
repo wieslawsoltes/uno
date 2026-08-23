@@ -57,7 +57,7 @@ internal sealed record BenchmarkOptions(
 		var backend = Value("--backend", "progpu").ToLowerInvariant();
 		if (backend is not ("progpu" or "webgpu" or "skia")) throw new ArgumentException("--backend must be progpu, webgpu, or skia.");
 		var scenario = Value("--scenario", "cached").ToLowerInvariant();
-		if (scenario is not ("cached" or "sparse" or "text" or "paths" or "strokes" or "materials" or "layers" or "isolation-layers" or "blend-layers" or "images" or "clips" or "effects")) throw new ArgumentException("--scenario must be cached, sparse, text, paths, strokes, materials, layers, isolation-layers, blend-layers, images, clips, or effects.");
+		if (scenario is not ("cached" or "sparse" or "text" or "paths" or "strokes" or "materials" or "layers" or "isolation-layers" or "mask-layers" or "blend-layers" or "images" or "clips" or "effects")) throw new ArgumentException("--scenario must be cached, sparse, text, paths, strokes, materials, layers, isolation-layers, mask-layers, blend-layers, images, clips, or effects.");
 		var warmups = int.Parse(Value("--warmups", "4"), CultureInfo.InvariantCulture);
 		var samples = int.Parse(Value("--samples", "100"), CultureInfo.InvariantCulture);
 		var batchSize = int.Parse(Value("--batch-size", "60"), CultureInfo.InvariantCulture);
@@ -344,6 +344,42 @@ internal sealed class BenchmarkHarness : IDisposable
 						true);
 				}
 			}
+			recorder.Restore();
+		}
+
+		if (_options.Scenario == "mask-layers")
+		{
+			recorder.DrawRect(new Rect(0, 0, Width, Height), Color.FromArgb(255, 128, 128, 128));
+			recorder.SaveLayer();
+			recorder.ClipRect(new Rect(0, 0, Width, Height), antialias: true);
+			recorder.Clear(Color.FromArgb(0, 0, 0, 0));
+			for (var y = 0; y < 24; y++)
+			{
+				for (var x = 0; x < 32; x++)
+				{
+					var left = x * 40 + 2;
+					var top = y * 30 + 2;
+					recorder.DrawRect(
+						new Rect(left, top, 36, 26),
+						Color.FromArgb(255, (byte)(235 - x * 4), (byte)(35 + y * 7), (byte)(70 + x * 3)),
+						true);
+				}
+			}
+			recorder.SaveLayer(BlendMode.DstIn, antialias: true);
+			for (var y = 0; y < 24; y++)
+			{
+				for (var x = 0; x < 32; x++)
+				{
+					var left = x * 40 + 8;
+					var top = y * 30 + 7;
+					recorder.DrawRoundedRect(
+						new Rect(left, top, 24, 16),
+						new Vector4(7),
+						Color.FromArgb(255, 255, 255, 255),
+						true);
+				}
+			}
+			recorder.Restore();
 			recorder.Restore();
 		}
 
@@ -765,6 +801,7 @@ internal sealed class BenchmarkHarness : IDisposable
 			"materials" => "|materials=768|linear=4|radial=4|duplicateStops=true|focal=true|anisotropic=true",
 			"layers" => "|colorMatrixLayers=1|layerPrimitives=1536|overlap=true|alphaTransform=true",
 			"isolation-layers" => "|isolationLayers=1|layerPrimitives=1536|transparentClear=true|opaqueOverlap=true",
+			"mask-layers" => "|maskLayers=1|sourcePrimitives=768|maskPrimitives=768|blendMode=dstIn|transparentOutsideMask=true",
 			"blend-layers" => "|blendLayers=1|blendMode=multiply|layerPrimitives=1536|opaqueOverlap=true",
 			_ => string.Empty,
 		};
