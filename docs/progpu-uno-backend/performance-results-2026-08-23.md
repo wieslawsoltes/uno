@@ -42,6 +42,53 @@ Very large retained-scene ratios are real for this harness but should be read
 as integration-path results: ProGPU can reuse an unchanged retained target,
 whereas the Skia drawing contract still replays and flushes the recorded scene.
 
+## Strict forced-redraw GPU-to-GPU matrix
+
+The stricter follow-up disables populated-target reuse and alternates two
+retained target wrappers, so both backends draw the current frame into the
+selected Metal texture. It does not disable valid immutable scene, picture,
+pipeline, glyph, or effect-resource caches: those are part of each renderer's
+normal retained architecture. Three alternating fresh-process pairs used 6
+warmups, 100 blocking samples, and 7 batches of 60 frames for every scenario.
+
+| Scenario | ProGPU completed batch/frame | Skia/Metal completed batch/frame | paired speedup (range) | ProGPU blocking total | Skia/Metal blocking total | total speedup |
+|---|---:|---:|---:|---:|---:|---:|
+| cached | 0.119197 ms | 0.277923 ms | 2.341x (2.308x-2.423x) | 0.3134 ms | 0.5042 ms | 1.609x |
+| sparse | 0.175767 ms | 0.276203 ms | 1.563x (1.440x-1.571x) | 0.4199 ms | 0.5145 ms | 1.225x |
+| text | 0.132967 ms | 0.501060 ms | 3.781x (3.474x-4.249x) | 0.3616 ms | 0.8050 ms | 2.226x |
+| paths | 0.167892 ms | 0.691383 ms | 4.129x (4.047x-4.146x) | 0.3862 ms | 1.0431 ms | 2.701x |
+| strokes | 0.690145 ms | 1.941508 ms | 2.814x (2.813x-2.828x) | 0.7082 ms | 2.8452 ms | 4.018x |
+| materials | 0.382270 ms | 1.247615 ms | 3.264x (3.116x-3.272x) | 0.4928 ms | 1.5917 ms | 3.230x |
+| layers | 0.176393 ms | 0.823978 ms | 4.671x (4.484x-4.748x) | 0.4625 ms | 1.2327 ms | 2.665x |
+| isolation layers | 0.169912 ms | 0.834475 ms | 4.913x (4.906x-5.044x) | 0.3863 ms | 1.1972 ms | 3.099x |
+| mask layers | 0.165233 ms | 0.816915 ms | 4.779x (4.553x-4.948x) | 0.4009 ms | 1.1425 ms | 2.850x |
+| blend layers | 0.171278 ms | 0.841028 ms | 4.910x (4.841x-5.314x) | 0.3828 ms | 1.2741 ms | 3.328x |
+| blend corpus | 0.138818 ms | 3.994035 ms | 28.756x (27.234x-29.203x) | 0.4017 ms | 5.7159 ms | 14.229x |
+| images | 0.257167 ms | 0.392395 ms | 1.508x (1.490x-1.663x) | 0.5891 ms | 0.6464 ms | 1.097x |
+| clips | 0.277078 ms | 1.526697 ms | 5.516x (5.487x-5.571x) | 0.6871 ms | 2.0213 ms | 2.942x |
+| shadows | 0.388375 ms | 0.457752 ms | 1.195x (1.074x-1.272x) | 0.7962 ms | 0.7757 ms | 0.974x |
+| effects | 1.929005 ms | 5.789442 ms | 3.037x (2.788x-3.074x) | 2.7225 ms | 8.2962 ms | 3.047x |
+
+ProGPU wins completed-batch throughput in all 15 forced-redraw scenarios and
+blocking total in 14 of 15. `shadows` is the single blocking-total exception:
+ProGPU is 2.6% slower at the synchronized frame boundary while remaining 19.5%
+faster in bounded throughput and 16.5% faster in CPU-frame work. The remaining
+cost is the GPU fence/wakeup boundary, not scene compilation.
+
+The initial strict shadow run exposed a root-cause lifetime issue: effect
+picture leases were frame-owned, which conservatively disabled stable compiled
+scene reuse. ProGPU measured 1.2202 ms completed batch/frame, 1.6886 ms blocking
+total, and 0.7467 ms scene compilation. Transferring those leases into compiled
+scene ownership and validating effect identity, cache key, and texture identity
+reduced the final strict shadow result to 0.3884 ms, 0.7962 ms, and 0.0024 ms
+respectively. All 300 stable shadow frames report compiled-scene hits. Sparse
+mutation and the deliberately changing effects scene correctly remain misses.
+
+All 90 matrix JSON artifacts are schema-valid, use the 1280x720 BGRA8 GPU
+target, report zero unsupported operations, and contain complete readback hash
+metadata. Raw artifacts are under
+`src/artifacts/performance/2026-08-24-gpu-vs-gpu-force-redraw-retained-matrix/`.
+
 The first pair retained BGRA readbacks for the GPU-specific pixel gate. All
 alpha bytes match exactly, semantic hashes match per scenario, and both cached
 and sparse frames are byte-identical. RGB differences against Skia/Metal are:

@@ -6,6 +6,9 @@ SamplesApp through ProGPU, passes the focused real-device smoke test, and has a
 correctness-gated v3 benchmark matrix. A three-pair, fifteen-scenario
 GPU-to-GPU qualification now compares ProGPU/Metal with Uno's real Skia/Metal
 `GRContext` path and records separate CPU-submit and GPU-completion boundaries.
+A strict forced-redraw follow-up also disables populated-target reuse: ProGPU
+wins completed-batch throughput in all 15 scenarios and synchronized blocking
+total in 14 of 15, with shadows within 2.6% at that latter boundary.
 The remaining qualification gaps are
 listed in [capabilities.md](capabilities.md); this status does not claim
 cross-platform or full effect/layer conformance.
@@ -28,7 +31,7 @@ Documents:
 - [Initial validation record](validation-2026-08-22.md)
 
 The implementation consumes ProGPU as a git submodule pinned to immutable
-`main` merge commit `d9a85cba9ccb10dd5a65d83273b66f0f9a9a8444`. Public
+`main` merge commit `e0e38c4e0840ff6477bc3a3faf045e8e7582493b`. Public
 dependency changes
 [#125](https://github.com/wieslawsoltes/ProGPU/pull/125),
 [#126](https://github.com/wieslawsoltes/ProGPU/pull/126),
@@ -39,8 +42,9 @@ dependency changes
 [#131](https://github.com/wieslawsoltes/ProGPU/pull/131),
 [#132](https://github.com/wieslawsoltes/ProGPU/pull/132),
 [#133](https://github.com/wieslawsoltes/ProGPU/pull/133),
-[#134](https://github.com/wieslawsoltes/ProGPU/pull/134), and
-[#135](https://github.com/wieslawsoltes/ProGPU/pull/135) are merged. Together
+[#134](https://github.com/wieslawsoltes/ProGPU/pull/134),
+[#135](https://github.com/wieslawsoltes/ProGPU/pull/135), and
+[#136](https://github.com/wieslawsoltes/ProGPU/pull/136) are merged. Together
 they provide optional WinRT contracts, analytic difference clips, bounded
 retained-picture compilation and eligibility caching, duplicate-stop gradient
 semantics, bounded queue cleanup, GPU-only HostBackdrop capture, translated

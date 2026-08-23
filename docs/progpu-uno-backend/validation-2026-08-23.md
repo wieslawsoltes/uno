@@ -5,8 +5,8 @@
 - Uno branch baseline: `6848a67e49`.
 - Uno work branch: `feat/progpu-drawing-backend`; no Uno pull request opened.
 - ProGPU gitlink: merged `main` commit
-  `d9a85cba9ccb10dd5a65d83273b66f0f9a9a8444`.
-- ProGPU dependency changes: public PRs #125 through #135, all merged.
+  `e0e38c4e0840ff6477bc3a3faf045e8e7582493b`.
+- ProGPU dependency changes: public PRs #125 through #136, all merged.
 - Host: macOS 26.6 arm64, Apple M3 Pro, .NET SDK 10.0.201,
   runtime 10.0.5, wgpu-native/Metal.
 
@@ -433,6 +433,26 @@ effects throughput benchmark.
   adapter-boundary correction: the managed and native ProGPU renderers already
   share the destination-to-brush coordinate contract and canonical gradient
   shader, so no one-sided renderer optimization is introduced.
+- A second three-pair matrix enables `--force-redraw` for all fifteen
+  ProGPU/Metal and Skia/Metal scenarios, disabling populated-target reuse while
+  retaining normal immutable renderer caches. All 90 JSON artifacts are valid,
+  report GPU/Metal operation, carry complete 1280x720 BGRA8 readback metadata,
+  and report zero unsupported operations. ProGPU wins completed-batch
+  throughput in 15/15 scenarios and synchronized blocking total in 14/15.
+  `shadows` is the sole latter exception at 0.7962 versus 0.7757 ms, while
+  ProGPU still wins shadow throughput by 1.195x and CPU-frame work by 1.165x.
+  Raw artifacts are under
+  `src/artifacts/performance/2026-08-24-gpu-vs-gpu-force-redraw-retained-matrix/`.
+- The strict shadow baseline identified frame-owned retained-picture leases as
+  the broken cache-lifetime invariant. Transferring those leases to compiled
+  scene ownership, validating mutable effect state before reuse, and
+  invalidating shader pipeline failures reduced shadow scene compilation from
+  0.7467 to 0.0024 ms, with all 300 stable frames hitting the compiled-scene
+  cache. The managed full suite passes 3,787 tests, the headless suite passes
+  240 tests, and the current native C++ tree builds and passes all 9 CTest
+  suites. The C++ applicability audit records why no per-frame lease transfer
+  exists in the native generation-owned scene model and confirms the existing
+  real-device stable-reuse, mutation, teardown, upload, and allocation gates.
 
 See [performance-results-2026-08-23.md](performance-results-2026-08-23.md) for
 the exact values and interpretation boundaries.

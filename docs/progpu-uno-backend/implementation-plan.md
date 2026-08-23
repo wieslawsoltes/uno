@@ -4,8 +4,8 @@
 
 - Uno base: immutable head of PR #24153.
 - ProGPU dependency: merged `main` commit
-  `d9a85cba9ccb10dd5a65d83273b66f0f9a9a8444`, including public dependency
-  changes #125 through #135.
+  `e0e38c4e0840ff6477bc3a3faf045e8e7582493b`, including public dependency
+  changes #125 through #136.
 - Primary validation platform: macOS arm64, .NET 10, Dawn/Metal.
 - Secondary compile/runtime lanes: Windows Dawn/D3D12, Linux
   wgpu-native/Vulkan, and browser WebGPU when the host callback ABI is proven.
@@ -70,6 +70,7 @@ following native audit:
 | color-matrix, isolated blend, and shadow-only visual effects | native semantic image/effect records, effect chains, and group-blend pipelines already implement the complete GPU-resident operations | native/managed effect differentials |
 | anisotropic shadows and zero-axis work elimination | native ABI already carries `sigma_x`/`sigma_y`; C++ two-pass execution is axis-specific and shares the production shaders; managed work closed the prior gap | managed/native shadow and residency gates |
 | process-wide WebGPU lifetime serialization | applicable to both; managed Silk-native contexts and native non-Dawn dispatches now own equivalent process scopes | threaded, stress, CTest, browser/Dawn isolation, and performance gates |
+| compiled effect-scene lease retention and mutable effect-key validation | native semantic scenes already own immutable pointer-free resource generations, fixed retained slots, and generation-keyed effect outputs; there is no per-frame managed lease clone to transfer | managed lifetime/invalidation regressions, native real-device effect reuse/invalidation gates, full CTest, and strict forced-redraw Metal matrix |
 
 This table is an acceptance ledger, not permission to assume future parity.
 Every later optimization adds or updates a row with source and runtime evidence.

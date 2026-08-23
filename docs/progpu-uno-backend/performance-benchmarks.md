@@ -94,9 +94,17 @@ each measured submission, the harness places an empty command buffer on the
 same Metal command queue and waits for it. This fence is ordered after Skia's
 flush, so its completion boundary cannot be mistaken for CPU-only submission.
 
+`--backend skia` is intentionally the software/CPU Skia lane.
+`--backend skia-metal` is the real Skia GPU lane and fails rather than silently
+falling back when a Metal device, queue, texture, or `GRContext` cannot be
+created. `--backend progpu` uses ProGPU on wgpu-native's Metal backend.
+
 Context-framework comparisons use the same balanced forward/reverse ordering.
-No backend may reuse a previously presented image without issuing and
-completing the measured redraw.
+The strict lane passes `--force-redraw`, alternates retained target wrappers,
+and requires the current target to be redrawn and completed. Renderer-owned
+immutable scene, picture, pipeline, glyph, and effect-resource caches remain
+enabled because they are production renderer behavior; populated final-target
+reuse does not.
 
 Default publication gate:
 
@@ -275,3 +283,32 @@ timing samples, stage-separated ProGPU metrics, retained-picture counters, a
 forced-redraw state, retained-target-reuse samples, a semantic-state hash, and
 a BGRA readback hash/path. Current results are in
 [performance-results-2026-08-23.md](performance-results-2026-08-23.md).
+
+## 12. Reproduce the strict Metal comparison
+
+```bash
+cd /Users/wieslawsoltes/GitHub/uno/src
+dotnet build \
+  Uno.UI.Composition.Backend.Benchmarks/Uno.UI.Composition.Backend.Benchmarks.csproj \
+  -c Release --no-restore -m:1
+
+BENCHMARK_DLL="$PWD/Uno.UI.Composition.Backend.Benchmarks/bin/Release/net10.0/Uno.UI.Composition.Backend.Benchmarks.dll"
+
+dotnet "$BENCHMARK_DLL" --backend skia-metal --scenario shadows \
+  --force-redraw --warmups 6 --samples 100 --batch-size 60 --batches 7 \
+  --output artifacts/skia-metal-shadows.json
+
+dotnet "$BENCHMARK_DLL" --backend progpu --scenario shadows \
+  --force-redraw --warmups 6 --samples 100 --batch-size 60 --batches 7 \
+  --output artifacts/progpu-metal-shadows.json
+```
+
+Run each backend in a fresh process, alternate order across pairs, and compare
+`Batched.TotalPerFrame.Median` for completed bounded throughput plus
+`Total.Median` for synchronized single-frame latency. Confirm the exact
+`Backend` value, `ForceRedraw=true`, matching semantic state, zero unsupported
+operations, and a valid final readback before interpreting timings. Preserve
+the device-initialization log with the artifact; an explicit
+`UNO_WEBGPU_BACKENDS` selection is also recorded in `Environment` when set.
+The `skia-metal` lane aborts during setup if its native Metal
+device/queue/texture or Skia `GRContext` is missing.
