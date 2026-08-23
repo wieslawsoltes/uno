@@ -2,189 +2,205 @@
 
 ## Scope
 
-This is a two-repetition, fresh-process qualification matrix for the v2
-drawing-backend harness. It separates CPU submit from GPU completion,
-explicitly clears every frame, reads back the final target, and records 100
-samples per backend/scenario. Each table reports the range across the two
-current runs. It is not the final publication run: the protocol still requires
-eight balanced independent process triplets under controlled power and thermal
-conditions.
+The primary result is an eight-pair, alternating fresh-process comparison of
+the Uno ProGPU and software-Skia drawing backends. It covers all seven current
+steady-state harness scenarios. Every process renders the same semantic state,
+reports zero unsupported operations, reads back the final target, and preserves
+its raw timing distribution.
 
-- Machine: Apple M3 Pro, 11 logical processors, 18 GB RAM.
-- OS/runtime: macOS 26.6 arm64, .NET 10.0.9, Release.
+- Machine: Apple M3 Pro, 11 logical processors, 18 GB RAM, AC power.
+- OS/runtime: macOS 26.6 arm64, .NET 10.0.5, Release.
 - Target: 1280×720, premultiplied BGRA8.
-- GPU lanes: wgpu-native on Metal; ProGPU uses one sample per pixel.
-- Run shape: 8 warmups, 100 blocking samples, then 9 batches of 60 frames.
-- Mutation/record construction and final readback are outside timed regions.
-- ProGPU reported zero unsupported operations in all scenarios.
+- ProGPU: wgpu-native on Metal, one sample per pixel.
+- Uno branch baseline: `6848a67e49`; ProGPU merged `main` gitlink:
+  `d5d3e977527b25897387345122d7b5688803a69c`.
+- `cached` through `clips`: 8 warmups, 100 blocking samples, and 9 batches of
+  60 frames in each of eight processes per backend.
+- `effects`: 4 warmups, 40 blocking samples, and 3 batches of 20 frames in each
+  of eight processes per backend. This is 100 measured frames per process.
+- Record construction, mutation, and final readback remain outside the timing
+  regions.
 
-## CPU frame-submit result
-
-Median milliseconds from `BeginPresent` through command submission. This is
-the cleanest same-boundary measure of framework-to-renderer CPU cost. Lower is
-better.
-
-| Scenario | ProGPU | Uno WebGPU | Uno Skia |
-|---|---:|---:|---:|
-| cached, 768 fills | 0.0487–0.0575 | 0.0932–0.0942 | 0.3497–0.3554 |
-| sparse retained-row mutation | 0.1861–0.2009 | 0.1240–0.1275 | 0.3555–0.3580 |
-| 128 text runs | 0.0570–0.0601 | 9.5325–9.5784 | 4.4459–4.4529 |
-| 1,000 paths | 0.0520–0.0558 | 9.9859–10.0193 | 2.3027–2.3335 |
-| 240 images | 0.2107–0.2270 | 2.2628–2.7779 | 1.0442–1.0543 |
-
-ProGPU beats software Skia on CPU submit in both runs of all five workloads.
-The sparse result is the narrowest margin. Its late steady sample has 24
-resident row pages, 23 retained-picture hits, zero retained-picture
-compilations, 4 KiB of scene upload, and one merged draw call. Cached, text,
-and path scenes use the whole-scene cache.
+An earlier two-process matrix also includes Uno's built-in WebGPU backend. It
+remains useful integration context, but the tables below use only the stronger
+eight-process ProGPU/Skia evidence.
 
 ## Bounded-batch throughput
 
-Median total milliseconds per frame after 60 submissions and one completion
-wait. This deliberately saturates the command queue; it is useful throughput
-evidence but does not model normal swap-chain/v-sync pacing.
+Median milliseconds per frame, aggregated as the median of the eight process
+medians. Each batch submits multiple frames before one completion wait. The
+paired speedup is the median of eight same-index Skia/ProGPU ratios. The
+conservative speedup divides the lowest Skia process median by the highest
+ProGPU process median.
 
-| Scenario | ProGPU | Uno WebGPU | Uno Skia | conservative ProGPU speedup |
+| Scenario | ProGPU | Skia | paired speedup | conservative speedup |
 |---|---:|---:|---:|---:|
-| cached | 0.1115–0.1130 | 0.1009–0.1046 | 0.3579–0.3624 | 3.17× |
-| sparse | 0.2149–0.2170 | 0.1410–0.1430 | 0.3568–0.3633 | 1.64× |
-| text | 0.1138–0.1181 | 9.8384–9.8744 | 4.4535–4.4577 | 37.71× |
-| paths | 0.1368–0.1380 | 11.2952–11.3452 | 2.3222–2.3410 | 16.82× |
-| images | 0.2274–0.2293 | 2.7495–2.7693 | 1.0571–1.0711 | 4.61× |
+| cached, 768 fills | 0.156942 | 0.364693 | 2.33× | 2.14× |
+| sparse retained-row mutation | 0.263191 | 0.362946 | 1.38× | 1.35× |
+| 128 text runs | 0.170561 | 4.869669 | 28.59× | 24.48× |
+| 1,000 paths | 0.259217 | 2.377015 | 9.18× | 8.94× |
+| 240 images | 0.279068 | 1.068957 | 3.83× | 3.72× |
+| 240 rounded clip holes | 0.279780 | 2.769357 | 9.89× | 7.71× |
+| 12 backdrop/shadow cards | 2.489785 | 252.877792 | 101.59× | 98.40× |
 
-The conservative speedup divides the lower Skia result by the higher ProGPU
-result, so it does not depend on selecting the favorable repetition. ProGPU is
-faster than software Skia in both repetitions of all five scenarios. Uno
-WebGPU remains slightly faster for the two fill-only workloads; ProGPU is much
-faster for text, paths, and images.
+ProGPU is faster in every individual process of every scenario. `sparse` is
+the narrowest throughput margin. `effects` is the largest because Skia's
+reference path repeatedly evaluates CPU backdrop blur and shadow filters while
+ProGPU records GPU work and reuses the retained scene.
 
-## Blocking completion boundary
+The effects paired-median bootstrap 95% interval is 98.95×–108.46× using a
+deterministic 20,000-resample bootstrap over the eight paired ratios. This is a
+distribution estimate for this machine and workload, not a cross-device
+guarantee.
 
-| Scenario | ProGPU total | Uno WebGPU total | Uno Skia total |
+## CPU submission boundary
+
+Median milliseconds per frame spent from `BeginPresent` through command
+submission in the bounded batches. GPU completion is excluded.
+
+| Scenario | ProGPU | Skia | paired speedup |
 |---|---:|---:|---:|
-| cached | 1.3128–1.3252 | 1.6157–1.6167 | 0.3497–0.3554 |
-| sparse | 1.4593–1.4830 | 1.6554–1.6559 | 0.3555–0.3580 |
-| text | 1.3250–1.3258 | 12.9179–13.1105 | 4.4459–4.4529 |
-| paths | 1.3189–1.3225 | 15.8397–15.9179 | 2.3028–2.3338 |
-| images | 1.4840–1.4993 | 4.6404–4.9612 | 1.0443–1.0544 |
+| cached | 0.123570 | 0.364693 | 2.93× |
+| sparse | 0.197587 | 0.362946 | 1.83× |
+| text | 0.132607 | 4.869618 | 36.82× |
+| paths | 0.159875 | 2.377013 | 14.86× |
+| images | 0.219480 | 1.068953 | 4.93× |
+| clips | 0.216220 | 2.769354 | 12.78× |
+| effects | 2.234338 | 252.877785 | 113.31× |
 
-The native `wgpuDevicePoll(wait=true)` boundary is quantized at roughly
-1.51 ms for already-small ProGPU frames and dominates the blocking total. It
-must not be labeled compositor CPU time. ProGPU's internal median compositor
-times are 0.038–0.224 ms. A GPU timestamp or Metal System Trace is required to
-split actual execution from polling/wakeup granularity.
+The ProGPU effects CPU-submit bootstrap 95% interval is 110.30×–127.57×. The
+retained effects scene reports 49 draws, 3,216 vector vertices, zero scene
+uploads after warmup, zero mask passes, 24 retained-picture hits, and zero
+retained-picture compilations per measured frame.
+
+## Blocking CPU-frame boundary
+
+The median of each process's per-frame CPU work is shown below. This is not the
+same as ProGPU's total blocking duration, which includes quantized WebGPU device
+polling.
+
+| Scenario | ProGPU | Skia | paired speedup |
+|---|---:|---:|---:|
+| cached | 0.046600 | 0.359100 | 7.69× |
+| sparse | 0.163450 | 0.359850 | 2.19× |
+| text | 0.053150 | 4.532550 | 85.54× |
+| paths | 0.054850 | 2.356100 | 43.18× |
+| images | 0.253600 | 1.056100 | 4.17× |
+| clips | 0.279650 | 2.759700 | 9.89× |
+| effects | 1.011700 | 252.747050 | 249.93× |
+
+The native `wgpuDevicePoll(wait=true)` boundary is quantized for small frames
+and must not be called compositor CPU time. GPU timestamps or a Metal System
+Trace are required to split queue execution from polling and wakeup latency.
 
 ## Pixel gate
 
-RGB differences are measured against the Skia target readback. `px>8` and
-`px>32` count pixels whose largest RGB-channel difference exceeds the stated
-threshold.
+RGB differences use the Skia readback as the reference. `px>8` and `px>32`
+count pixels whose largest RGB-channel error exceeds the threshold.
 
-| Scenario | Backend | RGB MAE | Max | px>8 | px>32 |
-|---|---|---:|---:|---:|---:|
-| cached | ProGPU | 0.000000 | 0 | 0% | 0% |
-| cached | Uno WebGPU | 0.000000 | 0 | 0% | 0% |
-| sparse | ProGPU | 0.000000 | 0 | 0% | 0% |
-| sparse | Uno WebGPU | 0.000000 | 0 | 0% | 0% |
-| text | ProGPU | 0.708929 | 81 | 3.6036% | 0.4512% |
-| text | Uno WebGPU | 1.392791 | 123 | 4.7063% | 2.2434% |
-| paths | ProGPU | 0.181166 | 22 | 0.8025% | 0% |
-| paths | Uno WebGPU | 0.615427 | 75 | 3.2635% | 0.7521% |
-| images | ProGPU | 0.041453 | 1 | 0% | 0% |
-| images | Uno WebGPU | 0.041453 | 1 | 0% | 0% |
+| Scenario | RGB MAE | Max | px>8 | px>32 | PSNR |
+|---|---:|---:|---:|---:|---:|
+| cached | 0.000000 | 0 | 0% | 0% | ∞ |
+| sparse | 0.000000 | 0 | 0% | 0% | ∞ |
+| text | 0.708929 | 81 | 3.6036% | 0.4512% | 36.435 dB |
+| paths | 0.181166 | 22 | 0.8025% | 0% | 47.334 dB |
+| images | 0.041453 | 1 | 0% | 0% | 61.955 dB |
+| clips | 0.424195 | 76 | 2.3698% | 0.1062% | 41.919 dB |
+| effects | 3.411024 | 61 | 19.4972% | 0.5625% | 32.049 dB |
 
-Cached and sparse ProGPU output is byte-identical to Skia. Image differences
-are only one quantization level. ProGPU text and path rasterization is closer
-to Skia than Uno WebGPU by MAE, severe-error fraction, and visual inspection.
-This provides no signal of a text-quality regression from the retained glyph
-path.
+Cached and sparse output is byte-identical. Image output differs only by one
+quantization level. Text, path, and clip differences are concentrated at
+antialiased edges. Effects are semantically matched—backdrop, translucent card,
+shadow-only filter, and explicit source replay are all present—but ProGPU's
+fixed-tap single-pass backdrop kernel does not reproduce Skia's Gaussian kernel
+exactly. Visual inspection confirms matching placement, ordering, opacity, and
+shadow direction; the remaining difference is blur footprint.
+
+The backdrop mapping was calibrated with identical 1.8×, 2.0×, 2.2×, and
+3.344× sigma sweeps. The selected 2.0× mapping produced the lowest error:
+
+| Mapping | RGB MAE | px>8 | px>32 |
+|---|---:|---:|---:|
+| 1.8× | 3.824211 | 23.3465% | 0.5926% |
+| **2.0×** | **3.411024** | **19.4972%** | **0.5625%** |
+| 2.2× | 3.744300 | 22.7428% | 0.5617% |
+| 3.344× | 3.930181 | 26.4106% | 0.6832% |
+
+The 2.0× result also improves over the earlier source-correct effects capture,
+which measured 3.744 RGB MAE and 20.782% of pixels above eight levels.
 
 ## Optimization evidence
 
-Four root causes were addressed:
+The current result incorporates these root-cause changes:
 
-1. Exact rounded border differences previously entered the general geometry
-   mask path. Analytic ring recognition and matching-parent clip reduction cut
-   a representative SamplesApp frame from 47 mask draws/46 mask passes to
-   15 mask draws/14 mask passes; median render-pass CPU fell from about
-   2.515 ms to 0.816 ms in the diagnostic capture.
-2. A changing root recording invalidated compilation of immutable nested
-   pictures. Bounded retained-picture pages now reuse unchanged subtrees.
-   Admission ignores one-shot and tiny analytic pictures, avoiding the measured
-   regression from caching 768 one-command cells. The benchmark uses 24
-   32-command row subtrees and changes one row per frame.
-3. A leading replacement clear was emitted as a redundant full-target draw.
-   Clear metadata now becomes the render-pass attachment clear while ordered
-   nested replacement semantics retain the explicit draw fallback.
-4. Resource cleanup forced a blocking device drain every eight submissions,
-   even though completed native work is polled non-blockingly every frame. A
-   managed CPU trace attributed 11.22 seconds of a 21.34-second profiled run to
-   queue polling below cleanup. ProGPU now exposes the finite drain bound; this
-   backend selects 64 submissions, preserving the default value of eight for
-   other hosts. The 60-frame benchmark batch consequently measures overlapped
-   submission instead of an artificial fence every eight frames.
-
-The dependency changes are outside the drawing SPI and keep unsupported and
-masked cases on the existing correctness path. The queue change does not alter
-scene, glyph, text-shaping, or shader output; every final pixel hash matches
-the corresponding pre-change artifact.
-
-## HostBackdrop diagnostic boundary
-
-The five standard workloads contain no HostBackdrop command, so their direct
-present path and reported results are not HostBackdrop measurements. A live
-SamplesApp AutoSuggestBox popup was separately captured after proving ProGPU
-won backend negotiation. Its scene contained an Acrylic/HostBackdrop material
-with a 60 px blur and used the conditional offscreen capture route. After
-correcting the backdrop command's placement transform, a warmed frame-34 dump
-reported 2.669 ms total and 1.146 ms render-pass CPU. The matched 988×768
-capture measures 0.4985 RGB MAE over the full window and 2.3644 over the popup
-against Skia. This single sample is diagnostic correctness evidence only; a
-repeatable effects workload is still required before making throughput claims.
-
-## Optimization progression
-
-A Metal trace and scene dump exposed one further root cause after the balanced
-matrix: a leading Uno `Clear` became a two-million-unit source-replacement quad
-whenever retained children followed it. ProGPU already clears the render-pass
-attachment, so this produced a redundant full-target draw. The integration now
-carries a leading clear as recording metadata, applies it as the attachment
-clear, and materializes the replacement quad only when that record is nested
-after existing ordered content.
-
-The focused 20-warmup, 200-sample, 30-by-120-frame check retained the exact
-cached SHA-256 and reduced the steady scene from 3,076 vertices/two draws to
-3,072 vertices/one draw. Cached saturated throughput first fell from 0.4556 to
-0.2835 ms/frame. Sparse remained at 0.4584 ms/frame, which led to the managed
-CPU trace and the queue-drain correction above. Two subsequent alternating
-120-frame-batch checks measured ProGPU sparse at 0.1696 and 0.1907 ms/frame
-against Skia at 0.3576 and 0.3603 ms/frame. The final standard-shape matrix is
-the range reported in the current tables.
-
-The raw current artifacts are named
-`{backend}-{scenario}-queue-window-run{1,2}.json` under `artifacts/`. The older
-`*-diagnostic.json` files preserve the pre-queue-window qualification baseline.
+1. Exact rounded border differences remain analytic instead of entering the
+   general geometry-mask path.
+2. A rounded intersect followed by a contained rectangular difference is
+   encoded as one even-odd analytic mask. The clips workload therefore uses
+   zero offscreen mask passes or mask textures.
+3. Retained-picture eligibility is cached with the picture instead of rescanned
+   on every scene compile.
+4. Immutable nested pictures reuse bounded compiled pages when a parent record
+   changes; tiny one-shot pictures remain below the admission threshold.
+5. Leading replacement clears become render-attachment clears while nested
+   replacement ordering retains an explicit draw fallback.
+6. Detached effect textures are swept before retained-scene cache admission, so
+   an earlier effect frame cannot disable caching of a later effect-free scene.
+7. Explicit translated effect bounds are preserved when a cached effect texture
+   is composited back.
+8. Drop shadow supports a shadow-only mode while retaining source-plus-shadow as
+   the public default. The Uno adapter uses shadow-only mode and then follows
+   Uno's explicit source replay contract.
+9. Backdrop placement carries the active transform, and the adapter supplies
+   conservative transformed content bounds for effect layers.
+10. Cleanup uses a bounded submission window rather than serializing every
+    eight-frame burst; per-frame completion polling remains non-blocking.
 
 ## Reproduction
 
-Build once, then run each backend/scenario in a fresh process:
+Build once with serial MSBuild:
 
 ```bash
 cd src
 dotnet build \
   Uno.UI.Composition.Backend.Benchmarks/Uno.UI.Composition.Backend.Benchmarks.csproj \
   -c Release --no-restore -m:1
+```
 
-Uno.UI.Composition.Backend.Benchmarks/bin/Release/net10.0/Uno.UI.Composition.Backend.Benchmarks \
+Run the standard steady scenarios with 100 blocking samples and nine 60-frame
+batches:
+
+```bash
+dotnet Uno.UI.Composition.Backend.Benchmarks/bin/Release/net10.0/Uno.UI.Composition.Backend.Benchmarks.dll \
   --backend progpu \
-  --scenario sparse \
+  --scenario clips \
   --warmups 8 \
   --samples 100 \
   --batch-size 60 \
   --batches 9 \
-  --output ../docs/progpu-uno-backend/artifacts/progpu-sparse-diagnostic.json \
-  --pixels-output /tmp/progpu-sparse.bgra
+  --output artifacts/performance/progpu-clips.json \
+  --pixels-output artifacts/performance/progpu-clips.bgra
 ```
 
-Valid backends are `progpu`, `webgpu`, and `skia`; valid scenarios are
-`cached`, `sparse`, `text`, `paths`, and `images`.
+Run the effects workload with the qualification shape used here:
+
+```bash
+dotnet Uno.UI.Composition.Backend.Benchmarks/bin/Release/net10.0/Uno.UI.Composition.Backend.Benchmarks.dll \
+  --backend progpu \
+  --scenario effects \
+  --warmups 4 \
+  --samples 40 \
+  --batch-size 20 \
+  --batches 3 \
+  --output artifacts/performance/progpu-effects.json \
+  --pixels-output artifacts/performance/progpu-effects.bgra
+```
+
+Repeat with `--backend skia`. Valid scenarios are `cached`, `sparse`, `text`,
+`paths`, `images`, `clips`, and `effects`. Raw local artifacts for this run are
+under `src/artifacts/performance/2026-08-23-retained-eligibility/`.
+
+A post-merge smoke from the exact final gitlink rebuilt both harnesses and
+preserved the qualified clip and effects semantic/pixel hashes. It is stored
+under `src/artifacts/performance/2026-08-23-final-merge-smoke/`; this short run
+is a source-integration check, not a replacement for the eight-process result.

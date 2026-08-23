@@ -2,12 +2,14 @@
 
 ## Revisions and environment
 
-- Uno baseline: `c4b1cd24d2c5ba5ac0a472e499f81d0ec22de2f9`.
+- Uno branch baseline: `6848a67e49`.
 - Uno work branch: `feat/progpu-drawing-backend`; no Uno pull request opened.
-- ProGPU gitlink: `7b050a9c44decfb04c6bf2a6ff134dee84a58b17`.
-- ProGPU dependency changes: public PRs #125 and #126.
+- ProGPU gitlink: merged `main` commit
+  `d5d3e977527b25897387345122d7b5688803a69c`.
+- ProGPU dependency changes: public PRs #125 through #128, all merged; PR #128
+  completed all 26 CI checks successfully before merge.
 - Host: macOS 26.6 arm64, Apple M3 Pro, .NET SDK 10.0.201,
-  runtime 10.0.9, wgpu-native/Metal.
+  runtime 10.0.5, wgpu-native/Metal.
 
 ## Root-cause changes
 
@@ -15,6 +17,7 @@
 |---|---|---|
 | an exact rounded border must not require an arbitrary texture mask | root-cause fix | preserve rounded metadata, recognize uniform inset differences, and evaluate analytic ring coverage in every affected shader |
 | a matching outer rounded clip must not duplicate ring coverage work | root-cause fix | reduce the nested matching pair to the ring analytic mask |
+| a contained rectangular hole in a rounded clip must not allocate an offscreen mask | root-cause fix | compose the two contours into one even-odd analytic mask and retain the original outer clip when the nested scope is restored |
 | unchanged nested pictures must retain compilation identity when their parent record changes | root-cause fix | cache immutable picture pages by full compilation context and replay their arrays/draw calls |
 | caching must cost less than recompilation | root-cause fix | admit after reuse and reject pictures below a configurable minimum command count |
 | a leading replacement clear must not become a redundant full-target draw | root-cause fix | carry the leading clear as record metadata and apply it as the attachment clear while retaining ordered nested-record replacement semantics |
@@ -24,6 +27,11 @@
 | queue cleanup must bound residency without serializing every small burst | root-cause fix | expose the conservative drain bound and select a 64-submission window while retaining per-frame non-blocking polling |
 | HostBackdrop must sample already-rendered content without sampling the borrowed swapchain view | root-cause fix | conditionally render backdrop frames into a bindable same-device texture, split and ping-pong at ordered backdrop commands, then GPU-blit to the borrowed view |
 | an effect-backdrop command must occupy the same transformed coordinates as its clip and border | root-cause fix | record the session's current matrix on the backdrop command instead of identity; a translated pixel fixture covers the formerly missing region |
+| an effect layer must rasterize the content it actually recorded, including non-zero and transformed coordinates | root-cause fix | accumulate conservative transformed primitive bounds, set `EffectContentBounds`, and propagate nested effect output bounds to the parent layer |
+| a shadow-only framework filter must not composite its source twice | root-cause fix | add an invalidating `DrawSource` effect property whose default remains source-plus-shadow, and opt the adapter into shadow-only composition followed by explicit source replay |
+| detached effect resources must not disable a later effect-free scene cache | root-cause fix | retire unused effect textures before compiled-scene cache admission and validate zero remaining effect bytes before the next cache hit |
+| disposing a backend that borrowed the host WebGPU context must not release that device | root-cause fix | keep device ownership with the host and validate another native allocation after factory disposal |
+| Uno blur sigma and ProGPU backdrop radius must have a measured conversion | measurement correction | compare identical pixel fixtures at 1.8×, 2.0×, 2.2×, and 3.344× and select the lowest-error 2.0× mapping |
 | benchmark pixels must represent one frame | measurement correction | explicitly clear every frame and read back the final target after timing |
 | GPU wait must not be mislabeled as renderer CPU time | measurement correction | publish CPU submit, GPU completion, blocking total, batch throughput, and ProGPU internal stages separately |
 
@@ -33,11 +41,14 @@ compilation. Cache capacity, variants, and age are bounded.
 
 ## Compile validation
 
-The benchmark and its complete dependency graph built in Release with zero
-warnings and zero errors using serial MSBuild:
+The runtime test, benchmark, and their complete dependency graphs built in
+Release with zero warnings and zero errors using serial MSBuild:
 
 ```bash
 cd src
+dotnet build \
+  Uno.UI.Composition.ProGpu.RuntimeTests/Uno.UI.Composition.ProGpu.RuntimeTests.csproj \
+  -c Release --no-restore -m:1
 dotnet build \
   Uno.UI.Composition.Backend.Benchmarks/Uno.UI.Composition.Backend.Benchmarks.csproj \
   -c Release --no-restore -m:1
@@ -49,29 +60,19 @@ resolved the environmental file-lock race without source changes.
 
 ## Dependency tests
 
-The focused ProGPU queue-context suite passes:
+The current ProGPU branch passes the complete locally available suites:
 
 ```text
-Passed: 30, Failed: 0, Skipped: 0
+ProGPU.Tests:          3,700 passed, 0 failed, 0 skipped
+ProGPU.Tests.Headless:   240 passed, 0 failed, 0 skipped
 ```
 
-The combined backdrop-material, gradient, layer-render, text-rendering-mode,
-and queue-context suites pass:
-
-```text
-Passed: 78, Failed: 0, Skipped: 0
-```
-
-The expanded backdrop-material suite, including six consecutive frames of a
-scaled nested HostBackdrop, passes 7/7. The Uno real-device smoke now also
-samples a translated portion of a backdrop blur that was outside the
-identity-transformed extension quad before the fix.
-
-A full dependency run passed 3,756 of 3,757 tests. The sole failure was the
-allocation-sensitive `RepeatedPrehistorySamplingIsAllocationFree` check after
-49,200 bytes were attributed during the combined run; its immediate isolated
-rerun passed with zero failures. The three spline/static-extension pixel tests
-most relevant to compositor extension batching passed in the rebuilt run.
+`ShapingContractsTests` is excluded from the first command because that lane
+depends on separately provisioned upstream source contracts; the dedicated CI
+text-contract job supplies that coverage. The 27-test focused effect and visual
+change-version run also passes. It covers translated effect placement,
+shadow-only output, detached resource retirement, and cache invalidation when
+`DrawSource` changes.
 
 The regression verifies final pixels after changing one nested picture while
 unchanged siblings reuse compiled pages. The adaptive-admission variant uses
@@ -83,16 +84,36 @@ earlier pixels in order.
 
 ## Runtime and visual validation
 
-The focused real-device executable covers borrowed-device initialization,
-offscreen rendering, native glyph recording, effects, GPU readback, retained
-replay, completion, geometry host-marker compatibility, and zero unsupported
-operations. It also verifies HostBackdrop blur/capture, foreground ordering,
-and the conditional present/blit route. SamplesApp was built with
+The focused real-device executable covers typed context negotiation,
+borrowed-device ownership, offscreen rendering, native glyph recording,
+effects, GPU readback, retained replay, completion, geometry host-marker
+compatibility, and zero unsupported operations. It also verifies HostBackdrop
+blur/capture, foreground ordering, translated and nested effect-layer bounds,
+shadow-only source omission, gradient/non-uniform-rounded/border/path/stroke/
+line/image/color-filtered-image/nine-slice content-bound propagation,
+rounded-outer/rectangular-hole clip restoration, and the conditional
+present/blit route. Its final
+Release run reports:
+
+```text
+[webgpu] init device — msaa=2x fmtFeatures=True colorFormat=BGRA8Unorm
+ProGPU runtime smoke passed; center=DC5014FF, frame=6.
+```
+
+SamplesApp was built with
 `UnoDrawingBackendProGpu=true`; startup confirms provider negotiation with:
 
 ```text
 Graphics backend 'ProGpuGraphicsProvider' won negotiation on context kind 'WebGpu'.
 ```
+
+The same final binary was launched once with `UNO_PROGPU=1` and once without
+it. The gallery title and status surface reported `ProGPU · WebGPU · macOS`
+for the first run and `Skia · Metal · macOS` for the second. A locally built
+`libUnoNativeMac.dylib` had no `LC_RPATH`; the runtime invariant was restored
+without source changes by pointing `DYLD_LIBRARY_PATH` at the already copied
+`runtimes/osx/native` directory. `--no-launch-profile` avoids the unrelated
+commented launch-settings parse warning.
 
 This check caught a launch-configuration trap during validation: setting
 `UNO_PROGPU=1` on a binary compiled with the flag disabled still launches the
@@ -109,6 +130,14 @@ effect, backdrop, and compatible effect output. This is macOS/Metal evidence;
 Windows, Linux, browser, injected device loss, trimming/AOT, leak, and
 long-duration multi-page sweep remain open.
 
+A fresh matched `Border_CornerRadius` capture from the merged gitlink confirms
+the live sample geometry remains visually aligned. The first five rounded
+shapes measure 0.409735 RGB MAE, with 0.5288% of pixels above a 32-level
+channel difference; the cyan ellipse fixture measures 0.055579 RGB MAE and
+0.1198% above 32. Differences remain concentrated on antialiased edges. Raw
+captures are under
+`src/artifacts/performance/2026-08-23-final-merge-gallery/`.
+
 The live AutoSuggestBox popup produced an opt-in scene dump at frame 34 with
 an Acrylic/HostBackdrop command (`blur=60`, `luminosity alpha=0.847`) and an
 offscreen-render cache-miss reason, proving the GPU capture route was active.
@@ -122,33 +151,46 @@ effects throughput benchmark.
 
 ## Benchmark validation
 
-- All 30 current backend/scenario processes completed as two fresh-process
-  repetitions with 8 warmups, 100 measured frames, 9 batches of 60 frames,
-  and parseable v2 JSON.
+- All 112 primary ProGPU/Skia processes completed: eight fresh processes for
+  each backend across seven scenarios. The first six scenarios use 100
+  blocking samples plus nine 60-frame batches. Effects uses 40 blocking
+  samples plus three 20-frame batches, for 100 measured frames per process.
 - Every artifact contains semantic and final-target SHA-256 values.
 - Cached and sparse ProGPU readbacks are byte-identical to Skia.
 - ProGPU reported zero unsupported operations.
-- CPU frame submit is faster than Skia in all five workloads.
-- The current qualification matrix shows faster ProGPU saturated throughput
-  than Skia in both repetitions of cached, sparse, text, paths, and images. The
-  conservative speedups range from 1.64× for sparse mutation to 37.71× for
-  text.
+- CPU frame submit and bounded-batch throughput are faster than Skia in every
+  process of all seven workloads.
+- Conservative bounded-batch speedups range from 1.35× for sparse mutation to
+  98.40× for effects. Paired-median speedups range from 1.38× to 101.59×.
 - Every ProGPU final-target hash matches its corresponding pre-optimization
-  artifact, including the text hash.
+  artifact where semantics did not change. The effects hash intentionally
+  changed when shadow-only source replay and sigma calibration were corrected,
+  then remained stable across all eight final processes.
 - ProGPU text/path raster differences are smaller than Uno WebGPU differences
   against the same Skia reference.
+- The effects fixture measures 3.411 RGB MAE, 19.4972% of pixels above eight
+  levels, and 0.5625% above 32; visual inspection confirms correct placement,
+  ordering, opacity, and shadow direction with a remaining fixed-tap versus
+  Gaussian blur-footprint difference.
+- A final-gitlink smoke retained clip hash `2711C481...`, effects semantic hash
+  `143132D5...`, and ProGPU/Skia effects pixel hashes `AAF267FF...` /
+  `EE3C6A61...`; the clips frame used zero mask passes/textures and both final
+  scenarios reported zero unsupported operations.
 
 See [performance-results-2026-08-23.md](performance-results-2026-08-23.md) for
 the exact values and interpretation boundaries.
 
 ## Remaining qualification work
 
-1. Run eight balanced fresh-process triplets with power/thermal controls.
+1. Promote the earlier Uno WebGPU context lane to eight balanced fresh-process
+   triplets; the primary ProGPU/Skia lane now has eight pairs.
 2. Add WebGPU timestamps; managed CPU and Metal traces have been captured, but
    their instrumentation overhead excludes them from comparative timing
    tables.
-3. Add effects, scrolling, control-density, first-present, startup, allocation,
+3. Add scrolling, control-density, first-present, startup, allocation,
    settled-memory, and leak scenarios.
 4. Run a systematic SamplesApp page/pixel sweep and a long-duration resize,
    DPI, occlusion, minimize/restore, and device-loss sequence.
 5. Run Windows/D3D12, Linux/Vulkan, browser, trimming, and NativeAOT lanes.
+6. Complete anisotropic/additive shadows and arbitrary color-filter/effect DAG
+   layer isolation.

@@ -3,8 +3,9 @@
 ## Baselines
 
 - Uno base: immutable head of PR #24153.
-- ProGPU dependency: `7b050a9c44decfb04c6bf2a6ff134dee84a58b17`, based on
-  the latest observed `main` plus public dependency changes #125 and #126.
+- ProGPU dependency: merged `main` commit
+  `d5d3e977527b25897387345122d7b5688803a69c`, including public dependency
+  changes #125 through #128.
 - Primary validation platform: macOS arm64, .NET 10, Dawn/Metal.
 - Secondary compile/runtime lanes: Windows Dawn/D3D12, Linux
   wgpu-native/Vulkan, and browser WebGPU when the host callback ABI is proven.
@@ -19,10 +20,10 @@ build configuration, exact commands, and raw artifact paths.
 |---|---|---|
 | 0 — analysis | complete | architecture, capability, ownership, comparison, and benchmark documents |
 | 1 — dependency/device | implemented on macOS | pinned submodule, modern ABI adapter, external-device initialization, borrowed lifetime |
-| 2 — drawing core | working vertical slice | real-device smoke and SamplesApp present; layer/effect isolation corpus remains |
+| 2 — drawing core | working vertical slice | real-device smoke, SamplesApp present, analytic clip-hole and broad effect-bound corpus; arbitrary effect DAG isolation remains |
 | 3 — content stack | implemented vertical slice | ProGPU geometry/font/shaping/direct glyph path plus neutral managed image/SVG adapters; full corpus remains |
 | 4 — application correctness | partially qualified | SamplesApp loads and presents 1,413-sample catalog; systematic sample/pixel sweep remains |
-| 5 — benchmarks | qualification harness complete | v2 stage timing, target readback, five scenarios and two raw three-lane 100-sample repetitions; balanced eight-triplet publication run and cross-framework ports remain |
+| 5 — benchmarks | primary pair qualified | v2 stage timing, target readback, seven scenarios and eight alternating 100-frame ProGPU/Skia process pairs; the earlier Uno WebGPU lane, startup/scrolling/memory scenarios, and cross-framework ports remain |
 | 6 — hardening | open | Windows/Linux/browser, device loss, AOT/trimming, leak and long-running stress |
 
 ## Phase 0 — analysis and contracts

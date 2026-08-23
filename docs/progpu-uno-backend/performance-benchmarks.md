@@ -165,17 +165,32 @@ remain the authority if a summary or interpretation changes.
 
 ## 11. Current harness and artifacts
 
-`src/Uno.UI.Composition.Backend.Benchmarks` implements the first five steady
-micro-scenarios (`cached`, `sparse`, `text`, `paths`, and `images`) for ProGPU,
-Uno WebGPU, and Uno software Skia. Every frame explicitly clears the target;
-this prevents translucent antialiasing, paths, and images from accumulating
-across samples. GPU lanes use `wgpuDevicePoll(wait=true)` only in the separate
-completion boundary.
+`src/Uno.UI.Composition.Backend.Benchmarks` implements seven steady
+micro-scenarios (`cached`, `sparse`, `text`, `paths`, `images`, `clips`, and
+`effects`) for ProGPU, Uno WebGPU where supported, and Uno software Skia. Every
+frame explicitly clears the target; this prevents translucent antialiasing,
+paths, images, and effects from accumulating across samples. GPU lanes use
+`wgpuDevicePoll(wait=true)` only in the separate completion boundary.
 
 The sparse workload is a retained 24-row tree containing 768 rectangles. One
 row changes per frame. This models immutable subtrees without turning every
 single analytic rectangle into a cache entry. ProGPU's cache admission rejects
 tiny pictures that are cheaper to compile directly.
+
+The clips workload draws 240 independently transformed rounded rectangles,
+each with one contained rectangular difference hole. It qualifies analytic
+even-odd mask composition and rejects a fast result if any unsupported
+operation is recorded. ProGPU diagnostics also expose offscreen mask-pass,
+mask-draw, and peak mask-texture demand for this scenario.
+
+The effects workload draws 12 cards. Each card captures a clipped host
+backdrop, applies blur and translucent material composition, renders an offset
+shadow-only effect layer, and explicitly replays its source. This matches the
+framework's non-analytic shadow fallback contract and catches missing content
+bounds, stale-origin placement, source duplication, or stale effect resources.
+Because the reference Skia path is CPU-intensive, its qualification shape uses
+40 blocking frames plus three batches of 20 frames: 100 measured frames per
+fresh process.
 
 The v2 result contract is
 [benchmark-result.schema.json](benchmark-result.schema.json). It includes raw

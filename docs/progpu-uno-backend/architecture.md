@@ -310,9 +310,8 @@ submodule projects and `Uno.UI.Composition.WebGpu.Init`, and imports the same
 pinned modern wgpu-native provisioning target used by the Uno WebGPU backend.
 The application compile aliases ProGPU's optional compatibility projection
 when it is present in a restored graph, preventing it from colliding with the
-host's own Windows contract assembly. Once dependency change #125 is merged
-and consumed from a clean graph, `ProGPUUseWinRTContracts=false` removes that
-reference at its source.
+host's own Windows contract assembly. Merged dependency change #125 allows
+`ProGPUUseWinRTContracts=false` to remove that reference at its source.
 It does not reference `Uno.UI.Composition.Skia` or SkiaSharp.
 
 Build properties gate application references and symbols:

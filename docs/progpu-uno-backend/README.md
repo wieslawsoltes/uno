@@ -25,15 +25,16 @@ Documents:
 - [Initial validation record](validation-2026-08-22.md)
 
 The implementation consumes ProGPU as a git submodule pinned to immutable
-commit `7b050a9c44decfb04c6bf2a6ff134dee84a58b17`. The integration dependency is
-tracked by public ProGPU changes
-[#125](https://github.com/wieslawsoltes/ProGPU/pull/125) and
-[#126](https://github.com/wieslawsoltes/ProGPU/pull/126). The latter adds
-analytic rounded difference clips, bounded retained-picture compilation
-pages, duplicate-stop gradient semantics, a configurable bounded queue
-window, GPU-only HostBackdrop capture, and non-separable backdrop blend
-semantics. The gitlink remains reproducible while those dependency changes
-are under review.
+`main` merge commit `d5d3e977527b25897387345122d7b5688803a69c`. Public
+dependency changes
+[#125](https://github.com/wieslawsoltes/ProGPU/pull/125),
+[#126](https://github.com/wieslawsoltes/ProGPU/pull/126),
+[#127](https://github.com/wieslawsoltes/ProGPU/pull/127), and
+[#128](https://github.com/wieslawsoltes/ProGPU/pull/128) are merged. Together
+they provide optional WinRT contracts, analytic difference clips, bounded
+retained-picture compilation and eligibility caching, duplicate-stop gradient
+semantics, bounded queue cleanup, GPU-only HostBackdrop capture, translated
+and shadow-only effects, and prompt retirement of detached effect textures.
 
 ## Non-negotiable invariants
 
@@ -86,7 +87,20 @@ dotnet build SamplesApp/SamplesApp.Skia.Generic/SamplesApp.Skia.Generic.csproj \
   -c Release -p:UnoDrawingBackendProGpu=true --no-restore
 UNO_PROGPU=1 dotnet run \
   --project SamplesApp/SamplesApp.Skia.Generic/SamplesApp.Skia.Generic.csproj \
-  -c Release -p:UnoDrawingBackendProGpu=true --no-build --no-restore
+  -c Release -p:UnoDrawingBackendProGpu=true --no-build --no-restore \
+  --no-launch-profile
+```
+
+When a local macOS source build produces `libUnoNativeMac.dylib` without an
+embedded `LC_RPATH`, prefix the final command with the directory that already
+contains the copied native assets:
+
+```bash
+DYLD_LIBRARY_PATH="$PWD/SamplesApp/SamplesApp.Skia.Generic/bin/Release/net10.0/runtimes/osx/native" \
+UNO_PROGPU=1 dotnet run \
+  --project SamplesApp/SamplesApp.Skia.Generic/SamplesApp.Skia.Generic.csproj \
+  -c Release -p:UnoDrawingBackendProGpu=true --no-build --no-restore \
+  --no-launch-profile
 ```
 
 `UNO_PROGPU=1` selects ProGPU only in an application compiled with
@@ -95,9 +109,9 @@ message `Graphics backend 'ProGpuGraphicsProvider' won negotiation on context
 kind 'WebGpu'.`; the environment variable alone is not proof of backend
 selection.
 
-On macOS, launching the bare executable instead of the generated app bundle
-may require the build output's `runtimes/osx/native` directory in
-`DYLD_LIBRARY_PATH`. The app bundle resolves that native library normally.
+On macOS, a locally built host library without an embedded search path requires
+the same `DYLD_LIBRARY_PATH` prefix whether it is loaded through `dotnet` or
+through the generated app-bundle executable.
 
 ## Focused verification
 
