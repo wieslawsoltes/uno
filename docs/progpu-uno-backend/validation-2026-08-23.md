@@ -24,6 +24,7 @@
 | compatible retained-page draws must not expand or copy the full compositor draw-call value | root-cause fix | compare the compact retained projection first and mutate the accumulated call in place through its list span |
 | an identity-only retained picture wrapper must not allocate a second command stream or falsely invalidate the presentation visual | root-cause fix | clone the child picture's immutable command storage, preserve independent resource leases, and compare retained storage identity in the host visual |
 | duplicate gradient stops must make an exact offset select the later stop | root-cause fix | use the previous stop only for strictly smaller offsets in vector and hatch shaders |
+| a gradient local matrix must map the authored shader into its destination rather than transform destination coordinates in the same direction | root-cause fix | invert Uno's forward local matrix once at shader creation because ProGPU brushes store destination-to-brush coordinates; map singular/non-finite matrices to an empty shader |
 | solid ellipse strokes must retain their analytic curve | root-cause fix | preserve ellipse radii and emit exact even-odd rounded-ring geometry instead of a 22.5-degree flattened outline |
 | queue cleanup must bound residency without serializing every small burst | root-cause fix | expose the conservative drain bound and select a 64-submission window while retaining per-frame non-blocking polling |
 | HostBackdrop must sample already-rendered content without sampling the borrowed swapchain view | root-cause fix | conditionally render backdrop frames into a bindable same-device texture, split and ping-pong at ordered backdrop commands, then GPU-blit to the borrowed view |
@@ -418,10 +419,20 @@ effects throughput benchmark.
   `effects` is 2.81x (2.81x-2.91x). All 90 JSON files have the expected v3
   contract, dimensions, semantic/pixel hashes, and zero unsupported
   operations. First-pair readbacks have exact alpha; `cached` and `sparse` are
-  byte-identical, with other RGB PSNR values ranging from 28.112 dB for the
-  intentionally broad gradient-material corpus to 63.342 dB for unfiltered
+  byte-identical. After correcting the gradient local-matrix direction, other
+  RGB PSNR values range from 31.988 dB for effects to 63.342 dB for unfiltered
   layer isolation. Raw artifacts are under
   `src/artifacts/performance/2026-08-23-gpu-vs-gpu-matrix/`.
+- A focused real-device contract smoke verifies that transformed linear and
+  radial shaders retain the exact inverse coordinate matrix and that a
+  singular matrix produces an empty shader. A three-pair materials rerun keeps
+  ProGPU ahead by 1,087.67x completed-batch throughput
+  (1,062.77x-1,118.27x) and 527.32x synchronized blocking total. RGB MAE drops
+  from 4.507509 to 2.203289 and PSNR rises from 28.112 to 34.847 dB; the
+  transformed linear family alone rises from 23.864 to 63.327 dB. This is an
+  adapter-boundary correction: the managed and native ProGPU renderers already
+  share the destination-to-brush coordinate contract and canonical gradient
+  shader, so no one-sided renderer optimization is introduced.
 
 See [performance-results-2026-08-23.md](performance-results-2026-08-23.md) for
 the exact values and interpretation boundaries.

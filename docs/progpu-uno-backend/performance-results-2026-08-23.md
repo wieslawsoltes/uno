@@ -23,7 +23,7 @@ pairs.
 | text | 0.001180 ms | 0.489477 ms | 414.81x (390.87x-444.68x) | 0.0035 ms | 0.9920 ms | 304.14x |
 | paths | 0.001082 ms | 0.693403 ms | 641.05x (561.67x-645.17x) | 0.0033 ms | 1.0175 ms | 303.48x |
 | strokes | 0.001208 ms | 1.939457 ms | 1,605.03x (1,543.33x-1,882.23x) | 0.0032 ms | 2.8183 ms | 879.13x |
-| materials | 0.001118 ms | 1.234307 ms | 1,103.70x (999.05x-1,131.19x) | 0.0032 ms | 1.5357 ms | 505.66x |
+| materials | 0.001147 ms | 1.246987 ms | 1,087.67x (1,062.77x-1,118.27x) | 0.0032 ms | 1.7929 ms | 527.32x |
 | layers | 0.001205 ms | 0.826900 ms | 686.22x (656.55x-690.04x) | 0.0035 ms | 1.2625 ms | 364.54x |
 | isolation layers | 0.001247 ms | 0.830947 ms | 665.53x (649.06x-685.79x) | 0.0032 ms | 1.3513 ms | 425.94x |
 | mask layers | 0.001238 ms | 0.827257 ms | 669.17x (634.65x-706.05x) | 0.0034 ms | 1.3672 ms | 369.51x |
@@ -51,7 +51,7 @@ and sparse frames are byte-identical. RGB differences against Skia/Metal are:
 | text | 0.910325 | 105 | 33.892 dB |
 | paths | 0.356533 | 54 | 41.052 dB |
 | strokes | 0.674864 | 151 | 35.553 dB |
-| materials | 4.507509 | 199 | 28.112 dB |
+| materials | 2.203289 | 199 | 34.847 dB |
 | layers | 0.070465 | 4 | 59.503 dB |
 | isolation layers | 0.018131 | 3 | 63.342 dB |
 | mask layers | 0.038623 | 6 | 59.119 dB |
@@ -62,13 +62,25 @@ and sparse frames are byte-identical. RGB differences against Skia/Metal are:
 | shadows | 0.357339 | 66 | 43.805 dB |
 | effects | 3.473563 | 56 | 31.988 dB |
 
-All 90 JSON artifacts satisfy the v3 schema invariants used by the harness:
+All 90 original matrix JSON artifacts satisfy the v3 schema invariants used by
+the harness:
 1280x720 target, 64-digit semantic and pixel hashes, and zero unsupported
 operations. Raw local JSON/readbacks are under
 `src/artifacts/performance/2026-08-23-gpu-vs-gpu-matrix/`. The historical
 software-Skia qualification remains below because it is useful for separating
 Skia CPU raster cost from Skia's GPU integration cost; it is not the basis for
 the GPU-to-GPU claim.
+
+The `materials` row and pixel metric include a subsequent three-pair
+root-cause follow-up. Uno's gradient `localMatrix` is a forward shader matrix,
+whereas ProGPU's retained brush stores the inverse destination-to-brush
+coordinate transform. Inverting once at shader construction raises the full
+materials comparison from 28.112 to 34.847 dB and reduces RGB MAE from
+4.507509 to 2.203289 without adding measured per-frame work. The transformed
+linear column rises from 23.864 to 63.327 dB. Remaining focal-radial
+differences are dominated by the Skia backend's documented two-point-conical
+approximation. The follow-up artifacts are under
+`src/artifacts/performance/2026-08-23-gradient-matrix-fix/`.
 
 ## Scope
 
@@ -523,6 +535,11 @@ measures 29.32 dB PSNR and 0.9670 SSIM, with differences distributed through
 gradient interpolation rather than missing geometry or variants. Raw JSON,
 BGRA readbacks, and the contact sheet are under
 `src/artifacts/performance/2026-08-23-materials/`.
+
+This earlier forced-redraw checkpoint predates the gradient local-matrix
+correction. The current GPU-to-GPU section at the top of this report supersedes
+its transformed-gradient quality result while retaining it as historical
+evidence for the original optimization tranche.
 
 Short built-in WebGPU integration smokes also complete with zero unsupported
 operations: 8.6350 ms blocking median for `materials` and 17.1597 ms for

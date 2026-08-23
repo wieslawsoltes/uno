@@ -7,6 +7,7 @@ using System.Numerics;
 using System.Reflection;
 using System.Threading.Tasks;
 using ProGPU.Backend;
+using ProGPU.Vector;
 using Silk.NET.WebGPU;
 using Uno.UI.Composition.Drawing;
 using Uno.UI.Composition.ProGpu;
@@ -40,6 +41,7 @@ var provider = new ProGpuGraphicsProvider(backendOptions);
 RunProviderContextContractSmoke(provider);
 await RunBorrowedDeviceOwnershipSmoke(device, provider);
 using var factory = (ProGpuDrawingFactory)provider.CreateGraphics(device);
+RunGradientLocalMatrixContractSmoke(factory);
 var geometryFactory = new ProGpuGeometryFactory();
 {
 	var geometryBuilder = geometryFactory.CreatePrimitiveGeometryBuilder();
@@ -144,6 +146,85 @@ static void RunProviderContextContractSmoke(ProGpuGraphicsProvider provider)
 			"The ProGPU provider must negotiate exactly the typed WebGPU device context.");
 	}
 }
+
+static void RunGradientLocalMatrixContractSmoke(ProGpuDrawingFactory factory)
+{
+	var localMatrix = Matrix3x2.CreateScale(1.25f, 0.75f, new Vector2(19f, 14f)) *
+		Matrix3x2.CreateRotation(0.22f, new Vector2(19f, 14f));
+	if (!Matrix3x2.Invert(localMatrix, out var inverse))
+	{
+		throw new InvalidOperationException("The gradient contract fixture must be invertible.");
+	}
+
+	var linearShader = factory.CreateLinearGradientShader(
+		Vector2.Zero,
+		new Vector2(38f, 28f),
+		[Color.FromArgb(255, 240, 20, 10), Color.FromArgb(255, 10, 20, 240)],
+		[0f, 1f],
+		GradientTileMode.Clamp,
+		localMatrix);
+	var radialShader = factory.CreateRadialGradientShader(
+		new Vector2(19f, 14f),
+		new Vector2(16f, 12f),
+		21f,
+		9f,
+		[Color.FromArgb(255, 20, 220, 180), Color.FromArgb(255, 210, 20, 180)],
+		[0f, 1f],
+		GradientTileMode.Clamp,
+		localMatrix);
+	AssertGradientCoordinateTransform(linearShader, inverse, typeof(LinearGradientBrush));
+	AssertGradientCoordinateTransform(radialShader, inverse, typeof(RadialGradientBrush));
+
+	var singularShader = factory.CreateLinearGradientShader(
+		Vector2.Zero,
+		Vector2.One,
+		[Color.FromArgb(255, 255, 255, 255), Color.FromArgb(255, 0, 0, 0)],
+		[0f, 1f],
+		GradientTileMode.Clamp,
+		Matrix3x2.CreateScale(0f, 1f));
+	var singularBrush = GetShaderBrush(singularShader);
+	if (singularBrush is not SolidColorBrush { Color: var color } || color != Vector4.Zero)
+	{
+		throw new InvalidOperationException("A singular gradient local matrix must produce an empty shader.");
+	}
+}
+
+static void AssertGradientCoordinateTransform(IShader shader, Matrix3x2 inverse, Type expectedBrushType)
+{
+	var brush = GetShaderBrush(shader);
+	if (brush.GetType() != expectedBrushType)
+	{
+		throw new InvalidOperationException($"Expected {expectedBrushType.Name}, got {brush.GetType().Name}.");
+	}
+
+	var expected = new Matrix4x4(
+		inverse.M11, inverse.M12, 0f, 0f,
+		inverse.M21, inverse.M22, 0f, 0f,
+		0f, 0f, 1f, 0f,
+		inverse.M31, inverse.M32, 0f, 1f);
+	var actual = brush switch
+	{
+		LinearGradientBrush linear => linear.CoordinateTransform,
+		RadialGradientBrush radial => radial.CoordinateTransform,
+		_ => throw new InvalidOperationException("Unexpected gradient brush type."),
+	};
+	if (!MatrixNearlyEqual(expected, actual, 0.00001f))
+	{
+		throw new InvalidOperationException("The gradient local matrix was not inverted at the drawing-factory boundary.");
+	}
+}
+
+static Brush GetShaderBrush(IShader shader)
+{
+	var property = shader.GetType().GetProperty("Brush", BindingFlags.Instance | BindingFlags.NonPublic);
+	return property?.GetValue(shader) as Brush ??
+		throw new InvalidOperationException("The ProGPU shader did not expose its retained brush.");
+}
+
+static bool MatrixNearlyEqual(Matrix4x4 expected, Matrix4x4 actual, float tolerance) =>
+	MathF.Abs(expected.M11 - actual.M11) <= tolerance && MathF.Abs(expected.M12 - actual.M12) <= tolerance &&
+	MathF.Abs(expected.M21 - actual.M21) <= tolerance && MathF.Abs(expected.M22 - actual.M22) <= tolerance &&
+	MathF.Abs(expected.M31 - actual.M31) <= tolerance && MathF.Abs(expected.M32 - actual.M32) <= tolerance;
 
 static async Task RunColorMatrixLayerSmoke(ProGpuDrawingFactory factory)
 {

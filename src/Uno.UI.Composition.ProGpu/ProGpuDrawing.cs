@@ -315,19 +315,33 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 		return new ProGpuTexture(texture);
 	}
 
-	public IShader CreateLinearGradientShader(Vector2 start, Vector2 end, UColor[] colors, float[] colorPositions, GradientTileMode tileMode, Matrix3x2 localMatrix) =>
-		new ProGpuShader(new LinearGradientBrush(start, end, Stops(colors, colorPositions))
+	public IShader CreateLinearGradientShader(Vector2 start, Vector2 end, UColor[] colors, float[] colorPositions, GradientTileMode tileMode, Matrix3x2 localMatrix)
+	{
+		if (!TryGetBrushCoordinateTransform(localMatrix, out var coordinateTransform))
 		{
-			SpreadMethod = Spread(tileMode),
-			CoordinateTransform = ToMatrix(localMatrix),
-		});
+			return EmptyShader();
+		}
 
-	public IShader CreateRadialGradientShader(Vector2 center, Vector2 gradientOrigin, float radiusX, float radiusY, UColor[] colors, float[] colorPositions, GradientTileMode tileMode, Matrix3x2 localMatrix) =>
-		new ProGpuShader(new RadialGradientBrush(center, gradientOrigin, radiusX, radiusY, Stops(colors, colorPositions))
+		return new ProGpuShader(new LinearGradientBrush(start, end, Stops(colors, colorPositions))
 		{
 			SpreadMethod = Spread(tileMode),
-			CoordinateTransform = ToMatrix(localMatrix),
+			CoordinateTransform = coordinateTransform,
 		});
+	}
+
+	public IShader CreateRadialGradientShader(Vector2 center, Vector2 gradientOrigin, float radiusX, float radiusY, UColor[] colors, float[] colorPositions, GradientTileMode tileMode, Matrix3x2 localMatrix)
+	{
+		if (!TryGetBrushCoordinateTransform(localMatrix, out var coordinateTransform))
+		{
+			return EmptyShader();
+		}
+
+		return new ProGpuShader(new RadialGradientBrush(center, gradientOrigin, radiusX, radiusY, Stops(colors, colorPositions))
+		{
+			SpreadMethod = Spread(tileMode),
+			CoordinateTransform = coordinateTransform,
+		});
+	}
 
 	public IColorFilter CreateBlendModeColorFilter(UColor color, BlendMode mode) => new ProGpuColorFilter(Color(color), mode, null);
 	public IColorFilter CreateColorMatrixColorFilter(float[] matrix) => new ProGpuColorFilter(default, null, (float[])matrix.Clone());
@@ -419,6 +433,21 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 	private static GradientSpreadMethod Spread(GradientTileMode mode) => mode switch { GradientTileMode.Repeat => GradientSpreadMethod.Repeat, GradientTileMode.Mirror => GradientSpreadMethod.Reflect, _ => GradientSpreadMethod.Pad };
 	internal static Vector4 Color(UColor color) => new(color.R / 255f, color.G / 255f, color.B / 255f, color.A / 255f);
 	internal static Matrix4x4 ToMatrix(Matrix3x2 m) => new(m.M11, m.M12, 0, 0, m.M21, m.M22, 0, 0, 0, 0, 1, 0, m.M31, m.M32, 0, 1);
+	private static ProGpuShader EmptyShader() => new(new SolidColorBrush(Vector4.Zero));
+	private static bool TryGetBrushCoordinateTransform(Matrix3x2 localMatrix, out Matrix4x4 coordinateTransform)
+	{
+		if (!Matrix3x2.Invert(localMatrix, out var inverse) ||
+			!float.IsFinite(inverse.M11) || !float.IsFinite(inverse.M12) ||
+			!float.IsFinite(inverse.M21) || !float.IsFinite(inverse.M22) ||
+			!float.IsFinite(inverse.M31) || !float.IsFinite(inverse.M32))
+		{
+			coordinateTransform = Matrix4x4.Identity;
+			return false;
+		}
+
+		coordinateTransform = ToMatrix(inverse);
+		return true;
+	}
 
 	private sealed class PictureVisual : Visual
 	{
