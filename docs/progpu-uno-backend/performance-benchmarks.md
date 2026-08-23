@@ -298,7 +298,8 @@ dotnet "$BENCHMARK_DLL" --backend skia-metal --scenario shadows \
   --force-redraw --warmups 6 --samples 100 --batch-size 60 --batches 7 \
   --output artifacts/skia-metal-shadows.json
 
-dotnet "$BENCHMARK_DLL" --backend progpu --scenario shadows \
+UNO_WEBGPU_BACKENDS=metal dotnet "$BENCHMARK_DLL" \
+  --backend progpu --scenario shadows \
   --force-redraw --warmups 6 --samples 100 --batch-size 60 --batches 7 \
   --output artifacts/progpu-metal-shadows.json
 ```

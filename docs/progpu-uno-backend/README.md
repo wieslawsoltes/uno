@@ -125,7 +125,7 @@ contains the copied native assets:
 
 ```bash
 DYLD_LIBRARY_PATH="$PWD/SamplesApp/SamplesApp.Skia.Generic/bin/Release/net10.0/runtimes/osx/native" \
-UNO_PROGPU=1 dotnet run \
+UNO_PROGPU=1 UNO_WEBGPU_BACKENDS=metal dotnet run \
   --project SamplesApp/SamplesApp.Skia.Generic/SamplesApp.Skia.Generic.csproj \
   -c Release -p:UnoDrawingBackendProGpu=true --no-build --no-restore \
   --no-launch-profile
@@ -135,7 +135,8 @@ UNO_PROGPU=1 dotnet run \
 `UnoDrawingBackendProGpu=true`. The definitive runtime check is the startup
 message `Graphics backend 'ProGpuGraphicsProvider' won negotiation on context
 kind 'WebGpu'.`; the environment variable alone is not proof of backend
-selection.
+selection. `UNO_WEBGPU_BACKENDS=metal` makes the underlying macOS WebGPU API
+selection explicit instead of relying on wgpu-native's platform default.
 
 On macOS, a locally built host library without an embedded search path requires
 the same `DYLD_LIBRARY_PATH` prefix whether it is loaded through `dotnet` or
