@@ -609,6 +609,66 @@ must not be interpreted as a conforming comparison. Raw JSON, BGRA readbacks,
 PNGs, and the visually inspected outputs are under
 `src/artifacts/performance/2026-08-23-blend-corpus/`.
 
+## Anisotropic and additive shadow follow-up
+
+The backend now preserves Uno's independent `sigmaX`/`sigmaY` contract through
+the ProGPU retained effect and compute stack. Zero-radius axes bypass their
+Gaussian pass, effect bounds are padded per axis, and additive shadows use the
+native `Plus` blend pipeline. The direct-shadow opacity mask is recorded as
+opaque white; this prevents the requested translucent color and alpha from
+being multiplied once while building the mask and again while tinting it.
+
+The new `shadows` workload draws 128 path shadows, alternates `(6, 2)` and
+`(2, 6)` sigma, enables additive composition for 32 shadows, and explicitly
+draws all 128 sources. Three alternating fresh-process pairs used eight
+warmups, 100 blocking samples, and nine 60-frame batches:
+
+| Boundary | ProGPU process-median | Skia process-median | speedup | paired range |
+|---|---:|---:|---:|---:|
+| blocking total | 1.484700 ms | 2.667000 ms | 1.81× | 1.73×–1.82× |
+| CPU frame | 1.083400 ms | 2.666900 ms | 2.47× | 2.30×–2.49× |
+| completed batch/frame | 1.127227 ms | 2.678258 ms | 2.38× | 2.24×–2.39× |
+| batched CPU/frame | 1.119553 ms | 2.678258 ms | 2.39× | 2.26×–2.41× |
+
+Every process reports semantic hash `97ADF831...AF37`, stable ProGPU pixel
+hash `20A59930...116B`, stable Skia pixel hash `C388B13E...57B`, and zero
+unsupported operations. ProGPU emits 257 final draws, 3,584 vector vertices,
+and no mask passes. Original-resolution inspection finds matching topology,
+anisotropy, source placement, and additive highlights. Alpha is byte-exact;
+the complete image measures 0.331633 RGB mean absolute error, 46.29 dB mean
+per-channel RGB PSNR, and 0.997474 RGB SSIM against Skia. Only 0.00467% of
+pixels exceed a 32-level RGB channel difference.
+
+A built-in WebGPU compatibility smoke completes the same semantic workload
+with zero unsupported operations. Its short timing distribution is diagnostic
+only. Raw JSON, BGRA readbacks, PNGs, and the inspected side-by-side are under
+`src/artifacts/performance/2026-08-23-anisotropic-shadows/`.
+
+## WebGPU lifetime serialization checkpoint
+
+Six alternating fresh-process runs compared the previous merged ProGPU
+revision with the process-wide managed/native lifetime correction using the
+managed-picture workload (384 primitives, 60 warmups, 300 iterations, Release).
+Both revisions report zero managed bytes per stable frame. Median native
+submission changed from 0.08775 ms to 0.08440 ms, managed submission from
+0.51930 ms to 0.51825 ms, native total from 1.61735 ms to 1.60715 ms, and
+managed total from 2.54845 ms to 2.45995 ms. These small changes establish no
+regression; they are not presented as a speedup claim.
+
+The matched output differs by at most 11 channel levels, with only three pixels
+above 3/255 and mean channel error approximately 0.000311/255. A direct-apphost
+Time Profiler comparison measured 3.1999 versus 3.2080 ms/frame, while Metal
+System Trace measured 3.1664 versus 3.1677 ms/frame with exactly 8,434
+submissions in each trace and identical peak/final allocation counters. The
+Allocations and VM Tracker templates suspended the unsigned direct apphost, so
+no native-allocation conclusion is drawn from those instruments; the renderer's
+own stable-frame managed allocation counter remains zero.
+
+The same change passed matched managed and native C++ concurrency tests and the
+27-check dependency matrix, including the exact Metal-provider hardware gate
+and package consumers on six OS/architecture combinations. This evidence is a
+mandatory managed/native parity gate, not merely a managed-backend check.
+
 ## Reproduction
 
 Build once with serial MSBuild:
@@ -651,7 +711,7 @@ dotnet Uno.UI.Composition.Backend.Benchmarks/bin/Release/net10.0/Uno.UI.Composit
 
 Repeat with `--backend skia`. Valid scenarios are `cached`, `sparse`, `text`,
 `paths`, `strokes`, `materials`, `layers`, `isolation-layers`, `mask-layers`,
-`blend-layers`, `blend-corpus`, `images`, `clips`, and `effects`. Add
+`blend-layers`, `blend-corpus`, `images`, `clips`, `shadows`, and `effects`. Add
 `--force-redraw` to
 alternate target wrappers and disable retained populated-target reuse. Raw
 local artifacts for this run are under

@@ -331,7 +331,7 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 
 	public IColorFilter CreateBlendModeColorFilter(UColor color, BlendMode mode) => new ProGpuColorFilter(Color(color), mode, null);
 	public IColorFilter CreateColorMatrixColorFilter(float[] matrix) => new ProGpuColorFilter(default, null, (float[])matrix.Clone());
-	public IEffectFilter CreateDropShadowFilter(float dx, float dy, float sigmaX, float sigmaY, UColor color) => new ProGpuEffectFilter(new DropShadowEffect(MathF.Max(sigmaX, sigmaY)) { Offset = new Vector2(dx, dy), Color = Color(color), DrawSource = false });
+	public IEffectFilter CreateDropShadowFilter(float dx, float dy, float sigmaX, float sigmaY, UColor color) => new ProGpuEffectFilter(new DropShadowEffect(sigmaX, sigmaY) { Offset = new Vector2(dx, dy), Color = Color(color), DrawSource = false });
 
 	public IEffectFilter? CreateEffectFilter(EffectNode tree, URect bounds)
 	{
@@ -899,12 +899,22 @@ internal class ProGpuDrawingSession : IDrawingSession
 		// A retained shadow visual is the native ProGPU effect path; the geometry is recorded once into it.
 		var recorder = new GpuPictureRecorder();
 		var child = recorder.BeginRecording(new PRect(0, 0, 1, 1));
-		child.DrawPath(Solid(color), null, ProGpuGeometryFactory.Import(silhouette).Path, _matrix);
+		// The child is an opacity mask. Applying the requested shadow color here and
+		// again in DropShadowEffect would square translucent color and alpha values.
+		child.DrawPath(new SolidColorBrush(Vector4.One), null, ProGpuGeometryFactory.Import(silhouette).Path, _matrix);
 		var picture = recorder.EndRecording();
 		Context.RetainResource(picture);
-		var effect = new DropShadowEffect(MathF.Max(sigmaX, sigmaY)) { Color = ProGpuDrawingFactory.Color(color), DrawSource = false };
+		var effect = new DropShadowEffect(sigmaX, sigmaY) { Color = ProGpuDrawingFactory.Color(color), DrawSource = false };
 		var bounds = TransformBounds(Rect(silhouette.Bounds), _matrix);
+		if (additive)
+		{
+			Context.PushBlendMode(GpuBlendMode.Plus);
+		}
 		Context.DrawVisual(new EffectPictureVisual(picture, effect, bounds));
+		if (additive)
+		{
+			Context.PopBlendMode();
+		}
 		IncludeEffectBounds(bounds, effect, alreadyTransformed: true);
 	}
 	public void StrokePath(IGeometry geometry, UColor color, float strokeWidth, bool antialias = false)
@@ -1049,22 +1059,26 @@ internal class ProGpuDrawingSession : IDrawingSession
 	}
 	private static PRect EffectOutputBounds(PRect content, EffectBase effect)
 	{
-		var padding = effect switch
+		var (paddingX, paddingY) = effect switch
 		{
-			BlurEffect blur => MathF.Ceiling(MathF.Max(0, blur.BlurRadius) * 2f),
-			DropShadowEffect shadow => MathF.Ceiling(MathF.Max(0, shadow.BlurRadius) * 2f),
-			_ => 0f,
+			BlurEffect blur => (
+				MathF.Ceiling(MathF.Max(0, blur.BlurRadius) * 2f),
+				MathF.Ceiling(MathF.Max(0, blur.BlurRadius) * 2f)),
+			DropShadowEffect shadow => (
+				MathF.Ceiling(MathF.Max(0, shadow.BlurRadiusX) * 2f),
+				MathF.Ceiling(MathF.Max(0, shadow.BlurRadiusY) * 2f)),
+			_ => (0f, 0f),
 		};
 		var output = effect is DropShadowEffect { DrawSource: false }
 			? PRect.Empty
-			: Inflate(content, padding);
+			: Inflate(content, paddingX, paddingY);
 		if (effect is DropShadowEffect dropShadow)
 		{
 			var shadowBounds = new PRect(
-				content.X + dropShadow.Offset.X - padding,
-				content.Y + dropShadow.Offset.Y - padding,
-				content.Width + padding * 2f,
-				content.Height + padding * 2f);
+				content.X + dropShadow.Offset.X - paddingX,
+				content.Y + dropShadow.Offset.Y - paddingY,
+				content.Width + paddingX * 2f,
+				content.Height + paddingY * 2f);
 			output = output.IsEmpty ? shadowBounds : Union(output, shadowBounds);
 		}
 		return output;
@@ -1118,6 +1132,11 @@ internal class ProGpuDrawingSession : IDrawingSession
 		bounds.Y - amount,
 		bounds.Width + amount * 2f,
 		bounds.Height + amount * 2f);
+	private static PRect Inflate(PRect bounds, float amountX, float amountY) => new(
+		bounds.X - amountX,
+		bounds.Y - amountY,
+		bounds.Width + amountX * 2f,
+		bounds.Height + amountY * 2f);
 	private static PRect Union(PRect left, PRect right)
 	{
 		var x = MathF.Min(left.X, right.X);

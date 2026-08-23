@@ -45,6 +45,7 @@ produce the same final state.
 | blend-layers | one retained Multiply layer containing 1,536 opaque overlapping primitives over a gray destination | once-per-layer composition versus incorrect per-primitive blending |
 | blend-corpus | all 27 Uno layer blend modes, each with an opaque destination and two overlapping translucent rounded sources | Porter-Duff, separable, and non-separable mode fidelity plus retained multi-layer throughput |
 | images | retained image grid plus one changed upload | texture residency/upload cost |
+| shadows | 128 anisotropic path shadows alternating horizontal/vertical sigma and source-over/additive composition | independent-axis filtering, retained shadow reuse, and additive blend fidelity |
 | effects | shadows, blur, color matrix, backdrop | pass graph and bandwidth cost |
 | controls-1000 | continuous 1,000-control Uno sample | end-to-end framework throughput |
 | scroll | virtualized list with deterministic scroll trace | mutation, layout, and render interaction |
@@ -173,10 +174,10 @@ remain the authority if a summary or interpretation changes.
 
 ## 11. Current harness and artifacts
 
-`src/Uno.UI.Composition.Backend.Benchmarks` implements fourteen steady
+`src/Uno.UI.Composition.Backend.Benchmarks` implements fifteen steady
 micro-scenarios (`cached`, `sparse`, `text`, `paths`, `strokes`, `materials`,
 `layers`, `isolation-layers`, `mask-layers`, `blend-layers`, `blend-corpus`,
-`images`, `clips`, and `effects`) for ProGPU, Uno WebGPU where supported, and
+`images`, `clips`, `shadows`, and `effects`) for ProGPU, Uno WebGPU where supported, and
 Uno software Skia. Every frame explicitly clears the target; this prevents translucent antialiasing,
 paths, images, and effects from accumulating across samples. GPU lanes use
 `wgpuDevicePoll(wait=true)` only in the separate completion boundary.
@@ -240,6 +241,13 @@ each with one contained rectangular difference hole. It qualifies analytic
 even-odd mask composition and rejects a fast result if any unsupported
 operation is recorded. ProGPU diagnostics also expose offscreen mask-pass,
 mask-draw, and peak mask-texture demand for this scenario.
+
+The shadows workload draws 128 retained path silhouettes over the common grid.
+It alternates `(sigmaX, sigmaY)` between `(6, 2)` and `(2, 6)`, uses additive
+composition for one quarter of the shadows, and replays every unblurred source.
+The semantic and pixel artifacts therefore reject scalar-sigma substitution,
+missing additive blend state, double-applied translucent color, or omitted
+source content.
 
 The effects workload draws 12 cards. Each card captures a clipped host
 backdrop, applies blur and translucent material composition, renders an offset

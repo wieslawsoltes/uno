@@ -114,6 +114,28 @@ view. No CPU readback occurs. The command recorder propagates a retained
 HostBackdrop bit through record replay, so frames without HostBackdrop keep the
 direct path without rescanning the retained command tree.
 
+### 3.4 Managed/native optimization parity
+
+The ProGPU dependency exposes managed C# and native C++ renderers, but this
+backend treats them as implementations of one semantic and performance
+contract. A managed optimization cannot be accepted solely because the current
+adapter invokes the managed entry point. Its applicability is audited across
+the C++ scene compiler, retained resources, submission/lifetime boundary, text
+and font stack, geometry, images, effects, and shared shaders. Applicable work
+lands in both implementations and is measured with equivalent inputs. A
+non-applicable result records the concrete ownership difference and the native
+boundary that preserves the shared invariant.
+
+For WebGPU lifetime synchronization, managed Silk-native contexts share one
+process domain, and native non-Dawn engines enter the equivalent recursive
+process scope around complete dispatches. Browser and Dawn providers retain
+independent domains. Persistent bind-group publication is different by design:
+the managed compositor uses a dictionary and therefore creates outside its
+monitor before race-safe publication, while native C++ owns fixed retained
+resource slots and has no dictionary lock to reorder. Both paths still keep
+queue submission, polling, creation, and destruction in their applicable
+outer lifetime domain.
+
 ## 4. Drawing and retention
 
 ### 4.1 Recording

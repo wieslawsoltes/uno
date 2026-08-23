@@ -5,8 +5,8 @@
 - Uno branch baseline: `6848a67e49`.
 - Uno work branch: `feat/progpu-drawing-backend`; no Uno pull request opened.
 - ProGPU gitlink: merged `main` commit
-  `64271d7fd2ca8a059e80d9af46e3de003f8409f5`.
-- ProGPU dependency changes: public PRs #125 through #133, all merged.
+  `d9a85cba9ccb10dd5a65d83273b66f0f9a9a8444`.
+- ProGPU dependency changes: public PRs #125 through #135, all merged.
 - Host: macOS 26.6 arm64, Apple M3 Pro, .NET SDK 10.0.201,
   runtime 10.0.5, wgpu-native/Metal.
 
@@ -44,6 +44,8 @@
 | a parameterless layer must isolate a clipped transparent clear from the destination | root-cause fix | route `SaveLayer()` through a retained source-over blend effect so clear and content are recorded on one source surface before restoration composites it once |
 | a replacement clear inside a clipped effect layer must establish the affected retained bounds | root-cause fix | contribute the active explicit clip to effect content bounds before recording the replacement draw |
 | a transparent layer source must still affect the preceding destination for Porter-Duff modes that clear it | root-cause fix | expand `Src`, `Modulate`, `DstIn`, `SrcIn`, `SrcOut`, and `DstAtop` effect surfaces to the parent destination bounds, including an empty source picture |
+| independent wgpu-native contexts must not deadlock queue submission against polling or resource destruction | root-cause fix | use one process-wide managed synchronization domain for Silk-native contexts, include submission and resource lifetime, and move persistent bind-group creation outside the managed cache monitor |
+| a managed rendering optimization must not leave the native C++ renderer with a weaker equivalent path | mandatory parity gate | apply the same wgpu-native lifetime invariant through one recursive non-Dawn C++ dispatch scope; record the managed dictionary publication change as non-applicable because native retained resources use fixed slots rather than a callback-driven dictionary |
 
 Arbitrary/non-uniform geometry, masks, hit testing, unsupported draw commands,
 volatile variants, and stale atlas generations fail closed to normal
@@ -70,10 +72,10 @@ resolved the environmental file-lock race without source changes.
 
 ## Dependency tests
 
-The current blend-effect branch passes the complete locally available suites:
+The final dependency revision passes the complete locally available suites:
 
 ```text
-ProGPU.Tests:          3,712 passed, 0 failed, 0 skipped
+ProGPU.Tests:          3,786 passed, 0 failed, 0 skipped
 ProGPU.Tests.Headless:   240 passed, 0 failed, 0 skipped
 ```
 
@@ -96,18 +98,25 @@ picture mutation fixture and strengthens the compact-page source contract.
 The identity-picture follow-up adds five tests covering flattening, retained
 resource lifetime after the source clone is disposed, additional parent
 resources, transformed wrappers, and explicit completion-window reset. The
-retained-output follow-up adds texture mutation/version fixtures. The final
+retained-output follow-up adds texture mutation/version fixtures. The earlier
 full 3,712-test and 240-test suites passed. One allocation-sensitive MotionMark
 test failed once in an earlier local full run and once in the merged PR's
 macOS CI job; it passed in the complete local rerun, in isolation, and in five
 consecutive post-merge reruns. The unrelated CI retry is tracked separately and
 is not counted as positive evidence for this revision.
 
-The final merged dependency run is green across all 26 jobs: managed builds and
+The final merged dependency run is green across all 27 checks: managed builds and
 tests on macOS, Linux, and Windows; retained compositor, text, image-parity, and
 native Dawn contracts; C++ compiler/browser/native-renderer lanes; portable and
 mobile packaging; and native package consumers on all six OS/architecture
 combinations.
+
+The lifetime follow-up also passes 314 focused managed tests, 9/9 native CTests,
+all 927 explicitly ProGPU-backed SVG fixtures with 37 reviewed skips, 1,147/1,147
+remaining explicitly ProGPU-backed tests, and ten consecutive 1,146-test
+parallel stress runs. The official SVG verifier remains at the reviewed quality
+baseline: native 530/533 with three skips, and ProGPU 486/533 with the same 44
+known differences and three skips.
 
 ## Runtime and visual validation
 
@@ -345,6 +354,43 @@ effects throughput benchmark.
   graphs with zero warnings and zero errors. The real-device smoke passed at
   frame 12 with every Uno layer mode enabled, and all nine blend-corpus JSON
   artifacts validate against benchmark schema v3.
+- The shadow contract now preserves independent X/Y sigma through the retained
+  effect and compute paths, uses axis-specific bounds, maps additive shadows to
+  `Plus`, and records an opaque opacity mask so translucent color is applied
+  exactly once. The real-device smoke covers horizontal-only and vertical-only
+  blur spread, zero-axis leakage, source-over versus additive accumulation, and
+  translucent alpha.
+- Three fresh forced-redraw shadow pairs cover 128 anisotropic path shadows,
+  including 32 additive instances. ProGPU is 1.81× faster at median blocking
+  total and 2.38× faster at completed-batch throughput; all runs retain
+  semantic hash `97ADF831...AF37`, stable backend hashes, zero unsupported
+  operations, exact alpha, 257 ProGPU draws, and no mask passes. The inspected
+  output measures 0.331633 RGB MAE, 46.29 dB mean per-channel RGB PSNR, and
+  0.997474 RGB SSIM against Skia.
+- Matching 1024×796 Gallery processes report `ProGPU · WebGPU · macOS` and
+  `Skia · Metal · macOS` in both their window titles and in-app badges, while
+  startup telemetry independently identifies the winning providers and
+  context kinds. Reserving a two-line badge height prevents the longer ProGPU
+  description from moving the Gallery header. The same-content window pair
+  improved from 0.920212 to 0.965291 RGB SSIM after that correction. The
+  remaining category-list displacement is recorded as text/font-metric
+  conformance work; it is not hidden by the visual score. Raw captures, a
+  side-by-side image, and an amplified difference image are retained under
+  `src/artifacts/visual-parity/2026-08-23-gallery/`.
+- Six alternating managed-picture processes show no lifetime-fix regression:
+  zero stable-frame managed bytes on both revisions, native submission medians
+  0.08775/0.08440 ms, managed submission medians 0.51930/0.51825 ms, native
+  total medians 1.61735/1.60715 ms, and managed total medians
+  2.54845/2.45995 ms. Matched pixels differ by at most 11 channel levels, with
+  only three pixels above 3/255. Time Profiler and Metal System Trace deltas are
+  +0.25% and +0.04%, respectively; the latter records exactly 8,434
+  submissions and identical peak/final counters in both traces. The apphost
+  suspended under Allocations/VM Tracker, so no native-allocation claim is
+  made from those templates.
+- After pinning immutable ProGPU `main` merge `d9a85cba`, the focused
+  real-device smoke passed again at frame 12 while the ProGPU Gallery process
+  remained active. This concurrently exercises independent wgpu-native
+  contexts and confirms the final gitlink source tree.
 - Uno's built-in WebGPU lane completes 40-sample forced-redraw smokes for the
   stroke and material scenarios with zero unsupported operations. Its blocking medians are
   17.1597 ms for strokes and 8.6350 ms for materials; balanced eight-process
@@ -362,8 +408,9 @@ the exact values and interpretation boundaries.
    tables.
 3. Add scrolling, control-density, first-present, startup, allocation,
    settled-memory, and leak scenarios.
-4. Run a systematic SamplesApp page/pixel sweep and a long-duration resize,
-   DPI, occlusion, minimize/restore, and device-loss sequence.
+4. Run a systematic SamplesApp page/pixel sweep, close the observed
+   category-list text/font-metric displacement, and run a long-duration
+   resize, DPI, occlusion, minimize/restore, and device-loss sequence.
 5. Run Windows/D3D12, Linux/Vulkan, browser, trimming, and NativeAOT lanes.
-6. Complete anisotropic/additive shadows, alpha-zero/low-alpha blend edge
-   cases, and arbitrary color-filter/effect DAG layer isolation.
+6. Complete alpha-zero/low-alpha blend edge cases, a randomized shadow corpus,
+   and arbitrary color-filter/effect DAG layer isolation.

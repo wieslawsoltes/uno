@@ -96,6 +96,8 @@ await RunTransformedHostBackdropSmoke(factory);
 await RunEffectLayerBoundsSmoke(factory);
 await RunNestedEffectLayerBoundsSmoke(factory);
 await RunEffectPrimitiveBoundsSmoke(factory, geometryFactory);
+await RunAnisotropicShadowSmoke(factory, geometryFactory);
+await RunAdditiveShadowSmoke(factory, geometryFactory);
 await RunColorMatrixLayerSmoke(factory);
 await RunBlendModeLayerSmoke(factory);
 await RunAllBlendModesLayerSmoke(factory);
@@ -754,6 +756,79 @@ static async Task AssertEffectPrimitiveBounds(
 	{
 		throw new InvalidOperationException(
 			$"The {operation} effect layer lost its content bounds: shadow={Convert.ToHexString(shadowPixel)}, staleOrigin={Convert.ToHexString(staleOrigin)}.");
+	}
+}
+
+static async Task RunAnisotropicShadowSmoke(
+	ProGpuDrawingFactory factory,
+	ProGpuGeometryFactory geometryFactory)
+{
+	using var horizontalShadow = factory.CreateDropShadowFilter(
+		0,
+		0,
+		5,
+		0,
+		Color.FromArgb(255, 255, 255, 255));
+	var builder = geometryFactory.CreatePrimitiveGeometryBuilder();
+	builder.AddRectangle(new Rect(26, 40, 12, 8));
+	using var verticalGeometry = builder.Build();
+	using var texture = factory.RenderOffscreen(64, 64, drawing =>
+	{
+		drawing.Clear(Color.FromArgb(0, 0, 0, 0));
+		drawing.SaveLayer(horizontalShadow);
+		drawing.DrawRect(new Rect(26, 10, 12, 8), Color.FromArgb(255, 255, 255, 255));
+		drawing.Restore();
+		drawing.DrawShadow(
+			verticalGeometry,
+			Color.FromArgb(255, 255, 255, 255),
+			0,
+			5,
+			additive: false,
+			antialias: true);
+	});
+	var pixels = new byte[64 * 64 * 4];
+	(await factory.SnapshotAsync(texture)).CopyPixels(pixels);
+	var horizontalSpread = Pixel(pixels, 20, 14);
+	var horizontalVerticalLeak = Pixel(pixels, 32, 4);
+	var verticalSpread = Pixel(pixels, 32, 34);
+	var verticalHorizontalLeak = Pixel(pixels, 20, 44);
+	if (horizontalSpread[3] < 8 || horizontalVerticalLeak[3] > 4 ||
+		verticalSpread[3] < 8 || verticalHorizontalLeak[3] > 4)
+	{
+		throw new InvalidOperationException(
+			$"An anisotropic shadow did not preserve independent axes: horizontal={Convert.ToHexString(horizontalSpread)}, horizontalLeak={Convert.ToHexString(horizontalVerticalLeak)}, vertical={Convert.ToHexString(verticalSpread)}, verticalLeak={Convert.ToHexString(verticalHorizontalLeak)}.");
+	}
+}
+
+static async Task RunAdditiveShadowSmoke(
+	ProGpuDrawingFactory factory,
+	ProGpuGeometryFactory geometryFactory)
+{
+	var builder = geometryFactory.CreatePrimitiveGeometryBuilder();
+	builder.AddRectangle(new Rect(24, 24, 16, 16));
+	using var geometry = builder.Build();
+	var color = Color.FromArgb(128, 200, 40, 20);
+
+	async Task<byte[]> Render(bool additive)
+	{
+		using var texture = factory.RenderOffscreen(64, 64, drawing =>
+		{
+			drawing.Clear(Color.FromArgb(0, 0, 0, 0));
+			drawing.DrawShadow(geometry, color, 0, 0, additive);
+			drawing.DrawShadow(geometry, color, 0, 0, additive);
+		});
+		var pixels = new byte[64 * 64 * 4];
+		(await factory.SnapshotAsync(texture)).CopyPixels(pixels);
+		return Pixel(pixels, 32, 32).ToArray();
+	}
+
+	var sourceOver = await Render(additive: false);
+	var plus = await Render(additive: true);
+	if (sourceOver[3] is < 175 or > 205 || plus[3] < 245 || plus[3] < sourceOver[3] + 40 ||
+		plus[2] <= sourceOver[2])
+	{
+		throw new InvalidOperationException(
+			$"Additive shadow compositing did not differ from source-over: sourceOver={Convert.ToHexString(sourceOver)}, plus={Convert.ToHexString(plus)}.");
 	}
 }
 

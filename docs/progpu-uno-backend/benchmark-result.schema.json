@@ -25,7 +25,7 @@
   "properties": {
     "Schema": { "const": "uno-drawing-backend-benchmark/v3" },
     "Backend": { "enum": ["progpu", "webgpu", "skia"] },
-    "Scenario": { "enum": ["cached", "sparse", "text", "paths", "strokes", "materials", "layers", "isolation-layers", "mask-layers", "blend-layers", "blend-corpus", "images", "clips", "effects"] },
+    "Scenario": { "enum": ["cached", "sparse", "text", "paths", "strokes", "materials", "layers", "isolation-layers", "mask-layers", "blend-layers", "blend-corpus", "images", "clips", "shadows", "effects"] },
     "ForceRedraw": { "type": "boolean" },
     "Width": { "type": "integer", "minimum": 1 },
     "Height": { "type": "integer", "minimum": 1 },

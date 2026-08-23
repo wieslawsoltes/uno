@@ -57,7 +57,7 @@ internal sealed record BenchmarkOptions(
 		var backend = Value("--backend", "progpu").ToLowerInvariant();
 		if (backend is not ("progpu" or "webgpu" or "skia")) throw new ArgumentException("--backend must be progpu, webgpu, or skia.");
 		var scenario = Value("--scenario", "cached").ToLowerInvariant();
-		if (scenario is not ("cached" or "sparse" or "text" or "paths" or "strokes" or "materials" or "layers" or "isolation-layers" or "mask-layers" or "blend-layers" or "blend-corpus" or "images" or "clips" or "effects")) throw new ArgumentException("--scenario must be cached, sparse, text, paths, strokes, materials, layers, isolation-layers, mask-layers, blend-layers, blend-corpus, images, clips, or effects.");
+		if (scenario is not ("cached" or "sparse" or "text" or "paths" or "strokes" or "materials" or "layers" or "isolation-layers" or "mask-layers" or "blend-layers" or "blend-corpus" or "images" or "clips" or "shadows" or "effects")) throw new ArgumentException("--scenario must be cached, sparse, text, paths, strokes, materials, layers, isolation-layers, mask-layers, blend-layers, blend-corpus, images, clips, shadows, or effects.");
 		var warmups = int.Parse(Value("--warmups", "4"), CultureInfo.InvariantCulture);
 		var samples = int.Parse(Value("--samples", "100"), CultureInfo.InvariantCulture);
 		var batchSize = int.Parse(Value("--batch-size", "60"), CultureInfo.InvariantCulture);
@@ -464,6 +464,28 @@ internal sealed class BenchmarkHarness : IDisposable
 			}
 		}
 
+		if (_options.Scenario == "shadows")
+		{
+			for (var y = 0; y < 8; y++) for (var x = 0; x < 16; x++)
+			{
+				var restore = recorder.Save();
+				recorder.Translate(x * 80 + 22, y * 90 + 24);
+				var horizontal = ((x + y) & 1) == 0;
+				recorder.DrawShadow(
+					_path,
+					Color.FromArgb(150, (byte)(35 + x * 9), (byte)(45 + y * 18), 210),
+					horizontal ? 6 : 2,
+					horizontal ? 2 : 6,
+					additive: (x & 3) == 0,
+					antialias: true);
+				recorder.DrawPath(
+					_path,
+					Color.FromArgb(220, (byte)(210 - y * 11), (byte)(75 + x * 6), 48),
+					true);
+				recorder.RestoreToCount(restore);
+			}
+		}
+
 		if (_options.Scenario == "effects")
 		{
 			for (var y = 0; y < 3; y++) for (var x = 0; x < 4; x++)
@@ -840,6 +862,7 @@ internal sealed class BenchmarkHarness : IDisposable
 			"mask-layers" => "|maskLayers=1|sourcePrimitives=768|maskPrimitives=768|blendMode=dstIn|transparentOutsideMask=true",
 			"blend-layers" => "|blendLayers=1|blendMode=multiply|layerPrimitives=1536|opaqueOverlap=true",
 			"blend-corpus" => $"|blendLayers={Enum.GetValues<BlendMode>().Length}|allBlendModes=true|sourcePrimitives={Enum.GetValues<BlendMode>().Length * 2}|translucentOverlap=true",
+			"shadows" => "|shadows=128|anisotropic=true|additive=32|sourceReplay=true",
 			_ => string.Empty,
 		};
 		var bytes = Encoding.UTF8.GetBytes($"v2|clear=FF080C14|retainedRows=24|{_options.Scenario}|{Width}|{Height}|768|{(_options.Scenario == "text" ? 128 : 0)}|{(_options.Scenario == "paths" ? 1000 : 0)}|{(_options.Scenario == "images" ? 240 : 0)}{extension}");

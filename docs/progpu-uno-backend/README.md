@@ -25,17 +25,19 @@ Documents:
 - [Initial validation record](validation-2026-08-22.md)
 
 The implementation consumes ProGPU as a git submodule pinned to immutable
-`main` merge commit `64271d7fd2ca8a059e80d9af46e3de003f8409f5`. Public
+`main` merge commit `d9a85cba9ccb10dd5a65d83273b66f0f9a9a8444`. Public
 dependency changes
 [#125](https://github.com/wieslawsoltes/ProGPU/pull/125),
 [#126](https://github.com/wieslawsoltes/ProGPU/pull/126),
 [#127](https://github.com/wieslawsoltes/ProGPU/pull/127),
-[#128](https://github.com/wieslawsoltes/ProGPU/pull/128), and
+[#128](https://github.com/wieslawsoltes/ProGPU/pull/128),
 [#129](https://github.com/wieslawsoltes/ProGPU/pull/129),
 [#130](https://github.com/wieslawsoltes/ProGPU/pull/130),
 [#131](https://github.com/wieslawsoltes/ProGPU/pull/131),
-[#132](https://github.com/wieslawsoltes/ProGPU/pull/132), and
-[#133](https://github.com/wieslawsoltes/ProGPU/pull/133) are merged. Together
+[#132](https://github.com/wieslawsoltes/ProGPU/pull/132),
+[#133](https://github.com/wieslawsoltes/ProGPU/pull/133),
+[#134](https://github.com/wieslawsoltes/ProGPU/pull/134), and
+[#135](https://github.com/wieslawsoltes/ProGPU/pull/135) are merged. Together
 they provide optional WinRT contracts, analytic difference clips, bounded
 retained-picture compilation and eligibility caching, duplicate-stop gradient
 semantics, bounded queue cleanup, GPU-only HostBackdrop capture, translated
@@ -46,6 +48,9 @@ completion waits advance the bounded submission-drain accounting. Retained
 target stamps prevent unchanged output submission. Unfiltered source-over
 layers, destination-in masks, color matrices, and all 27 Uno layer blend modes
 can now isolate complete visual subtrees through retained GPU effect paths.
+Independent shadow axes and additive composition are preserved, and managed
+and native C++ wgpu-native lifetime operations use equivalent process-wide
+synchronization domains.
 
 ## Non-negotiable invariants
 
@@ -66,6 +71,11 @@ can now isolate complete visual subtrees through retained GPU effect paths.
    not silently delegated to Skia.
 6. Performance claims require correct pixels, zero unsupported operations for
    the measured scene, raw samples, and reproducible environment metadata.
+7. Every managed ProGPU rendering optimization requires a native C++
+   applicability audit. Applicable work lands in both implementations with
+   matched behavior, quality, lifetime, allocation/upload, and performance
+   gates; a concrete ownership mismatch must be documented for any one-sided
+   change.
 
 ## Intended app registration
 

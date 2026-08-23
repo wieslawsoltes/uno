@@ -23,7 +23,7 @@ Status terms: **working** means exercised on a real macOS/Metal device;
 | images | working | BGRA upload, sampling, opacity, color matrix/`SrcIn`, source/destination, and nine-slice are benchmarked or real-device smoke-tested, including effect-bound propagation; codec corpus remains |
 | offscreen | working | GPU render target and same-device reuse path exercised |
 | snapshot | working | real GPU readback and byte-channel assertions pass |
-| shadow | partial | translated retained shadows, shadow-only composition, explicit source replay, and nested output-bound propagation are runtime-qualified; anisotropic sigma and additive semantics are not complete |
+| shadow | working | translated retained shadows, shadow-only composition, explicit source replay, nested output-bound propagation, independent X/Y sigma including a zero axis, additive composition, and translucent mask color are real-device runtime-qualified; a broader randomized corpus remains |
 | effects | partial | source blur, drop shadow, image matrix/tint, isolated subtree blend, and GPU-only ordered HostBackdrop capture are implemented; translated/nested layer bounds, detached texture retirement, the 27-mode layer corpus, Multiply/Screen blend state, and live acrylic placement are qualified, while arbitrary neutral DAG and blend edge-case conformance remain |
 | geometry factory | working | builders, primitives, host marker, bounds, hit test, transform, combine, trim, widen and streams are real-device exercised; ellipse clips retain exact rings and direct strokes defer to ProGPU's analytic pen stack; full numerical corpus remains |
 | font matching | working | system default selection used by smoke/SamplesApp; byte/family/fallback corpus remains |
@@ -33,6 +33,7 @@ Status terms: **working** means exercised on a real macOS/Metal device;
 | image codec | implemented | neutral managed codec, not Skia; format/orientation corpus remains |
 | SVG | implemented | neutral parser emits through ProGPU geometry/drawing; document corpus remains |
 | lifetime | working | deterministic resource disposal is exercised; a real borrowed-device test proves disposing the backend does not release the host WebGPU device, and detached effect textures are retired before later scene-cache admission |
+| managed/native optimization parity | working | dependency acceptance requires an explicit C# and C++ applicability audit; the current lifetime fix pairs the managed Silk-native synchronization domain with a recursive non-Dawn C++ process scope, while documenting why the managed bind-group dictionary change has no native analogue |
 | device loss | planned | generation counter exists; invalidation/recovery injection remains |
 | diagnostics | implemented | CPU record/submit, compositor compile/upload/pass, draw/vertex/upload/mask/cache, retained-picture, retained-target-reuse, and forced-redraw metrics are exported in benchmark schema v3; scene dumps can wait for HostBackdrop and include material parameters; atlas residency is not yet exported |
 | AOT/trimming | planned | trimmed NativeAOT sample remains |
@@ -63,7 +64,7 @@ are established.
   and presented through ProGPU without backend exceptions during the observed
   startup interval. The startup log, rather than the selection environment
   variable, proves that `ProGpuGraphicsProvider` won `WebGpu` negotiation.
-- Gate 2: **passed for the expanded real-device smoke and fourteen benchmark
+- Gate 2: **passed for the expanded real-device smoke and fifteen benchmark
   scenes**; the systematic SamplesApp page corpus has not run.
 - Gate 3: **passed on macOS/Metal**. The runtime test disposes a factory that
   borrowed the host context, then successfully allocates and releases another
@@ -75,7 +76,8 @@ are established.
 - Gate 6: **passed for eight alternating ProGPU/Skia processes across the seven
   primary scenarios, plus three fresh forced-redraw pairs for the native-stroke,
   materials, color-matrix-layer, unfiltered-isolation-layer, destination-in
-  mask-layer, single-mode layer, and all-mode blend-corpus scenarios**. Cached and sparse output is
+  mask-layer, single-mode layer, all-mode blend-corpus, and anisotropic/additive
+  shadow scenarios**. Cached and sparse output is
   byte-exact; text/path/stroke/material/layer/image/clip and effect differences
   are quantified. The earlier Uno WebGPU context lane has two processes and
   still needs eight-process promotion.

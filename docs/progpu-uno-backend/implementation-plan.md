@@ -4,8 +4,8 @@
 
 - Uno base: immutable head of PR #24153.
 - ProGPU dependency: merged `main` commit
-  `64271d7fd2ca8a059e80d9af46e3de003f8409f5`, including public dependency
-  changes #125 through #133.
+  `d9a85cba9ccb10dd5a65d83273b66f0f9a9a8444`, including public dependency
+  changes #125 through #135.
 - Primary validation platform: macOS arm64, .NET 10, Dawn/Metal.
 - Secondary compile/runtime lanes: Windows Dawn/D3D12, Linux
   wgpu-native/Vulkan, and browser WebGPU when the host callback ABI is proven.
@@ -23,8 +23,55 @@ build configuration, exact commands, and raw artifact paths.
 | 2 — drawing core | working vertical slice | real-device smoke, SamplesApp present, analytic clip-hole and broad effect-bound corpus; arbitrary effect DAG isolation remains |
 | 3 — content stack | implemented vertical slice | ProGPU geometry/font/shaping/direct glyph path plus neutral managed image/SVG adapters; full corpus remains |
 | 4 — application correctness | partially qualified | SamplesApp loads and presents 1,413-sample catalog; systematic sample/pixel sweep remains |
-| 5 — benchmarks | primary pair qualified | v3 stage timing, target readback, fourteen scenarios including analytic strokes, gradient materials, isolated color-matrix layers, unfiltered source-over isolation, destination-in composition masks, single-mode blend layers, and a 27-mode blend corpus, eight alternating ProGPU/Skia process pairs for the primary seven, three-pair stroke/material/color-matrix/unfiltered/mask/blend/all-mode follow-ups, and an eight-pair retained-presentation follow-up; the earlier Uno WebGPU lane, startup/scrolling/memory scenarios, and cross-framework ports remain |
+| 5 — benchmarks | primary pair qualified | v3 stage timing, target readback, fifteen scenarios including analytic strokes, gradient materials, isolated color-matrix layers, unfiltered source-over isolation, destination-in composition masks, single-mode blend layers, a 27-mode blend corpus, and anisotropic/additive shadows; eight alternating ProGPU/Skia process pairs for the primary seven, three-pair stroke/material/color-matrix/unfiltered/mask/blend/all-mode/shadow follow-ups, and an eight-pair retained-presentation follow-up; the earlier Uno WebGPU lane, startup/scrolling/memory scenarios, and cross-framework ports remain |
 | 6 — hardening | open | Windows/Linux/browser, device loss, AOT/trimming, leak and long-running stress |
+
+## Mandatory managed/native optimization gate
+
+The ProGPU managed C# renderer and native C++ renderer are treated as two
+implementations of one rendering and performance contract. Every managed
+rendering optimization used by this backend must receive an explicit C++
+applicability audit before its dependency change is accepted:
+
+- an applicable optimization lands in both implementations with equivalent
+  behavior, quality, complexity, resource identity/lifetime, retention,
+  uploads, allocations, fallback, and failure semantics;
+- a one-sided change must name the concrete ownership or execution boundary
+  that makes the other implementation non-applicable; language or API shape
+  alone is not sufficient;
+- shared behavior receives matched managed/native regressions and equivalent
+  Release workloads, including stable-frame allocation/upload and pixel gates;
+- generated wire layouts, public C records, shaders, fixtures, and expected
+  output remain synchronized;
+- an unexplained managed-only rendering optimization blocks dependency
+  advancement and backend qualification.
+
+The current WebGPU lifetime correction passes this gate. Managed Silk-native
+contexts and non-Dawn C++ engines share equivalent process-wide synchronization
+domains. The managed persistent-texture dictionary publishes native bind
+groups outside its monitor; the native engine has no corresponding dictionary
+because it owns fixed retained slots, so that sub-change is explicitly
+non-applicable while the shared resource-lifetime invariant remains covered by
+the native dispatch scope.
+
+The dependency optimization families consumed by this branch have the
+following native audit:
+
+| Managed optimization family | Native C++ applicability/equivalent | Gate |
+|---|---|---|
+| optional WinRT geometry contracts | managed build/reference closure only; no renderer algorithm or wire change | documented non-applicable |
+| analytic mask isolation, rounded rings, and contained rectangular holes | native semantic mask chains retain analytic rounded-rectangle masks and canonical mask shaders | native differential/mask gates |
+| retained picture eligibility, page admission, bulk append, and compact draw merging | native semantic scenes use generation-keyed immutable snapshots, retained GPU pages, and bounded in-place analytic/path/glyph draw merging | stable replay, zero-upload/allocation, differential gates |
+| duplicate gradient-stop exact-offset selection | canonical production shader behavior is shared by managed and native pipelines | shader/resource and pixel gates |
+| bounded queue drain and explicit completion accounting | native submission tokens and provider-specific queue completion retain the same bounded lifetime contract | native provider/completion gates |
+| GPU HostBackdrop capture and destination-safe blend semantics | native backdrop execution owns ordered capture/resolve and the same blend-mode contracts | native backdrop/effect differentials |
+| detached effect retirement and retained output/content generations | native fixed retained slots, scene/resource generations, and effect texture generations provide the equivalent lifetime/identity model | stable reuse, mutation, and teardown gates |
+| color-matrix, isolated blend, and shadow-only visual effects | native semantic image/effect records, effect chains, and group-blend pipelines already implement the complete GPU-resident operations | native/managed effect differentials |
+| anisotropic shadows and zero-axis work elimination | native ABI already carries `sigma_x`/`sigma_y`; C++ two-pass execution is axis-specific and shares the production shaders; managed work closed the prior gap | managed/native shadow and residency gates |
+| process-wide WebGPU lifetime serialization | applicable to both; managed Silk-native contexts and native non-Dawn dispatches now own equivalent process scopes | threaded, stress, CTest, browser/Dawn isolation, and performance gates |
+
+This table is an acceptance ledger, not permission to assume future parity.
+Every later optimization adds or updates a row with source and runtime evidence.
 
 ## Phase 0 — analysis and contracts
 
