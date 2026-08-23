@@ -333,6 +333,56 @@ about 7–9%. Reducing it to 16 cycles was neutral for cached, regressed sparse,
 and increased CPU work. The 64-cycle loop therefore remains the measured safe
 point; no timing-only shortcut weakened explicit completion semantics.
 
+### Current-main completion and retained-target audit
+
+A later clean refresh at ProGPU merge `d9a85cba` reran cached and sparse in
+three alternating ProGPU/Skia pairs with 8 warmups, 100 blocking samples, and
+nine 60-frame batches. This supersedes the earlier cached blocking-gap claim:
+retained-target reuse now avoids both renderer submission and queue waiting for
+the unchanged frame.
+
+| Scenario and boundary | ProGPU process medians | Skia process medians | Conservative result |
+|---|---:|---:|---:|
+| cached blocking total | 0.0030–0.0036 ms | 0.3607–0.3688 ms | ProGPU at least 100.2× faster |
+| cached completed batch/frame | 0.001133–0.001262 ms | 0.361048–0.393927 ms | ProGPU at least 286.2× faster |
+| sparse blocking total | 0.3912–0.4793 ms | 0.3535–0.3617 ms | residual queue-completion gap |
+| sparse renderer CPU | 0.0886–0.0986 ms | 0.3535–0.3617 ms | ProGPU at least 3.59× faster |
+| sparse completed batch/frame | 0.139132–0.142742 ms | 0.365287–0.379483 ms | ProGPU at least 2.56× faster |
+
+Every cached pair produced pixel hash `15DECAB...F718`; every sparse pair
+produced `4ED36839...82B2`. Both are byte-identical across ProGPU and Skia, and
+all ProGPU runs report zero unsupported operations. Sparse submits only 4 KiB,
+two draws, and 3,072 vertices. Its median renderer CPU is below 0.1 ms; the
+remaining blocking duration is almost entirely the host queue-completion wait.
+
+A 20,000-frame sampled-thread trace attributes approximately 8.26 seconds of
+inclusive time to the borrowed WebGPU lifetime poll, versus 1.38 seconds to
+compositor rendering and 0.68 seconds to retained-picture compilation. That
+ownership evidence drove five controlled candidates; all were rejected:
+
+- callback-only completion stalled because callbacks require explicit device
+  progress in this wgpu-native configuration;
+- reducing the progress spin from 64 to 1 raised the 100-frame blocking median
+  to 0.5346 ms;
+- `wgpuInstanceWaitAny` is exported but aborts as unimplemented;
+- indexed submission plus blocking device poll raised the median to 1.4053 ms,
+  including an approximately 1.26 ms blocking-poll floor;
+- submit-time completion futures raised blocking total to 0.5862 ms and
+  completed-batch time to 0.312848 ms/frame.
+
+The managed retained-page index-rebase loop was also tested with portable SIMD
+in five alternating, binary-isolated 300-frame pairs. Scalar scene compilation
+was 0.0577–0.0595 ms; SIMD was 0.0609–0.0721 ms. All ten pixel hashes matched,
+but the SIMD path regressed the measured stage and was discarded. Native C++
+parity was audited before the experiment: its semantic compiler emits one
+scene-wide packed page directly and therefore has no equivalent local-page
+rebase pass. This is a concrete representation-ownership exception, not an
+unreviewed managed-only optimization.
+
+Raw results and the trace are under
+`src/artifacts/performance/2026-08-23-blocking-completion-baseline/` and
+`src/artifacts/performance/2026-08-23-sparse-profile/`.
+
 ## Native analytic stroke follow-up
 
 A real SamplesApp comparison exposed a quality and performance defect that the

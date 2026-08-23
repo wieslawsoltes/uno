@@ -260,6 +260,17 @@ effects throughput benchmark.
   Skia. Five of seven blocking totals also win; cached and sparse remain behind
   only at the per-frame GPU completion boundary and are reported as residual
   synchronization gaps.
+- A current-main refresh at merged ProGPU `d9a85cba` closes the cached blocking
+  gap: three alternating pairs measure 0.0030–0.0036 ms for ProGPU versus
+  0.3607–0.3688 ms for Skia, with byte-identical pixels. Sparse is the sole
+  remaining tiny-scene blocking gap, but its renderer CPU is at least 3.59×
+  faster and its completed-batch throughput at least 2.56× faster. A
+  20,000-frame trace assigns the residual to host queue completion. Five
+  completion alternatives and a portable-SIMD retained-index candidate were
+  rejected by measured regressions or an unimplemented host primitive; no
+  timing shortcut or managed-only optimization was landed. The C++ audit
+  confirms that native semantic compilation emits its scene-wide packed page
+  directly and does not own the rejected managed local-page rebase step.
 - Three fresh forced-redraw stroke pairs cover 1,000 analytic arc/Bézier
   strokes with four solid/dashed style combinations. ProGPU is 14.95× faster
   at median blocking total and 25.70× faster at completed-batch throughput;
