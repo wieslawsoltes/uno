@@ -135,11 +135,12 @@ The five standard workloads contain no HostBackdrop command, so their direct
 present path and reported results are not HostBackdrop measurements. A live
 SamplesApp AutoSuggestBox popup was separately captured after proving ProGPU
 won backend negotiation. Its scene contained an Acrylic/HostBackdrop material
-with a 60 px blur and used the conditional offscreen capture route. That one
-instrumented frame reported 251.404 ms total (250.626 ms render pass). The
-popup also remained visibly different from the matched Skia capture. This
-single sample is diagnostic evidence only; it identifies a required effects
-benchmark and shader optimization, and is not included in comparative tables.
+with a 60 px blur and used the conditional offscreen capture route. After
+correcting the backdrop command's placement transform, a warmed frame-34 dump
+reported 2.669 ms total and 1.146 ms render-pass CPU. The matched 988×768
+capture measures 0.4985 RGB MAE over the full window and 2.3644 over the popup
+against Skia. This single sample is diagnostic correctness evidence only; a
+repeatable effects workload is still required before making throughput claims.
 
 ## Optimization progression
 

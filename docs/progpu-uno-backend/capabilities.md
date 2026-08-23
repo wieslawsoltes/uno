@@ -14,7 +14,7 @@ Status terms: **working** means exercised on a real macOS/Metal device;
 | context negotiation | working | SamplesApp log proves `ProGpuGraphicsProvider` won `WebGpu`; incompatible-context unit test remains |
 | direct present | working | renders into borrowed `ColorView` and host presents; ownership trace remains |
 | recording/replay | working | smoke replays retained `GpuPicture`; nested/resource-pressure corpus remains |
-| transforms | implemented | set/concat/translate/scale; transform pixel fixtures remain |
+| transforms | working | set/concat/translate/scale, transformed retained records, clips, strokes, and HostBackdrop placement have pixel fixtures |
 | clips | working | rect, rounded/path, intersect/difference; representative nested rounded-ring rendering is analytic and visually qualified; broader clip corpus remains |
 | layers | partial | balanced save/blend scopes and isolated blur/drop-shadow effect layers work; color-filter and arbitrary-effect isolation remain |
 | primitives | working | clear, rect and rounded rect have pixel assertions; border/line corpus remains |
@@ -24,7 +24,7 @@ Status terms: **working** means exercised on a real macOS/Metal device;
 | offscreen | working | GPU render target and same-device reuse path exercised |
 | snapshot | working | real GPU readback and byte-channel assertions pass |
 | shadow | partial | retained drop-shadow visual works; anisotropic sigma and additive semantics are not complete |
-| effects | partial | source blur, drop shadow, image matrix/tint and GPU-only ordered HostBackdrop capture are implemented; the live acrylic popup still differs from Skia and needs shader-cost tuning, while arbitrary neutral DAG/layer isolation remains |
+| effects | partial | source blur, drop shadow, image matrix/tint and GPU-only ordered HostBackdrop capture are implemented; live transformed acrylic placement is pixel- and SamplesApp-qualified, while arbitrary neutral DAG/layer isolation remains |
 | geometry factory | implemented | builders, primitives, host marker, bounds, hit test, transform, combine, trim, widen and streams; solid ellipse strokes retain exact analytic rings while join-aware general geometry uses widening; full numerical corpus remains |
 | font matching | working | system default selection used by smoke/SamplesApp; byte/family/fallback corpus remains |
 | shaping | working | direct OpenType shaping exercised for LTR; RTL/complex corpus remains |

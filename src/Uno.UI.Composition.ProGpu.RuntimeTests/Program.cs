@@ -88,6 +88,7 @@ if (outside[3] > 4 || red[2] < 200 || red[3] < 240 || blue[0] < 180 || blue[3] <
 
 RunPresentSmoke(device, factory);
 await RunHostBackdropSmoke(device, factory);
+await RunTransformedHostBackdropSmoke(factory);
 RunStablePresentCacheSmoke(device, factory);
 await RunNestedRecordClearSmoke(factory);
 await RunDefaultTrimSmoke(factory, geometryFactory);
@@ -208,6 +209,34 @@ static IRenderRecord CreateHostBackdropRecord(
 	recorder.RestoreToCount(restoreCount);
 	recorder.DrawRect(new Rect(28, 28, 8, 8), Color.FromArgb(255, 0, 255, 0));
 	return recorder.Finish();
+}
+
+static async Task RunTransformedHostBackdropSmoke(
+	ProGpuDrawingFactory factory)
+{
+	using var effect = factory.CreateEffectFilter(
+		new BlurEffectNode(new SourceInput(), 6f, true),
+		new Rect(0, 0, 48, 48)) ??
+		throw new InvalidOperationException("The ProGPU backend rejected a transformed host-backdrop blur graph.");
+	using var texture = factory.RenderOffscreen(64, 64, drawing =>
+	{
+		drawing.DrawRect(new Rect(0, 0, 32, 64), Color.FromArgb(255, 255, 0, 0));
+		drawing.DrawRect(new Rect(32, 0, 32, 64), Color.FromArgb(255, 0, 0, 255));
+		var restoreCount = drawing.Save();
+		drawing.Translate(8, 8);
+		drawing.ClipRect(new Rect(0, 0, 48, 48));
+		drawing.DrawEffectBackdrop(effect, 1f);
+		drawing.RestoreToCount(restoreCount);
+	});
+	var pixels = new byte[64 * 64 * 4];
+	(await factory.SnapshotAsync(texture)).CopyPixels(pixels);
+	var transformedBoundary = Pixel(pixels, 32, 52);
+	if (transformedBoundary[2] is < 24 or > 224 ||
+		transformedBoundary[0] is < 24 or > 224)
+	{
+		throw new InvalidOperationException(
+			$"A transformed host backdrop lost its placement: boundary={Convert.ToHexString(transformedBoundary)}.");
+	}
 }
 
 static unsafe void RunStablePresentCacheSmoke(IWebGpuDeviceContext device, ProGpuDrawingFactory factory)

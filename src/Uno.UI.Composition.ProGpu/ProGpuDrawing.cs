@@ -809,7 +809,7 @@ internal class ProGpuDrawingSession : IDrawingSession
 			}
 			var originalOpacity = material.MaterialOpacity;
 			material.MaterialOpacity = originalOpacity * Math.Clamp(opacity, 0, 1);
-			Context.DrawBackdropMaterial(material, _clipBounds, transform: Matrix4x4.Identity);
+			Context.DrawBackdropMaterial(material, _clipBounds, transform: _matrix);
 			material.MaterialOpacity = originalOpacity;
 			return;
 		}

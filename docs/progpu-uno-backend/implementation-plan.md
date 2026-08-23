@@ -3,7 +3,7 @@
 ## Baselines
 
 - Uno base: immutable head of PR #24153.
-- ProGPU dependency: `5620e1a880d9b819be62b6e714ae79ebb57fab49`, based on
+- ProGPU dependency: `7b050a9c44decfb04c6bf2a6ff134dee84a58b17`, based on
   the latest observed `main` plus public dependency changes #125 and #126.
 - Primary validation platform: macOS arm64, .NET 10, Dawn/Metal.
 - Secondary compile/runtime lanes: Windows Dawn/D3D12, Linux

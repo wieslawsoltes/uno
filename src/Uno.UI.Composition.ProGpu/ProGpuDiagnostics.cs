@@ -199,6 +199,7 @@ public static class ProGpuDiagnostics
 			if (command.Type == RenderCommandType.DrawExtension && command.DataParam is BackdropMaterialParams backdrop)
 			{
 				output.Append(" extension=").Append(command.ExtensionId)
+					.Append(" rect=").Append(Rect(backdrop.Rect))
 					.Append(" backdropKind=").Append(backdrop.Kind)
 					.Append(" source=").Append(backdrop.Source)
 					.Append(" blur=").Append(backdrop.BlurRadius.ToString("F3", CultureInfo.InvariantCulture))
