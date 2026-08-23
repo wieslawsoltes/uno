@@ -18,8 +18,10 @@
 	<PropertyGroup>
 		<UnoDrawingBackendSkia Condition="'$(UnoDrawingBackendSkia)'==''">true</UnoDrawingBackendSkia>
 		<UnoDrawingBackendWebGpu Condition="'$(UnoDrawingBackendWebGpu)'==''">true</UnoDrawingBackendWebGpu>
+		<UnoDrawingBackendProGpu Condition="'$(UnoDrawingBackendProGpu)'==''">false</UnoDrawingBackendProGpu>
 		<DefineConstants Condition="'$(UnoDrawingBackendSkia)'=='true'">$(DefineConstants);UNO_DRAWING_SKIA</DefineConstants>
 		<DefineConstants Condition="'$(UnoDrawingBackendWebGpu)'=='true'">$(DefineConstants);UNO_DRAWING_WEBGPU</DefineConstants>
+		<DefineConstants Condition="'$(UnoDrawingBackendProGpu)'=='true'">$(DefineConstants);UNO_DRAWING_PROGPU</DefineConstants>
 	</PropertyGroup>
 
 	<PropertyGroup>
@@ -98,11 +100,25 @@
 		<ProjectReference Include="..\..\Uno.UI.Composition.Managed\Uno.UI.Composition.Managed.csproj" />
 		<ProjectReference Include="..\..\Uno.UI.Composition.Skia\Uno.UI.Composition.SkiaBackend.csproj" Condition="'$(UnoDrawingBackendSkia)'=='true'" />
 		<ProjectReference Include="..\..\Uno.UI.Composition.WebGpu\Uno.UI.Composition.WebGpu.csproj" Condition="'$(UnoDrawingBackendWebGpu)'=='true'" />
+		<ProjectReference Include="..\..\Uno.UI.Composition.ProGpu\Uno.UI.Composition.ProGpu.csproj" Condition="'$(UnoDrawingBackendProGpu)'=='true'" AdditionalProperties="ProGPUUseWinRTContracts=false" />
 		<ProjectReference Include="..\SamplesApp.Skia\SamplesApp.Skia.csproj" />
 		<ProjectReference Include="..\..\AddIns\Uno.UI.MediaPlayer.Skia.X11\Uno.UI.MediaPlayer.Skia.X11.csproj" />
 		<ProjectReference Include="..\..\AddIns\Uno.UI.MediaPlayer.Skia.Win32\Uno.UI.MediaPlayer.Skia.Win32.csproj" />
 		<ProjectReference Include="..\..\AddIns\Uno.UI.WebView.Skia.X11\Uno.UI.WebView.Skia.X11.csproj" />
 	</ItemGroup>
+
+	<!-- Keep a stale/incremental restore graph safe as well: if the optional compatibility
+	     projection is present, it must never enter the global alias beside Uno's contracts. -->
+	<Target Name="AliasProGpuCompatibilityProjection" AfterTargets="ResolveAssemblyReferences">
+		<ItemGroup>
+			<ReferencePath Update="@(ReferencePath)" Condition="'%(FileName)'=='ProGPU.WinRT'">
+				<Aliases>progpuwinrt</Aliases>
+			</ReferencePath>
+			<ReferencePathWithRefAssemblies Update="@(ReferencePathWithRefAssemblies)" Condition="'%(FileName)'=='ProGPU.WinRT'">
+				<Aliases>progpuwinrt</Aliases>
+			</ReferencePathWithRefAssemblies>
+		</ItemGroup>
+	</Target>
 
 	<ItemGroup>
 		<Compile Update="Program.cs" />

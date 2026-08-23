@@ -1,0 +1,191 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "benchmark-result.schema.json",
+  "title": "Uno drawing backend benchmark result v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "Schema",
+    "Backend",
+    "Scenario",
+    "Width",
+    "Height",
+    "Warmups",
+    "Total",
+    "CpuFrame",
+    "GpuCompletionWait",
+    "Batched",
+    "ProGpu",
+    "SemanticStateSha256",
+    "Pixels",
+    "UnsupportedOperations",
+    "Environment"
+  ],
+  "properties": {
+    "Schema": { "const": "uno-drawing-backend-benchmark/v2" },
+    "Backend": { "enum": ["progpu", "webgpu", "skia"] },
+    "Scenario": { "enum": ["cached", "sparse", "text", "paths", "images"] },
+    "Width": { "type": "integer", "minimum": 1 },
+    "Height": { "type": "integer", "minimum": 1 },
+    "Warmups": { "type": "integer", "minimum": 0 },
+    "Total": { "$ref": "#/$defs/distribution" },
+    "CpuFrame": { "$ref": "#/$defs/distribution" },
+    "GpuCompletionWait": {
+      "oneOf": [
+        { "$ref": "#/$defs/distribution" },
+        { "type": "null" }
+      ]
+    },
+    "Batched": { "$ref": "#/$defs/batched" },
+    "ProGpu": {
+      "oneOf": [
+        { "$ref": "#/$defs/proGpuMetrics" },
+        { "type": "null" }
+      ]
+    },
+    "SemanticStateSha256": { "type": "string", "pattern": "^[0-9A-F]{64}$" },
+    "Pixels": { "$ref": "#/$defs/pixels" },
+    "UnsupportedOperations": { "type": "integer", "minimum": 0 },
+    "Environment": { "$ref": "#/$defs/environment" }
+  },
+  "$defs": {
+    "distribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["Samples", "Median", "P95", "P99", "Maximum", "Mad"],
+      "properties": {
+        "Samples": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "number", "minimum": 0 }
+        },
+        "Median": { "type": "number", "minimum": 0 },
+        "P95": { "type": "number", "minimum": 0 },
+        "P99": { "type": "number", "minimum": 0 },
+        "Maximum": { "type": "number", "minimum": 0 },
+        "Mad": { "type": "number", "minimum": 0 }
+      }
+    },
+    "batched": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "FramesPerBatch",
+        "BatchCount",
+        "CpuSubmitPerFrame",
+        "GpuCompletionPerBatch",
+        "TotalPerFrame"
+      ],
+      "properties": {
+        "FramesPerBatch": { "type": "integer", "minimum": 1 },
+        "BatchCount": { "type": "integer", "minimum": 1 },
+        "CpuSubmitPerFrame": { "$ref": "#/$defs/distribution" },
+        "GpuCompletionPerBatch": {
+          "oneOf": [
+            { "$ref": "#/$defs/distribution" },
+            { "type": "null" }
+          ]
+        },
+        "TotalPerFrame": { "$ref": "#/$defs/distribution" }
+      }
+    },
+    "proGpuMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "CpuRecord",
+        "CpuSubmit",
+        "CompositorFrame",
+        "SceneCompile",
+        "GpuUpload",
+        "RenderPass",
+        "UploadBytes",
+        "DrawCalls",
+        "VectorVertices",
+        "VectorIndices",
+        "TextVertices",
+        "SceneUploadBatches",
+        "SceneUploadCopies",
+        "MaskRenderPasses",
+        "MaskRenderDrawCalls",
+        "MaskTexturePeakDemand",
+        "RetainedCompositionPictureCount",
+        "RetainedCompositionPictureHits",
+        "RetainedCompositionPictureMisses",
+        "RetainedCompositionPictureCompilations",
+        "SceneCacheHits",
+        "SceneCacheMissReasons"
+      ],
+      "properties": {
+        "CpuRecord": { "$ref": "#/$defs/distribution" },
+        "CpuSubmit": { "$ref": "#/$defs/distribution" },
+        "CompositorFrame": { "$ref": "#/$defs/distribution" },
+        "SceneCompile": { "$ref": "#/$defs/distribution" },
+        "GpuUpload": { "$ref": "#/$defs/distribution" },
+        "RenderPass": { "$ref": "#/$defs/distribution" },
+        "UploadBytes": { "$ref": "#/$defs/nonNegativeIntegerArray" },
+        "DrawCalls": { "$ref": "#/$defs/nonNegativeIntegerArray" },
+        "VectorVertices": { "$ref": "#/$defs/nonNegativeIntegerArray" },
+        "VectorIndices": { "$ref": "#/$defs/nonNegativeIntegerArray" },
+        "TextVertices": { "$ref": "#/$defs/nonNegativeIntegerArray" },
+        "SceneUploadBatches": { "$ref": "#/$defs/nonNegativeIntegerArray" },
+        "SceneUploadCopies": { "$ref": "#/$defs/nonNegativeIntegerArray" },
+        "MaskRenderPasses": { "$ref": "#/$defs/nonNegativeIntegerArray" },
+        "MaskRenderDrawCalls": { "$ref": "#/$defs/nonNegativeIntegerArray" },
+        "MaskTexturePeakDemand": { "$ref": "#/$defs/nonNegativeIntegerArray" },
+        "RetainedCompositionPictureCount": { "$ref": "#/$defs/nonNegativeIntegerArray" },
+        "RetainedCompositionPictureHits": { "$ref": "#/$defs/nonNegativeIntegerArray" },
+        "RetainedCompositionPictureMisses": { "$ref": "#/$defs/nonNegativeIntegerArray" },
+        "RetainedCompositionPictureCompilations": { "$ref": "#/$defs/nonNegativeIntegerArray" },
+        "SceneCacheHits": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "boolean" }
+        },
+        "SceneCacheMissReasons": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "nonNegativeIntegerArray": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "integer", "minimum": 0 }
+    },
+    "pixels": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["Format", "ByteLength", "Sha256", "Path"],
+      "properties": {
+        "Format": { "const": "BGRA8888Premultiplied" },
+        "ByteLength": { "type": "integer", "minimum": 4 },
+        "Sha256": { "type": "string", "pattern": "^[0-9A-F]{64}$" },
+        "Path": { "type": ["string", "null"] }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "TimestampUtc",
+        "OperatingSystem",
+        "Architecture",
+        "Framework",
+        "LogicalProcessors",
+        "WebGpuBackends",
+        "WebGpuMsaa"
+      ],
+      "properties": {
+        "TimestampUtc": { "type": "string", "format": "date-time" },
+        "OperatingSystem": { "type": "string", "minLength": 1 },
+        "Architecture": { "type": "string", "minLength": 1 },
+        "Framework": { "type": "string", "minLength": 1 },
+        "LogicalProcessors": { "type": "integer", "minimum": 1 },
+        "WebGpuBackends": { "type": ["string", "null"] },
+        "WebGpuMsaa": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

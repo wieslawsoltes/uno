@@ -1,0 +1,4 @@
+[submodule "external/ProGPU"]
+	path = external/ProGPU
+	url = https://github.com/wieslawsoltes/ProGPU.git
+	branch = feat/optional-winrt-contracts

@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<TargetFrameworks>$(NetSkiaPreviousAndCurrent)</TargetFrameworks>
+		<Nullable>enable</Nullable>
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+		<AssemblyName>Uno.UI.Composition.ProGpu</AssemblyName>
+		<RootNamespace>Uno.UI.Composition.ProGpu</RootNamespace>
+		<UnoRuntimeIdentifier>Skia</UnoRuntimeIdentifier>
+		<UseCommonOverridePackage>true</UseCommonOverridePackage>
+		<CommonOverridePackageId>Uno.UI</CommonOverridePackageId>
+		<Description>ProGPU drawing, geometry, text, image, and SVG backend for Uno Platform.</Description>
+	</PropertyGroup>
+
+	<Import Project="../targetframework-override-noplatform.props" />
+	<Import Project="../Uno.UI.Composition.WebGpu/wgpu-native.targets" />
+
+	<ItemGroup>
+		<ProjectReference Include="..\Uno.UI\Uno.UI.csproj" />
+		<ProjectReference Include="..\Uno.Foundation\Uno.Foundation.Reference.csproj" Aliases="unofoundation" />
+		<ProjectReference Include="..\Uno.UWP\Uno.Reference.csproj" Aliases="unouwp" />
+		<ProjectReference Include="..\Uno.UI.Composition.Managed\Uno.UI.Composition.Managed.csproj" />
+		<ProjectReference Include="..\Uno.UI.Composition.WebGpu.Init\Uno.UI.Composition.WebGpu.Init.csproj" />
+		<ProjectReference Include="..\..\external\ProGPU\src\ProGPU.Backend\ProGPU.Backend.csproj" AdditionalProperties="ProGPUUseWinRTContracts=false" />
+		<ProjectReference Include="..\..\external\ProGPU\src\ProGPU.Vector\ProGPU.Vector.csproj" AdditionalProperties="ProGPUUseWinRTContracts=false" />
+		<ProjectReference Include="..\..\external\ProGPU\src\ProGPU.Text.Shaping\ProGPU.Text.Shaping.csproj" AdditionalProperties="ProGPUUseWinRTContracts=false" />
+		<ProjectReference Include="..\..\external\ProGPU\src\ProGPU.Text\ProGPU.Text.csproj" AdditionalProperties="ProGPUUseWinRTContracts=false" />
+		<ProjectReference Include="..\..\external\ProGPU\src\ProGPU.Scene\ProGPU.Scene.csproj" AdditionalProperties="ProGPUUseWinRTContracts=false" />
+	</ItemGroup>
+
+</Project>

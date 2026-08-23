@@ -1,0 +1,184 @@
+# ProGPU Uno renderer benchmark protocol
+
+## 1. Purpose
+
+The suite compares integration costs and rendering behavior, not merely API
+call speed. Each measured boundary performs real work, submits to a persistent
+GPU target, and waits for the same completion boundary. Correctness and feature
+parity are mandatory for a performance result to be publishable.
+
+## 2. Compared lanes
+
+Primary same-framework comparison:
+
+- Uno + Skia GPU backend;
+- Uno + built-in WebGPU backend;
+- Uno + ProGPU backend.
+
+Context comparisons:
+
+- ProGPU WinUI-compatible framework;
+- Avalonia + ProGPU backend;
+- C++ UI + ProGPU backend.
+
+Cross-framework numbers explain integration overhead but are not presented as
+renderer-only results. Each lane must consume the same semantic workload and
+produce the same final state.
+
+## 3. Standard workloads
+
+| ID | Workload | Primary question |
+|---|---|---|
+| startup-cold | process launch to first correct present | initialization, shader/pipeline/font discovery cost |
+| frame-first | first complete representative frame | cold compilation and upload cost |
+| frame-cached | unchanged retained scene | replay/submission floor |
+| mutate-sparse | one opaque fill changes | damage and incremental compilation cost |
+| text-hit | stable 128-run mixed-script/color-font scene | glyph/layout/atlas reuse |
+| text-miss | 127 runs change outside timed mutation boundary | shaping and first-use glyph cost |
+| paths | 1,000 mixed Bézier paths with stable geometry | tessellation/cache behavior |
+| images | retained image grid plus one changed upload | texture residency/upload cost |
+| effects | shadows, blur, color matrix, backdrop | pass graph and bandwidth cost |
+| controls-1000 | continuous 1,000-control Uno sample | end-to-end framework throughput |
+| scroll | virtualized list with deterministic scroll trace | mutation, layout, and render interaction |
+| memory-settled | repeated stable workload after GC/cache settling | managed/native/GPU resident footprint |
+
+The renderer scorecard baseline is 1280×720 logical pixels and includes 768
+opaque fills, 128 text runs, one color-font run, paths, images, clips, layers,
+and effects. Counts and random seeds are versioned in the artifact schema.
+
+## 4. Timing boundary
+
+For steady-frame scenarios the harness records three boundaries rather than
+collapsing dissimilar work into one number:
+
+1. CPU frame submit begins immediately before `BeginPresent` and ends when the
+   present session has recorded and submitted the frame.
+2. GPU completion wait begins after CPU submit and ends after
+   provider-confirmed completion.
+3. Total blocking frame is the sum of those boundaries.
+
+Scene mutation and requested final state are established outside all renderer
+timed boundaries. Pixel readback and artifact encoding happen after timing. A
+separate bounded-batch lane submits 60 frames and waits once; it reports CPU
+submit per frame, GPU completion per batch, and total throughput per frame.
+This lane intentionally measures queue saturation and is not normal
+swap-chain/v-sync pacing.
+
+Persistent devices, pipelines, and targets are used for warm scenarios. Cold
+scenarios use fresh processes. At least four full application warmups are
+untimed before warm sampling.
+
+## 5. Pairing and order
+
+Comparison runs alternate fresh-process order:
+
+```text
+Skia / Uno WebGPU / ProGPU
+ProGPU / Uno WebGPU / Skia
+```
+
+Context-framework comparisons use the same balanced forward/reverse ordering.
+No backend may reuse a previously presented image without issuing and
+completing the measured redraw.
+
+Default publication gate:
+
+- 8 or more independent process pairs;
+- 100 or more measured frames per steady scenario per process;
+- no thermal throttling or unrelated sustained CPU/GPU load;
+- identical adapter, power source/mode, display scale, target size, and build;
+- raw samples retained, not only aggregates.
+
+## 6. Reported statistics
+
+For each process and aggregated comparison report:
+
+- median, p95, p99, maximum, MAD, and missed-frame count;
+- ratio of renderer medians;
+- same-index paired median ratios and absolute differences;
+- deterministic bootstrap 95% interval for the paired median;
+- CPU utilization and allocation rate;
+- settled RSS/private bytes, managed heap, and GPU allocation;
+- draw/dispatch/pass counts, command bytes, upload bytes, atlas residency,
+  pipeline/cache hits and misses;
+- cold-start and first-present times separately.
+
+Averages may be included for continuity with existing Uno samples but are not
+the primary statistic.
+
+## 7. Correctness gate
+
+Every measured process captures the exact final state. The harness records:
+
+- unsupported operation count (must be zero for a publishable scene);
+- output dimensions, format, scale, and semantic-state hash;
+- exact-different pixels and different-pixel fraction;
+- per-channel MAE, maximum error, and PSNR;
+- optional masked regions only when the nondeterminism is documented before
+  the run.
+
+Non-text vector/image regions target byte-identical output when color-space and
+sampling rules match. Text comparisons report raster differences separately
+while requiring metric, cluster, fallback-family, and caret contracts to match.
+A faster incomplete or stale frame fails.
+
+## 8. Environment manifest
+
+Every artifact directory contains a machine-readable manifest with:
+
+```text
+Uno commit and dirty state
+ProGPU gitlink commit and dirty state
+.NET SDK/runtime and workload versions
+OS/build and architecture
+CPU, RAM, GPU, driver/API/backend
+display scale, target size, refresh rate
+power source/mode and thermal notes
+build configuration and AOT/JIT mode
+exact command line and environment variables
+tool versions and timestamps
+```
+
+## 9. Profiling workflow
+
+1. Use counters/traces to classify CPU, allocation/GC, lock, I/O, GPU, or
+   presentation ownership.
+2. Capture CPU samples with exact symbols and preserve the trace.
+3. Use allocation/VM tools for retained-memory questions.
+4. Use GPU tooling for pass count, occupancy, bandwidth, synchronization, and
+   CPU/GPU overlap. On macOS this includes Metal System Trace.
+5. Change one variable at a time and rerun the identical workload.
+6. Repeat enough times to distinguish a real effect from noise.
+
+## 10. Result language
+
+Reports explicitly separate:
+
+- code-review assessment;
+- compile validation;
+- runtime correctness validation;
+- performance evidence.
+
+Contended or thermally unstable runs are diagnostic evidence only. Absolute
+latency and memory claims require an idle-machine publication run. Raw artifacts
+remain the authority if a summary or interpretation changes.
+
+## 11. Current harness and artifacts
+
+`src/Uno.UI.Composition.Backend.Benchmarks` implements the first five steady
+micro-scenarios (`cached`, `sparse`, `text`, `paths`, and `images`) for ProGPU,
+Uno WebGPU, and Uno software Skia. Every frame explicitly clears the target;
+this prevents translucent antialiasing, paths, and images from accumulating
+across samples. GPU lanes use `wgpuDevicePoll(wait=true)` only in the separate
+completion boundary.
+
+The sparse workload is a retained 24-row tree containing 768 rectangles. One
+row changes per frame. This models immutable subtrees without turning every
+single analytic rectangle into a cache entry. ProGPU's cache admission rejects
+tiny pictures that are cheaper to compile directly.
+
+The v2 result contract is
+[benchmark-result.schema.json](benchmark-result.schema.json). It includes raw
+timing samples, stage-separated ProGPU metrics, retained-picture counters, a
+semantic-state hash, and a BGRA readback hash/path. Current results are in
+[performance-results-2026-08-23.md](performance-results-2026-08-23.md).

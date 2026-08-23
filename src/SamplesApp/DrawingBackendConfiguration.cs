@@ -9,7 +9,7 @@ namespace SamplesApp;
 /// <summary>
 /// Composition root for the drawing backend + content seams, shared by every SamplesApp head (linked into each,
 /// so its per-head build flags and gated backend references apply). Available backends are gated by build flags
-/// (UNO_DRAWING_SKIA / UNO_DRAWING_WEBGPU, from UnoDrawingBackend{Skia,WebGpu}); env vars pick among them and
+/// (UNO_DRAWING_SKIA / UNO_DRAWING_WEBGPU / UNO_DRAWING_PROGPU); env vars pick among them and
 /// toggle the individual content seams. A SkiaSharp-free build (UnoDrawingBackendSkia=false) registers the WebGPU
 /// renderer over the managed geometry engine and the managed font/image/SVG seams explicitly.
 /// </summary>
@@ -17,6 +17,13 @@ internal static class DrawingBackendConfiguration
 {
 	public static void Configure(IUnoPlatformHostBuilder builder)
 	{
+#if UNO_DRAWING_PROGPU
+		if (Environment.GetEnvironmentVariable("UNO_PROGPU") is "1" or "true" or "webgpu")
+		{
+			global::Uno.UI.Composition.ProGpu.ProGpuBackend.UseProGpuDrawingBackend(builder);
+			return;
+		}
+#endif
 #if UNO_DRAWING_WEBGPU
 		if (Environment.GetEnvironmentVariable("UNO_WEBGPU") is "neutral" or "1" or "true" or "swapchain")
 		{
@@ -41,7 +48,7 @@ internal static class DrawingBackendConfiguration
 #endif
 		}
 
-#if !UNO_DRAWING_SKIA
+#if !UNO_DRAWING_SKIA && !UNO_DRAWING_PROGPU
 		// SkiaSharp-free build: no Skia assembly supplies defaults, so the content seams must be registered
 		// explicitly here or the host builder throws at Build(). (Geometry is already set to the managed engine above.)
 		builder.FontProvider(new ManagedFontProvider(TryGetBundledDefaultFont()));
