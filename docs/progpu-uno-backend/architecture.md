@@ -195,10 +195,14 @@ clipped effect layer contributes that clip to the retained bounds. Together
 these rules preserve Uno composition masks outside a non-empty mask and when
 the mask picture is empty, without allocating a CPU bitmap or an arbitrary
 geometry mask.
+The conformance corpus exercises every one of Uno's 27 `BlendMode` values with
+opaque destination colour, overlapping translucent sources, rounded-edge
+coverage, and isolated restoration. ProGPU keeps the corpus in 28 final draws
+with no mask passes or per-mode CPU readback.
 Other neutral DAGs return `null` from `CreateEffectFilter`, activating Uno's
 documented recipe path. Calling an unsupported drawing operation records a
 named diagnostic and, by default, throws. No Skia fallback occurs. Arbitrary
-effect-DAG and broader Porter-Duff/non-separable blend conformance remain open.
+effect-DAG and alpha-zero/low-alpha blend edge conformance remain open.
 
 Uno's acrylic graph is lowered to one ProGPU material with blur, luminosity,
 tint, noise, and material opacity. ProGPU implements the Color and Luminosity

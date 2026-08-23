@@ -120,7 +120,7 @@ shadow-only source omission, gradient/non-uniform-rounded/border/path/stroke/
 line/image/color-filtered-image/nine-slice content-bound propagation, isolated
 and nested color-matrix layers, unfiltered clipped-clear isolation, DstIn
 composition masks, empty masks, six transparent-source Porter-Duff modes,
-isolated Multiply-layer overlap,
+isolated Multiply-layer overlap, all 27 Uno layer blend modes,
 rounded-outer/rectangular-hole clip restoration,
 and the conditional present/blit route. Its final
 Release run reports:
@@ -331,6 +331,20 @@ effects throughput benchmark.
   The real-device smoke passed at frame 12 with the non-empty mask, empty mask,
   six transparent-source modes, and post-restore drawing assertions enabled;
   all nine mask-layer JSON artifacts validate against benchmark schema v3.
+- Three fresh forced-redraw all-mode blend-corpus pairs cover all 27 Uno layer
+  modes with opaque destinations and overlapping translucent rounded sources.
+  ProGPU is 26.54× faster at median blocking total and 87.14× faster at
+  completed-batch throughput; all runs retain semantic hash
+  `AE571E0D...CF98A`, stable backend hashes, zero unsupported operations, exact
+  alpha, 28 ProGPU draws, and no mask passes. The inspected outputs measure
+  52.61 dB mean per-channel RGB PSNR and 0.999581 RGB SSIM against Skia.
+- The built-in WebGPU all-mode smoke completes but is not visually conforming:
+  non-matching alpha, 14.75 dB RGB PSNR, and 0.813692 RGB SSIM expose its
+  source-over fallback for most modes, so its timing remains diagnostic only.
+- Final serial Release builds completed the runtime and benchmark dependency
+  graphs with zero warnings and zero errors. The real-device smoke passed at
+  frame 12 with every Uno layer mode enabled, and all nine blend-corpus JSON
+  artifacts validate against benchmark schema v3.
 - Uno's built-in WebGPU lane completes 40-sample forced-redraw smokes for the
   stroke and material scenarios with zero unsupported operations. Its blocking medians are
   17.1597 ms for strokes and 8.6350 ms for materials; balanced eight-process
@@ -351,6 +365,5 @@ the exact values and interpretation boundaries.
 4. Run a systematic SamplesApp page/pixel sweep and a long-duration resize,
    DPI, occlusion, minimize/restore, and device-loss sequence.
 5. Run Windows/D3D12, Linux/Vulkan, browser, trimming, and NativeAOT lanes.
-6. Complete anisotropic/additive shadows, the remaining Porter-Duff and
-   non-separable blend corpus, and arbitrary color-filter/effect DAG layer
-   isolation.
+6. Complete anisotropic/additive shadows, alpha-zero/low-alpha blend edge
+   cases, and arbitrary color-filter/effect DAG layer isolation.

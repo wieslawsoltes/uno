@@ -98,6 +98,7 @@ await RunNestedEffectLayerBoundsSmoke(factory);
 await RunEffectPrimitiveBoundsSmoke(factory, geometryFactory);
 await RunColorMatrixLayerSmoke(factory);
 await RunBlendModeLayerSmoke(factory);
+await RunAllBlendModesLayerSmoke(factory);
 await RunUnfilteredLayerSmoke(factory);
 await RunDestinationInLayerSmoke(factory);
 await RunTransparentSourceBlendCoverageSmoke(factory);
@@ -201,6 +202,49 @@ static async Task RunBlendModeLayerSmoke(ProGpuDrawingFactory factory)
 	{
 		throw new InvalidOperationException(
 			$"Blend-mode layer was not isolated/restored before compositing: outside={Convert.ToHexString(outside)}, redOnly={Convert.ToHexString(redOnly)}, overlap={Convert.ToHexString(overlap)}, following={Convert.ToHexString(followingContent)}.");
+	}
+}
+
+static async Task RunAllBlendModesLayerSmoke(ProGpuDrawingFactory factory)
+{
+	const int width = 192;
+	const int height = 96;
+	const int columns = 9;
+	var blendModes = Enum.GetValues<BlendMode>();
+	using var texture = factory.RenderOffscreen(width, height, drawing =>
+	{
+		drawing.Clear(Color.FromArgb(255, 8, 12, 20));
+		for (var i = 0; i < blendModes.Length; i++)
+		{
+			var left = (i % columns) * 21;
+			var top = (i / columns) * 31;
+			var tile = new Rect(left, top, 20, 30);
+			drawing.SaveLayer();
+			drawing.ClipRect(tile);
+			drawing.Clear(Color.FromArgb(0, 0, 0, 0));
+			drawing.DrawRect(
+				tile,
+				Color.FromArgb(255, (byte)(45 + (i * 17) % 155), (byte)(55 + (i * 29) % 145), (byte)(65 + (i * 37) % 135)),
+				true);
+			drawing.SaveLayer(blendModes[i], antialias: true);
+			drawing.DrawRoundedRect(new Rect(left + 2, top + 2, 13, 19), new Vector4(3), Color.FromArgb(205, 235, 48, 72), true);
+			drawing.DrawRoundedRect(new Rect(left + 7, top + 9, 11, 18), new Vector4(4), Color.FromArgb(165, 32, 210, 238), true);
+			drawing.Restore();
+			drawing.Restore();
+		}
+	});
+	var pixels = new byte[width * height * 4];
+	(await factory.SnapshotAsync(texture)).CopyPixels(pixels);
+	for (var i = 0; i < blendModes.Length; i++)
+	{
+		var x = (i % columns) * 21 + 10;
+		var y = (i / columns) * 31 + 15;
+		var offset = (y * width + x) * 4;
+		if (pixels[offset + 3] < 245)
+		{
+			throw new InvalidOperationException(
+				$"Blend-mode corpus did not restore opaque output for {blendModes[i]}: pixel={Convert.ToHexString(pixels.AsSpan(offset, 4))}.");
+		}
 	}
 }
 

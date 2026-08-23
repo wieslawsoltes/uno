@@ -43,6 +43,7 @@ produce the same final state.
 | isolation-layers | one unfiltered source-over layer containing a clipped transparent clear and 1,536 overlapping opaque primitives over gray | destination isolation, clear containment, restoration, and retained effect-surface reuse |
 | mask-layers | 768 colored source cells and 768 smaller rounded masks inside nested source-over/DstIn layers | transparent-source destination coverage, composition-mask fidelity, and nested effect-surface reuse |
 | blend-layers | one retained Multiply layer containing 1,536 opaque overlapping primitives over a gray destination | once-per-layer composition versus incorrect per-primitive blending |
+| blend-corpus | all 27 Uno layer blend modes, each with an opaque destination and two overlapping translucent rounded sources | Porter-Duff, separable, and non-separable mode fidelity plus retained multi-layer throughput |
 | images | retained image grid plus one changed upload | texture residency/upload cost |
 | effects | shadows, blur, color matrix, backdrop | pass graph and bandwidth cost |
 | controls-1000 | continuous 1,000-control Uno sample | end-to-end framework throughput |
@@ -172,11 +173,11 @@ remain the authority if a summary or interpretation changes.
 
 ## 11. Current harness and artifacts
 
-`src/Uno.UI.Composition.Backend.Benchmarks` implements thirteen steady
+`src/Uno.UI.Composition.Backend.Benchmarks` implements fourteen steady
 micro-scenarios (`cached`, `sparse`, `text`, `paths`, `strokes`, `materials`,
-`layers`, `isolation-layers`, `mask-layers`, `blend-layers`, `images`, `clips`,
-and `effects`) for ProGPU, Uno WebGPU where supported, and Uno software Skia. Every
-frame explicitly clears the target; this prevents translucent antialiasing,
+`layers`, `isolation-layers`, `mask-layers`, `blend-layers`, `blend-corpus`,
+`images`, `clips`, and `effects`) for ProGPU, Uno WebGPU where supported, and
+Uno software Skia. Every frame explicitly clears the target; this prevents translucent antialiasing,
 paths, images, and effects from accumulating across samples. GPU lanes use
 `wgpuDevicePoll(wait=true)` only in the separate completion boundary.
 
@@ -221,6 +222,13 @@ requires ordinary source-over composition inside the isolated surface followed
 by exactly one Multiply operation against the destination. Applying Multiply
 to each primitive separately produces black overlap pixels and fails the
 readback gate even if timing and unsupported-operation counts look healthy.
+
+The `blend-corpus` workload places each of Uno's 27 layer blend modes in its
+own clipped isolation tile. Every tile starts with an opaque destination and
+composites two overlapping translucent rounded sources once at layer restore.
+The final readback therefore catches missing mode mappings, wrong
+premultiplication, destination-sampling mistakes, cross-tile contamination,
+and state-restoration failures in one deterministic scene.
 
 The sparse workload is a retained 24-row tree containing 768 rectangles. One
 row changes per frame. This models immutable subtrees without turning every

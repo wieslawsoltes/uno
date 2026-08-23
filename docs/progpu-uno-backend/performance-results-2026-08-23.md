@@ -7,7 +7,8 @@ the Uno ProGPU and software-Skia drawing backends. It covers the seven primary
 qualification scenarios; later sections add retained-output, native-stroke,
 gradient-material, color-matrix-layer, unfiltered-isolation-layer,
 destination-in-mask-layer, and blend-mode-layer follow-ups. Every process
-renders the same semantic state,
+renders the same semantic state; a later section adds the all-27-mode blend
+corpus. Every process
 reports zero unsupported operations, reads back the final target, and preserves
 its raw timing distribution.
 
@@ -573,6 +574,41 @@ blocking median and 1.077125 ms completed-batch median are diagnostic only.
 Raw JSON, BGRA readbacks, PNGs, stdout, and the visually inspected outputs are
 under `src/artifacts/performance/2026-08-23-mask-layers/`.
 
+## All-mode blend corpus follow-up
+
+The `blend-corpus` scene exercises every one of Uno's 27 `BlendMode` values in
+a separate clipped isolation tile. Each tile has an opaque, mode-specific
+destination and two overlapping translucent rounded sources. This covers all
+Porter-Duff, separable, and non-separable modes exposed by the drawing seam and
+forces destination sampling, source premultiplication, effect restoration, and
+cross-tile isolation through one deterministic retained scene.
+
+Three alternating fresh-process pairs used six warmups, 200 blocking samples,
+and seven 60-frame batches:
+
+| Boundary | ProGPU process-median | Skia process-median | speedup | paired range |
+|---|---:|---:|---:|---:|
+| blocking total | 0.557400 ms | 14.795100 ms | 26.54× | 26.54×–26.93× |
+| CPU frame | 0.141200 ms | 14.795100 ms | 104.78× | 103.70×–107.14× |
+| completed batch/frame | 0.169973 ms | 14.811122 ms | 87.14× | 86.78×–87.58× |
+| batched CPU/frame | 0.164473 ms | 14.811120 ms | 90.05× | 89.49×–91.34× |
+
+Every process reports semantic hash `AE571E0D...CF98A`, stable ProGPU pixel
+hash `0929F8EB...B779`, stable Skia pixel hash `824FC7F1...58A9`, and zero
+unsupported operations. ProGPU emits 28 final draws with 3,072 vector vertices
+and no mask passes. Original-resolution visual inspection finds no structural
+mismatch; the complete image has exact alpha, 0.072627 RGB mean absolute error,
+52.61 dB mean per-channel RGB PSNR, and 0.999581 RGB SSIM against Skia.
+
+The built-in WebGPU compatibility smoke completes with the same semantic hash
+and zero unsupported operations but maps most modes to source-over. Its output
+has non-matching alpha, 26.606 RGB mean absolute error, 14.75 dB mean
+per-channel RGB PSNR, and 0.813692 RGB SSIM against Skia. Its 6.1219 ms
+blocking median and 3.089835 ms completed-batch median are diagnostic only and
+must not be interpreted as a conforming comparison. Raw JSON, BGRA readbacks,
+PNGs, and the visually inspected outputs are under
+`src/artifacts/performance/2026-08-23-blend-corpus/`.
+
 ## Reproduction
 
 Build once with serial MSBuild:
@@ -615,7 +651,8 @@ dotnet Uno.UI.Composition.Backend.Benchmarks/bin/Release/net10.0/Uno.UI.Composit
 
 Repeat with `--backend skia`. Valid scenarios are `cached`, `sparse`, `text`,
 `paths`, `strokes`, `materials`, `layers`, `isolation-layers`, `mask-layers`,
-`blend-layers`, `images`, `clips`, and `effects`. Add `--force-redraw` to
+`blend-layers`, `blend-corpus`, `images`, `clips`, and `effects`. Add
+`--force-redraw` to
 alternate target wrappers and disable retained populated-target reuse. Raw
 local artifacts for this run are under
 `src/artifacts/performance/2026-08-23-retained-eligibility/`; the
