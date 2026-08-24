@@ -1,12 +1,16 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "benchmark-result.schema.json",
-  "title": "Uno drawing backend benchmark result v3",
+  "title": "Uno drawing backend benchmark result v4",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "Schema",
     "Backend",
+    "ExecutionMode",
+    "GraphicsApi",
+    "AdapterName",
+    "AdapterType",
     "Scenario",
     "ForceRedraw",
     "Width",
@@ -23,8 +27,12 @@
     "Environment"
   ],
   "properties": {
-    "Schema": { "const": "uno-drawing-backend-benchmark/v3" },
-    "Backend": { "enum": ["progpu", "webgpu", "skia"] },
+    "Schema": { "const": "uno-drawing-backend-benchmark/v4" },
+    "Backend": { "enum": ["progpu", "webgpu", "skia", "skia-metal"] },
+    "ExecutionMode": { "enum": ["cpu", "gpu"] },
+    "GraphicsApi": { "type": "string", "minLength": 1 },
+    "AdapterName": { "type": ["string", "null"] },
+    "AdapterType": { "type": ["string", "null"] },
     "Scenario": { "enum": ["cached", "sparse", "text", "paths", "strokes", "materials", "layers", "isolation-layers", "mask-layers", "blend-layers", "blend-corpus", "images", "clips", "shadows", "effects"] },
     "ForceRedraw": { "type": "boolean" },
     "Width": { "type": "integer", "minimum": 1 },
@@ -116,6 +124,9 @@
         "RetainedCompositionPictureMisses",
         "RetainedCompositionPictureCompilations",
         "SceneCacheHits",
+        "RenderBundleCacheHits",
+        "RenderBundlesRecorded",
+        "RenderBundleDrawCalls",
         "SceneCacheMissReasons",
         "TargetContentReused"
       ],
@@ -145,6 +156,17 @@
           "minItems": 1,
           "items": { "type": "boolean" }
         },
+        "RenderBundleCacheHits": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "boolean" }
+        },
+        "RenderBundlesRecorded": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "boolean" }
+        },
+        "RenderBundleDrawCalls": { "$ref": "#/$defs/nonNegativeIntegerArray" },
         "SceneCacheMissReasons": {
           "type": "array",
           "minItems": 1,

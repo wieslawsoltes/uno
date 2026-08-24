@@ -7,6 +7,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Numerics;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using ProGPU.Backend;
@@ -65,6 +66,7 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 			(Device*)device.Device,
 			(Queue*)device.Queue,
 			_format);
+		ProGpuDiagnostics.PublishGraphicsIdentity(GetGraphicsIdentity(device.Adapter));
 		var compositorOptions = options.Compositor with
 		{
 			PrimarySampleCount = device.SampleCount is 4 ? 4u : 1u,
@@ -73,6 +75,35 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 		_defaultClearColor = _compositor.ClearColor;
 		_ = ProGpuDiagnostics.NextDeviceGeneration();
 	}
+
+	private static ProGpuGraphicsIdentity GetGraphicsIdentity(nint adapter)
+	{
+		var info = new N.WGPUAdapterInfo();
+		if (adapter == 0 || N.WGPU.wgpuAdapterGetInfo(adapter, &info) != N.WGPUStatus.Success)
+		{
+			return new ProGpuGraphicsIdentity("WebGPU", null, null);
+		}
+
+		try
+		{
+			var api = info.BackendType == N.WGPUBackendType.Undefined
+				? "WebGPU"
+				: $"WebGPU ({info.BackendType})";
+			return new ProGpuGraphicsIdentity(
+				api,
+				DecodeString(info.Device) ?? DecodeString(info.Description),
+				info.AdapterType.ToString());
+		}
+		finally
+		{
+			N.WGPU.wgpuAdapterInfoFreeMembers(info);
+		}
+	}
+
+	private static string? DecodeString(N.WGPUStringView value) =>
+		value.Data == 0 || value.Length == 0
+			? null
+			: Encoding.UTF8.GetString(new ReadOnlySpan<byte>((void*)value.Data, checked((int)value.Length)));
 
 	internal WgpuContext Context => _context;
 	internal ProGpuBackendOptions Options => _options;
@@ -185,6 +216,9 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 			RetainedCompositionPictureMisses = metrics.RetainedCompositionPictureMisses,
 			RetainedCompositionPictureCompilations = metrics.RetainedCompositionPictureCompilations,
 			SceneCacheHit = metrics.SceneCacheHit,
+			RenderBundleCacheHit = metrics.RenderBundleCacheHit,
+			RenderBundleRecorded = metrics.RenderBundleRecorded,
+			RenderBundleDrawCallCount = metrics.RenderBundleDrawCallCount,
 			SceneCacheMissReason = metrics.SceneCacheMissReason,
 			TargetContentReused = targetContentReused,
 		});

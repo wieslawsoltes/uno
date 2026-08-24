@@ -1,5 +1,84 @@
 # Correctness-gated renderer results — 2026-08-23
 
+## Explicit CPU/GPU identity and retained-bundle follow-up — 2026-08-24
+
+The v4 artifact contract removes backend ambiguity. Every result now records
+`ExecutionMode`, `GraphicsApi`, `AdapterName`, and `AdapterType` in addition to
+the requested backend. A three-lane physical-device smoke on the same Apple M3
+Pro produced:
+
+| Requested lane | Execution mode | Graphics API | Adapter | synchronized total | completed batch/frame |
+|---|---|---|---|---:|---:|
+| `skia` | CPU | Skia CPU raster | CPU | 2.7110 ms | 2.698153 ms |
+| `skia-metal` | GPU | Metal | Apple M3 Pro | 0.9205 ms | 0.458680 ms |
+| `progpu` | GPU | WebGPU (Metal) | Apple M3 Pro, integrated GPU | 0.5871 ms | 0.232093 ms |
+
+This short `shadows` smoke is a backend-identity and integration check, not the
+publication distribution. It proves that `skia-metal` is a real Skia GPU path
+and that ProGPU uses WebGPU over Metal on the same physical adapter. The
+`CpuFrame` metric found in GPU results is CPU-side recording/submission work;
+it does not mean that the renderer is using CPU rasterization.
+
+The qualified retained-bundle matrix uses three alternating fresh-process
+pairs per scenario, forced redraw, 4 warmups, 20 synchronized samples, and five
+30-frame completed batches: 90 fresh processes across 15 scenarios. All 45
+Skia artifacts request `skia-metal`; all 45 ProGPU artifacts request `progpu`
+with `UNO_WEBGPU_BACKENDS=metal`. Both lanes have non-null GPU completion
+waits. The v4 identity smoke above independently validates the API and adapter
+labels that the earlier v3 matrix did not yet serialize.
+
+| Scenario | ProGPU synchronized total | Skia/Metal synchronized total | speedup | ProGPU completed batch/frame | Skia/Metal completed batch/frame | speedup |
+|---|---:|---:|---:|---:|---:|---:|
+| cached | 0.3404 ms | 0.5054 ms | 1.48x | 0.068307 ms | 0.252060 ms | 3.69x |
+| sparse | 0.5335 ms | 0.5537 ms | 1.04x | 0.125660 ms | 0.251525 ms | 2.00x |
+| text | 0.4106 ms | 0.9672 ms | 2.36x | 0.082320 ms | 0.453172 ms | 5.51x |
+| paths | 0.6740 ms | 1.1650 ms | 1.73x | 0.109572 ms | 0.674745 ms | 6.16x |
+| strokes | 0.7262 ms | 2.8366 ms | 3.91x | 0.378853 ms | 1.858098 ms | 4.90x |
+| materials | 0.4617 ms | 1.6737 ms | 3.63x | 0.203707 ms | 1.181140 ms | 5.80x |
+| layers | 0.4878 ms | 1.4063 ms | 2.88x | 0.112095 ms | 0.815125 ms | 7.27x |
+| isolation layers | 0.6625 ms | 1.2954 ms | 1.96x | 0.107025 ms | 0.812467 ms | 7.59x |
+| mask layers | 0.6575 ms | 1.2882 ms | 1.96x | 0.106665 ms | 0.762038 ms | 7.14x |
+| blend layers | 0.6547 ms | 1.3280 ms | 2.03x | 0.105332 ms | 0.830332 ms | 7.88x |
+| blend corpus | 0.5843 ms | 4.0491 ms | 6.93x | 0.081960 ms | 2.601528 ms | 31.74x |
+| images | 0.5902 ms | 0.6317 ms | 1.07x | 0.084515 ms | 0.356667 ms | 4.22x |
+| clips | 0.9318 ms | 2.2611 ms | 2.43x | 0.228393 ms | 1.460288 ms | 6.39x |
+| shadows | 0.5973 ms | 0.7667 ms | 1.28x | 0.220312 ms | 0.454437 ms | 2.06x |
+| effects | 2.6812 ms | 5.7333 ms | 2.14x | 1.124045 ms | 3.873300 ms | 3.45x |
+
+ProGPU wins both qualified boundaries in all 15 scenarios. Retained render
+bundles are used only when the compiled scene and captured-resource generation
+are immutable. `sparse`, `layers`, `clips`, and `effects` deliberately fall
+back to ordinary pass encoding and still win both boundaries. Pair-one ProGPU
+readbacks are byte-identical to the pre-bundle ProGPU build, proving that the
+optimization did not change its pixels.
+
+All per-backend pixel hashes and semantic hashes are stable across the three
+process pairs, and every artifact reports zero unsupported operations. Visual
+comparison against Skia/Metal is structurally matched in every scenario. RGB
+SSIM ranges from 0.985039 to 1.0 for the ordinary geometry/text/layer/shadow
+workloads; the effects scene is 0.870606 because the two renderers use
+different blur kernels, with the visible difference localized to blur and grid
+edges. The inspected contact sheet is
+`src/artifacts/performance/2026-08-24-render-bundle-full-matrix/visual-v2/contact-sheet.png`.
+
+Matched Metal System Trace captures also confirm real GPU command submission
+for both lanes. The bounded ProGPU trace completed in 1.955290 seconds with
+2,548 submission rows, 3,344 completion rows, no command-buffer errors, and a
+startup-inclusive peak Metal allocation counter of about 25.4 MiB. The
+Skia/Metal trace completed in 1.697429 seconds with 516 submission rows, 1,212
+completion rows, no errors, and a peak near 7.84 MiB. These whole-process
+Instruments values are not steady-frame allocation measurements. They expose
+additional wgpu-native command-buffer/resource activity as the next
+optimization target while the harness's timed ProGPU frame boundaries remain
+lower.
+
+Raw matrix artifacts are under
+`src/artifacts/performance/2026-08-24-render-bundle-full-matrix/`; explicit v4
+identity artifacts are under
+`src/artifacts/performance/2026-08-24-skia-gpu-qualified-smoke/`; matched trace
+exports are under
+`src/artifacts/performance/2026-08-24-skia-progpu-metal-qualified-profiles/`.
+
 ## GPU-to-GPU Metal qualification
 
 The current like-for-like GPU comparison is three alternating fresh-process

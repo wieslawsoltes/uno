@@ -277,11 +277,14 @@ Because the reference Skia path is CPU-intensive, its qualification shape uses
 40 blocking frames plus three batches of 20 frames: 100 measured frames per
 fresh process.
 
-The v3 result contract is
+The v4 result contract is
 [benchmark-result.schema.json](benchmark-result.schema.json). It includes raw
 timing samples, stage-separated ProGPU metrics, retained-picture counters, a
-forced-redraw state, retained-target-reuse samples, a semantic-state hash, and
-a BGRA readback hash/path. Current results are in
+forced-redraw state, retained-target-reuse samples, render-bundle metrics, a
+semantic-state hash, and a BGRA readback hash/path. It also records the
+execution mode, graphics API, adapter name, and adapter type. A publishable GPU
+comparison must report `ExecutionMode=gpu` in both artifacts and must name the
+expected API and physical adapter. Current results are in
 [performance-results-2026-08-23.md](performance-results-2026-08-23.md).
 
 ## 12. Reproduce the strict Metal comparison
@@ -294,6 +297,11 @@ dotnet build \
 
 BENCHMARK_DLL="$PWD/Uno.UI.Composition.Backend.Benchmarks/bin/Release/net10.0/Uno.UI.Composition.Backend.Benchmarks.dll"
 
+# Optional software-raster control. This is intentionally not the GPU lane.
+dotnet "$BENCHMARK_DLL" --backend skia --scenario shadows \
+  --force-redraw --warmups 6 --samples 100 --batch-size 60 --batches 7 \
+  --output artifacts/skia-cpu-shadows.json
+
 dotnet "$BENCHMARK_DLL" --backend skia-metal --scenario shadows \
   --force-redraw --warmups 6 --samples 100 --batch-size 60 --batches 7 \
   --output artifacts/skia-metal-shadows.json
@@ -302,14 +310,21 @@ UNO_WEBGPU_BACKENDS=metal dotnet "$BENCHMARK_DLL" \
   --backend progpu --scenario shadows \
   --force-redraw --warmups 6 --samples 100 --batch-size 60 --batches 7 \
   --output artifacts/progpu-metal-shadows.json
+
+jq '{Backend,ExecutionMode,GraphicsApi,AdapterName,AdapterType}' \
+  artifacts/skia-cpu-shadows.json \
+  artifacts/skia-metal-shadows.json \
+  artifacts/progpu-metal-shadows.json
 ```
 
 Run each backend in a fresh process, alternate order across pairs, and compare
 `Batched.TotalPerFrame.Median` for completed bounded throughput plus
 `Total.Median` for synchronized single-frame latency. Confirm the exact
-`Backend` value, `ForceRedraw=true`, matching semantic state, zero unsupported
-operations, and a valid final readback before interpreting timings. Preserve
-the device-initialization log with the artifact; an explicit
+`Backend` value, `ExecutionMode=gpu`, expected `GraphicsApi`, matching
+`AdapterName`, `ForceRedraw=true`, matching semantic state, zero unsupported
+operations, and a valid final readback before interpreting timings. `CpuFrame`
+is the CPU recording/submission component of either GPU lane; it is not a CPU
+raster label. Preserve the device-initialization log with the artifact; an explicit
 `UNO_WEBGPU_BACKENDS` selection is also recorded in `Environment` when set.
 The `skia-metal` lane aborts during setup if its native Metal
 device/queue/texture or Skia `GRContext` is missing.

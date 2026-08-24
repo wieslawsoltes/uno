@@ -4,8 +4,8 @@
 
 - Uno base: immutable head of PR #24153.
 - ProGPU dependency: merged `main` commit
-  `e0e38c4e0840ff6477bc3a3faf045e8e7582493b`, including public dependency
-  changes #125 through #136.
+  `93ca8d1170a8911cf5b4f94b6c380663cea48f9f`, including public dependency
+  changes #125 through #137.
 - Primary validation platform: macOS arm64, .NET 10, Dawn/Metal.
 - Secondary compile/runtime lanes: Windows Dawn/D3D12, Linux
   wgpu-native/Vulkan, and browser WebGPU when the host callback ABI is proven.
@@ -16,14 +16,14 @@ build configuration, exact commands, and raw artifact paths.
 
 ## Current execution status
 
-| Phase | Status on 2026-08-23 | Evidence / remaining work |
+| Phase | Status on 2026-08-24 | Evidence / remaining work |
 |---|---|---|
 | 0 — analysis | complete | architecture, capability, ownership, comparison, and benchmark documents |
 | 1 — dependency/device | implemented on macOS | pinned submodule, modern ABI adapter, external-device initialization, borrowed lifetime |
 | 2 — drawing core | working vertical slice | real-device smoke, SamplesApp present, analytic clip-hole and broad effect-bound corpus; arbitrary effect DAG isolation remains |
 | 3 — content stack | implemented vertical slice | ProGPU geometry/font/shaping/direct glyph path plus neutral managed image/SVG adapters; full corpus remains |
 | 4 — application correctness | partially qualified | SamplesApp loads and presents 1,413-sample catalog; systematic sample/pixel sweep remains |
-| 5 — benchmarks | software and macOS GPU pairs qualified | v3 stage timing, target readback, fifteen scenarios including analytic strokes, gradient materials, isolated color-matrix layers, unfiltered source-over isolation, destination-in composition masks, single-mode blend layers, a 27-mode blend corpus, and anisotropic/additive shadows; eight alternating ProGPU/software-Skia process pairs for the primary seven, focused follow-ups, and three alternating ProGPU/Metal versus Skia/Metal pairs across all fifteen scenarios with explicit GPU completion; the Uno built-in WebGPU promotion, startup/scrolling/memory scenarios, and cross-framework ports remain |
+| 5 — benchmarks | software and macOS GPU pairs qualified | v4 execution-mode/API/adapter identity, stage timing, target readback, fifteen scenarios including analytic strokes, gradient materials, isolated color-matrix layers, unfiltered source-over isolation, destination-in composition masks, single-mode blend layers, a 27-mode blend corpus, and anisotropic/additive shadows; eight alternating ProGPU/software-Skia process pairs for the primary seven, focused follow-ups, and three alternating ProGPU/Metal versus Skia/Metal pairs across all fifteen scenarios with explicit GPU completion; the Uno built-in WebGPU promotion, startup/scrolling/memory scenarios, and cross-framework ports remain |
 | 6 — hardening | open | Windows/Linux/browser, device loss, AOT/trimming, leak and long-running stress |
 
 ## Mandatory managed/native optimization gate

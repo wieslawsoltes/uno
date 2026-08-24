@@ -3,7 +3,8 @@
 Status: working macOS/Metal implementation and qualification branch,
 2026-08-23. The backend negotiates Uno's WebGPU host context, presents the
 SamplesApp through ProGPU, passes the focused real-device smoke test, and has a
-correctness-gated v3 benchmark matrix. A three-pair, fifteen-scenario
+correctness-gated v4 benchmark contract with explicit CPU/GPU, graphics API,
+and physical-adapter identity. A three-pair, fifteen-scenario
 GPU-to-GPU qualification now compares ProGPU/Metal with Uno's real Skia/Metal
 `GRContext` path and records separate CPU-submit and GPU-completion boundaries.
 A strict forced-redraw follow-up also disables populated-target reuse: ProGPU
@@ -31,7 +32,7 @@ Documents:
 - [Initial validation record](validation-2026-08-22.md)
 
 The implementation consumes ProGPU as a git submodule pinned to immutable
-`main` merge commit `e0e38c4e0840ff6477bc3a3faf045e8e7582493b`. Public
+`main` merge commit `93ca8d1170a8911cf5b4f94b6c380663cea48f9f`. Public
 dependency changes
 [#125](https://github.com/wieslawsoltes/ProGPU/pull/125),
 [#126](https://github.com/wieslawsoltes/ProGPU/pull/126),
@@ -43,8 +44,9 @@ dependency changes
 [#132](https://github.com/wieslawsoltes/ProGPU/pull/132),
 [#133](https://github.com/wieslawsoltes/ProGPU/pull/133),
 [#134](https://github.com/wieslawsoltes/ProGPU/pull/134),
-[#135](https://github.com/wieslawsoltes/ProGPU/pull/135), and
-[#136](https://github.com/wieslawsoltes/ProGPU/pull/136) are merged. Together
+[#135](https://github.com/wieslawsoltes/ProGPU/pull/135),
+[#136](https://github.com/wieslawsoltes/ProGPU/pull/136), and
+[#137](https://github.com/wieslawsoltes/ProGPU/pull/137) are merged. Together
 they provide optional WinRT contracts, analytic difference clips, bounded
 retained-picture compilation and eligibility caching, duplicate-stop gradient
 semantics, bounded queue cleanup, GPU-only HostBackdrop capture, translated
@@ -55,6 +57,9 @@ completion waits advance the bounded submission-drain accounting. Retained
 target stamps prevent unchanged output submission. Unfiltered source-over
 layers, destination-in masks, color matrices, and all 27 Uno layer blend modes
 can now isolate complete visual subtrees through retained GPU effect paths.
+Bounded completion polling, compatible texture-draw batching, and cached-scene
+render-bundle replay are implemented in both managed C# and native C++; the
+Dawn provider also records and replays the retained bundles on Metal.
 Independent shadow axes and additive composition are preserved, and managed
 and native C++ wgpu-native lifetime operations use equivalent process-wide
 synchronization domains.

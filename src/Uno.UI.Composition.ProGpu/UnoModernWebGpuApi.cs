@@ -17,7 +17,7 @@ namespace Uno.UI.Composition.ProGpu;
 /// the wgpu-native ABI owned by Uno. Opaque handles are borrowed unchanged;
 /// descriptor structs are never reinterpreted across ABI versions.
 /// </summary>
-internal sealed unsafe class UnoModernWebGpuApi : IWebGpuApi
+internal sealed unsafe class UnoModernWebGpuApi : IWebGpuApi, IWebGpuRenderBundleApi
 {
 	private const int MaxItems = 256;
 
@@ -397,6 +397,28 @@ internal sealed unsafe class UnoModernWebGpuApi : IWebGpuApi
 		return P<SW.RenderPassEncoder>(N.WGPU.wgpuCommandEncoderBeginRenderPass(H(encoder), &native));
 	}
 
+	public SW.RenderBundleEncoder* DeviceCreateRenderBundleEncoder(SW.Device* device, SW.RenderBundleEncoderDescriptor* descriptor)
+	{
+		ArgumentNullException.ThrowIfNull(descriptor);
+		var count = Count(descriptor->ColorFormatCount);
+		var formats = stackalloc N.WGPUTextureFormat[count];
+		for (var i = 0; i < count; i++)
+		{
+			formats[i] = E<SW.TextureFormat, N.WGPUTextureFormat>(descriptor->ColorFormats[i]);
+		}
+		var native = new N.WGPURenderBundleEncoderDescriptor
+		{
+			Label = StringView(descriptor->Label),
+			ColorFormatCount = descriptor->ColorFormatCount,
+			ColorFormats = formats,
+			DepthStencilFormat = E<SW.TextureFormat, N.WGPUTextureFormat>(descriptor->DepthStencilFormat),
+			SampleCount = descriptor->SampleCount,
+			DepthReadOnly = descriptor->DepthReadOnly,
+			StencilReadOnly = descriptor->StencilReadOnly,
+		};
+		return P<SW.RenderBundleEncoder>(N.WGPU.wgpuDeviceCreateRenderBundleEncoder(H(device), &native));
+	}
+
 	public void CommandEncoderCopyBufferToBuffer(SW.CommandEncoder* e, SilkBuffer* s, ulong so, SilkBuffer* d, ulong @do, ulong size) => N.WGPU.wgpuCommandEncoderCopyBufferToBuffer(H(e), H(s), so, H(d), @do, size);
 	public void CommandEncoderCopyBufferToTexture(SW.CommandEncoder* e, SW.ImageCopyBuffer* s, SW.ImageCopyTexture* d, SW.Extent3D* z) { var ns = CopyBuffer(*s); var nd = CopyTexture(*d); var nz = Extent(*z); N.WGPU.wgpuCommandEncoderCopyBufferToTexture(H(e), &ns, &nd, &nz); }
 	public void CommandEncoderCopyTextureToBuffer(SW.CommandEncoder* e, SW.ImageCopyTexture* s, SW.ImageCopyBuffer* d, SW.Extent3D* z) { var ns = CopyTexture(*s); var nd = CopyBuffer(*d); var nz = Extent(*z); N.WGPU.wgpuCommandEncoderCopyTextureToBuffer(H(e), &ns, &nd, &nz); }
@@ -417,6 +439,18 @@ internal sealed unsafe class UnoModernWebGpuApi : IWebGpuApi
 	public void RenderPassEncoderDraw(SW.RenderPassEncoder* p, uint v, uint i, uint fv, uint fi) => N.WGPU.wgpuRenderPassEncoderDraw(H(p), v, i, fv, fi);
 	public void RenderPassEncoderDrawIndexed(SW.RenderPassEncoder* p, uint i, uint c, uint f, int b, uint fi) => N.WGPU.wgpuRenderPassEncoderDrawIndexed(H(p), i, c, f, b, fi);
 	public void RenderPassEncoderEnd(SW.RenderPassEncoder* p) => N.WGPU.wgpuRenderPassEncoderEnd(H(p));
+	public void RenderBundleEncoderSetPipeline(SW.RenderBundleEncoder* e, SW.RenderPipeline* p) => N.WGPU.wgpuRenderBundleEncoderSetPipeline(H(e), H(p));
+	public void RenderBundleEncoderSetBindGroup(SW.RenderBundleEncoder* e, uint i, SW.BindGroup* g, nuint c, uint* o) => N.WGPU.wgpuRenderBundleEncoderSetBindGroup(H(e), i, H(g), c, o);
+	public void RenderBundleEncoderSetVertexBuffer(SW.RenderBundleEncoder* e, uint i, SilkBuffer* b, ulong o, ulong s) => N.WGPU.wgpuRenderBundleEncoderSetVertexBuffer(H(e), i, H(b), o, s);
+	public void RenderBundleEncoderSetIndexBuffer(SW.RenderBundleEncoder* e, SilkBuffer* b, SW.IndexFormat f, ulong o, ulong s) => N.WGPU.wgpuRenderBundleEncoderSetIndexBuffer(H(e), H(b), E<SW.IndexFormat, N.WGPUIndexFormat>(f), o, s);
+	public void RenderBundleEncoderDraw(SW.RenderBundleEncoder* e, uint v, uint i, uint fv, uint fi) => N.WGPU.wgpuRenderBundleEncoderDraw(H(e), v, i, fv, fi);
+	public void RenderBundleEncoderDrawIndexed(SW.RenderBundleEncoder* e, uint i, uint c, uint f, int b, uint fi) => N.WGPU.wgpuRenderBundleEncoderDrawIndexed(H(e), i, c, f, b, fi);
+	public SW.RenderBundle* RenderBundleEncoderFinish(SW.RenderBundleEncoder* e, SW.RenderBundleDescriptor* d)
+	{
+		var native = new N.WGPURenderBundleDescriptor { Label = d is null ? default : StringView(d->Label) };
+		return P<SW.RenderBundle>(N.WGPU.wgpuRenderBundleEncoderFinish(H(e), &native));
+	}
+	public void RenderPassEncoderExecuteBundles(SW.RenderPassEncoder* p, nuint c, SW.RenderBundle** b) => N.WGPU.wgpuRenderPassEncoderExecuteBundles(H(p), c, (nint)b);
 
 	public void QueueWriteBuffer(SW.Queue* q, SilkBuffer* b, ulong o, void* d, nuint s) => N.WGPU.wgpuQueueWriteBuffer(H(q), H(b), o, (nint)d, s);
 	public void QueueWriteTexture(SW.Queue* q, SW.ImageCopyTexture* d, void* p, nuint z, SW.TextureDataLayout* l, SW.Extent3D* s) { var nd = CopyTexture(*d); var nl = CopyLayout(*l); var ns = Extent(*s); N.WGPU.wgpuQueueWriteTexture(H(q), &nd, (nint)p, z, &nl, &ns); }
@@ -446,6 +480,8 @@ internal sealed unsafe class UnoModernWebGpuApi : IWebGpuApi
 	public void ComputePipelineRelease(SW.ComputePipeline* v) => Release(H(v), N.WGPU.wgpuComputePipelineRelease);
 	public void PipelineLayoutRelease(SW.PipelineLayout* v) => Release(H(v), N.WGPU.wgpuPipelineLayoutRelease);
 	public void RenderPassEncoderRelease(SW.RenderPassEncoder* v) => Release(H(v), N.WGPU.wgpuRenderPassEncoderRelease);
+	public void RenderBundleEncoderRelease(SW.RenderBundleEncoder* v) => Release(H(v), N.WGPU.wgpuRenderBundleEncoderRelease);
+	public void RenderBundleRelease(SW.RenderBundle* v) => Release(H(v), N.WGPU.wgpuRenderBundleRelease);
 	public void RenderPipelineRelease(SW.RenderPipeline* v) => Release(H(v), N.WGPU.wgpuRenderPipelineRelease);
 	public void SamplerRelease(SW.Sampler* v) => Release(H(v), N.WGPU.wgpuSamplerRelease);
 	public void ShaderModuleRelease(SW.ShaderModule* v) => Release(H(v), N.WGPU.wgpuShaderModuleRelease);

@@ -37,14 +37,27 @@ public sealed record ProGpuFrameMetrics(
 	public long RetainedCompositionPictureMisses { get; init; }
 	public long RetainedCompositionPictureCompilations { get; init; }
 	public bool SceneCacheHit { get; init; }
+	public bool RenderBundleCacheHit { get; init; }
+	public bool RenderBundleRecorded { get; init; }
+	public int RenderBundleDrawCallCount { get; init; }
 	public string? SceneCacheMissReason { get; init; }
 	public bool TargetContentReused { get; init; }
 }
+
+/// <summary>
+/// Identifies the physical graphics API and adapter selected by the host for
+/// the active ProGPU device.
+/// </summary>
+public sealed record ProGpuGraphicsIdentity(
+	string GraphicsApi,
+	string? AdapterName,
+	string? AdapterType);
 
 public static class ProGpuDiagnostics
 {
 	private static long _unsupportedOperationCount;
 	private static long _deviceGeneration;
+	private static ProGpuGraphicsIdentity? _graphicsIdentity;
 	private static ProGpuFrameMetrics? _lastFrame;
 	private static int _sceneDumped;
 
@@ -58,6 +71,8 @@ public static class ProGpuDiagnostics
 
 	public static ProGpuFrameMetrics? LastFrame => Volatile.Read(ref _lastFrame);
 
+	public static ProGpuGraphicsIdentity? GraphicsIdentity => Volatile.Read(ref _graphicsIdentity);
+
 	internal static void Unsupported(string operation, bool fail)
 	{
 		Interlocked.Increment(ref _unsupportedOperationCount);
@@ -68,6 +83,9 @@ public static class ProGpuDiagnostics
 	}
 
 	internal static long NextDeviceGeneration() => Interlocked.Increment(ref _deviceGeneration);
+
+	internal static void PublishGraphicsIdentity(ProGpuGraphicsIdentity identity) =>
+		Volatile.Write(ref _graphicsIdentity, identity);
 
 	internal static void Publish(ProGpuFrameMetrics metrics)
 	{
@@ -135,7 +153,7 @@ public static class ProGpuDiagnostics
 	internal static void AppendCompositorMetrics(string path, in CompositorMetrics metrics)
 	{
 		File.AppendAllText(path, string.Create(CultureInfo.InvariantCulture,
-			$"METRICS frameMs={metrics.FrameTimeMs:F3} compileMs={metrics.VisualTreeCompileTimeMs:F3} uploadMs={metrics.GpuUploadTimeMs:F3} passMs={metrics.RenderPassTimeMs:F3} vectors={metrics.VectorVerticesCount}/{metrics.VectorIndicesCount} text={metrics.TextVerticesCount} masks={metrics.MaskRenderPassCount} maskDraws={metrics.MaskRenderDrawCallCount} generalMaskPeak={metrics.GeneralGeometryMaskPeakDemand} opacityMaskPeak={metrics.OpacityMaskPeakDemand} maskPool={metrics.MaskTexturePoolCount} cacheHit={metrics.SceneCacheHit} cacheMiss={metrics.SceneCacheMissReason}{Environment.NewLine}"));
+			$"METRICS frameMs={metrics.FrameTimeMs:F3} compileMs={metrics.VisualTreeCompileTimeMs:F3} uploadMs={metrics.GpuUploadTimeMs:F3} passMs={metrics.RenderPassTimeMs:F3} vectors={metrics.VectorVerticesCount}/{metrics.VectorIndicesCount} text={metrics.TextVerticesCount} masks={metrics.MaskRenderPassCount} maskDraws={metrics.MaskRenderDrawCallCount} generalMaskPeak={metrics.GeneralGeometryMaskPeakDemand} opacityMaskPeak={metrics.OpacityMaskPeakDemand} maskPool={metrics.MaskTexturePoolCount} cacheHit={metrics.SceneCacheHit} bundleHit={metrics.RenderBundleCacheHit} bundleRecorded={metrics.RenderBundleRecorded} bundleDraws={metrics.RenderBundleDrawCallCount} cacheMiss={metrics.SceneCacheMissReason}{Environment.NewLine}"));
 	}
 
 	private static void DumpPicture(StringBuilder output, GpuPicture picture, Matrix4x4 parent, SceneDumpState state, int depth, string name)

@@ -211,9 +211,14 @@ internal sealed class BenchmarkHarness : IDisposable
 		var batched = RunBatched(stable);
 		var pixels = ReadPixels();
 		var pixelPath = WritePixels(pixels);
+		var graphics = GetGraphicsEnvironment();
 		return new BenchmarkResult(
-			Schema: "uno-drawing-backend-benchmark/v3",
+			Schema: "uno-drawing-backend-benchmark/v4",
 			Backend: _options.Backend,
+			ExecutionMode: graphics.ExecutionMode,
+			GraphicsApi: graphics.GraphicsApi,
+			AdapterName: graphics.AdapterName,
+			AdapterType: graphics.AdapterType,
 			Scenario: _options.Scenario,
 			ForceRedraw: _options.ForceRedraw,
 			Width,
@@ -240,6 +245,53 @@ internal sealed class BenchmarkHarness : IDisposable
 				Environment.GetEnvironmentVariable("UNO_WEBGPU_BACKENDS"),
 				Environment.GetEnvironmentVariable("UNO_WEBGPU_MSAA")));
 	}
+
+	private unsafe BenchmarkGraphicsEnvironment GetGraphicsEnvironment()
+	{
+		if (_options.Backend == "skia")
+		{
+			return new BenchmarkGraphicsEnvironment("cpu", "Skia CPU raster", null, "CPU");
+		}
+
+		if (_deviceOwner is MetalContext metal)
+		{
+			return new BenchmarkGraphicsEnvironment("gpu", "Metal", metal.AdapterName, "GPU");
+		}
+
+		if (_device is null)
+		{
+			throw new InvalidOperationException($"Backend '{_options.Backend}' did not expose its graphics device.");
+		}
+
+		var adapterField = _deviceOwner?.GetType().GetField("Adapter", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+		var adapter = adapterField?.GetValue(_deviceOwner) is IntPtr value ? value : IntPtr.Zero;
+		var info = new N.WGPUAdapterInfo();
+		if (adapter == IntPtr.Zero || N.WGPU.wgpuAdapterGetInfo(adapter, &info) != N.WGPUStatus.Success)
+		{
+			return new BenchmarkGraphicsEnvironment("gpu", "WebGPU", null, null);
+		}
+
+		try
+		{
+			var api = info.BackendType == N.WGPUBackendType.Undefined
+				? "WebGPU"
+				: $"WebGPU ({info.BackendType})";
+			return new BenchmarkGraphicsEnvironment(
+				"gpu",
+				api,
+				DecodeString(info.Device) ?? DecodeString(info.Description),
+				info.AdapterType.ToString());
+		}
+		finally
+		{
+			N.WGPU.wgpuAdapterInfoFreeMembers(info);
+		}
+	}
+
+	private static unsafe string? DecodeString(N.WGPUStringView value)
+		=> value.Data == 0 || value.Length == 0
+			? null
+			: Encoding.UTF8.GetString(new ReadOnlySpan<byte>((void*)value.Data, checked((int)value.Length)));
 
 	private ProGpuRenderRecordScope Record(int mutation)
 	{
@@ -994,6 +1046,9 @@ internal sealed class BenchmarkHarness : IDisposable
 		private readonly long[] _retainedPictureMisses;
 		private readonly long[] _retainedPictureCompilations;
 		private readonly bool[] _sceneCacheHits;
+		private readonly bool[] _renderBundleCacheHits;
+		private readonly bool[] _renderBundlesRecorded;
+		private readonly int[] _renderBundleDrawCalls;
 		private readonly string?[] _sceneCacheMissReasons;
 		private readonly bool[] _targetContentReused;
 
@@ -1020,6 +1075,9 @@ internal sealed class BenchmarkHarness : IDisposable
 			_retainedPictureMisses = new long[count];
 			_retainedPictureCompilations = new long[count];
 			_sceneCacheHits = new bool[count];
+			_renderBundleCacheHits = new bool[count];
+			_renderBundlesRecorded = new bool[count];
+			_renderBundleDrawCalls = new int[count];
 			_sceneCacheMissReasons = new string?[count];
 			_targetContentReused = new bool[count];
 		}
@@ -1047,6 +1105,9 @@ internal sealed class BenchmarkHarness : IDisposable
 			_retainedPictureMisses[index] = metrics.RetainedCompositionPictureMisses;
 			_retainedPictureCompilations[index] = metrics.RetainedCompositionPictureCompilations;
 			_sceneCacheHits[index] = metrics.SceneCacheHit;
+			_renderBundleCacheHits[index] = metrics.RenderBundleCacheHit;
+			_renderBundlesRecorded[index] = metrics.RenderBundleRecorded;
+			_renderBundleDrawCalls[index] = metrics.RenderBundleDrawCallCount;
 			_sceneCacheMissReasons[index] = metrics.SceneCacheMissReason;
 			_targetContentReused[index] = metrics.TargetContentReused;
 		}
@@ -1073,6 +1134,9 @@ internal sealed class BenchmarkHarness : IDisposable
 			_retainedPictureMisses,
 			_retainedPictureCompilations,
 			_sceneCacheHits,
+			_renderBundleCacheHits,
+			_renderBundlesRecorded,
+			_renderBundleDrawCalls,
 			_sceneCacheMissReasons,
 			_targetContentReused);
 	}
@@ -1117,6 +1181,8 @@ internal sealed partial class MetalContext : IMetalDeviceContext
 	private static readonly nint s_drain = Selector("drain");
 	private static readonly nint s_release = Selector("release");
 	private static readonly nint s_newCommandQueue = Selector("newCommandQueue");
+	private static readonly nint s_name = Selector("name");
+	private static readonly nint s_utf8String = Selector("UTF8String");
 	private static readonly nint s_commandBuffer = Selector("commandBuffer");
 	private static readonly nint s_commit = Selector("commit");
 	private static readonly nint s_waitUntilCompleted = Selector("waitUntilCompleted");
@@ -1142,6 +1208,7 @@ internal sealed partial class MetalContext : IMetalDeviceContext
 	public GraphicsContextKind Kind => GraphicsContextKind.Metal;
 	public nint Device => _device;
 	public nint Queue => _queue;
+	internal string? AdapterName => Marshal.PtrToStringUTF8(Send(Send(_device, s_name), s_utf8String));
 	internal MetalTarget Target { get; }
 
 	internal static MetalContext Create(int width, int height)
@@ -1473,6 +1540,10 @@ internal sealed class RenderTargetAlias(IWebGpuRenderTarget target) : IWebGpuRen
 internal sealed record BenchmarkResult(
 	string Schema,
 	string Backend,
+	string ExecutionMode,
+	string GraphicsApi,
+	string? AdapterName,
+	string? AdapterType,
 	string Scenario,
 	bool ForceRedraw,
 	int Width,
@@ -1487,6 +1558,12 @@ internal sealed record BenchmarkResult(
 	PixelArtifact Pixels,
 	long UnsupportedOperations,
 	BenchmarkEnvironment Environment);
+
+internal sealed record BenchmarkGraphicsEnvironment(
+	string ExecutionMode,
+	string GraphicsApi,
+	string? AdapterName,
+	string? AdapterType);
 
 internal sealed record MeasurementDistribution(
 	double[] Samples,
@@ -1525,6 +1602,9 @@ internal sealed record ProGpuBenchmarkMetrics(
 	long[] RetainedCompositionPictureMisses,
 	long[] RetainedCompositionPictureCompilations,
 	bool[] SceneCacheHits,
+	bool[] RenderBundleCacheHits,
+	bool[] RenderBundlesRecorded,
+	int[] RenderBundleDrawCalls,
 	string?[] SceneCacheMissReasons,
 	bool[] TargetContentReused);
 

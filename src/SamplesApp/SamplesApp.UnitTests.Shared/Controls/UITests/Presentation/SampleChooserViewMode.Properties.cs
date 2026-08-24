@@ -297,6 +297,11 @@ namespace SampleControl.Presentation
 #if __SKIA__
 				if (global::Uno.UI.Composition.Drawing.GraphicsRegistry.CurrentBackend is { } graphics)
 				{
+					if (TryGetRuntimeGraphicsDescription(graphics.ProviderTypeName) is { } runtimeGraphics)
+					{
+						return $"{runtimeGraphics} · {targetPlatform}";
+					}
+
 					return $"{GetBackendDisplayName(graphics.ProviderTypeName)} · {GetGraphicsApiDisplayName(graphics.ContextKind)} · {targetPlatform}";
 				}
 
@@ -329,6 +334,30 @@ namespace SampleControl.Presentation
 			global::Uno.UI.Composition.Drawing.GraphicsContextKind.OpenGLES => "OpenGL ES",
 			_ => contextKind.ToString(),
 		};
+
+		private static string TryGetRuntimeGraphicsDescription(string providerTypeName)
+		{
+			if (providerTypeName != "ProGpuGraphicsProvider")
+			{
+				return null;
+			}
+
+			var diagnostics = Type.GetType(
+				"Uno.UI.Composition.ProGpu.ProGpuDiagnostics, Uno.UI.Composition.ProGpu",
+				throwOnError: false);
+			var identity = diagnostics?.GetProperty("GraphicsIdentity")?.GetValue(null);
+			var identityType = identity?.GetType();
+			var api = identityType?.GetProperty("GraphicsApi")?.GetValue(identity) as string;
+			if (string.IsNullOrWhiteSpace(api))
+			{
+				return null;
+			}
+
+			var adapter = identityType?.GetProperty("AdapterName")?.GetValue(identity) as string;
+			return string.IsNullOrWhiteSpace(adapter)
+				? $"ProGPU · {api}"
+				: $"ProGPU · {api} · {adapter}";
+		}
 #endif
 
 		public static string DefaultAppTitle
