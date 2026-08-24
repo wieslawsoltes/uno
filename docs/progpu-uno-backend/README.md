@@ -1,15 +1,17 @@
 # ProGPU drawing backend for Uno Platform
 
 Status: working macOS/Metal implementation and qualification branch,
-2026-08-23. The backend negotiates Uno's WebGPU host context, presents the
+2026-08-24. The backend negotiates Uno's WebGPU host context, presents the
 SamplesApp through ProGPU, passes the focused real-device smoke test, and has a
 correctness-gated v4 benchmark contract with explicit CPU/GPU, graphics API,
-and physical-adapter identity. A three-pair, fifteen-scenario
-GPU-to-GPU qualification now compares ProGPU/Metal with Uno's real Skia/Metal
-`GRContext` path and records separate CPU-submit and GPU-completion boundaries.
-A strict forced-redraw follow-up also disables populated-target reuse: ProGPU
-wins completed-batch throughput in all 15 scenarios and synchronized blocking
-total in 14 of 15, with shadows within 2.6% at that latter boundary.
+and physical-adapter identity. A three-backend, fifteen-scenario
+GPU-to-GPU qualification compares ProGPU/WebGPU/Metal with Uno's real
+Skia/Metal `GRContext` path and built-in WebGPU/Metal implementation, recording
+separate CPU-submit and GPU-completion boundaries. A strict forced-redraw run
+with three fresh-process repetitions shows ProGPU winning completed-batch
+throughput and synchronized blocking total in all 15 scenarios against both
+alternatives. Pixel qualification also identifies built-in WebGPU correctness
+failures in blend-layer, blend-corpus, and difference-clip coverage.
 The remaining qualification gaps are
 listed in [capabilities.md](capabilities.md); this status does not claim
 cross-platform or full effect/layer conformance.
@@ -21,6 +23,7 @@ modify the Skia or WebGPU backend implementations from that work.
 
 Documents:
 
+- [Final rendering contract and three-backend review](final-rendering-contract-review-2026-08-24.md)
 - [Analysis of Uno PR #24153 and source integrations](pr-24153-analysis.md)
 - [Architecture and integration specification](architecture.md)
 - [Capability and conformance matrix](capabilities.md)
