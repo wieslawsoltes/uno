@@ -37,6 +37,13 @@ namespace Uno.UI.Samples.Controls
 		{
 			this.InitializeComponent();
 
+#if HAS_UNO && __SKIA__
+			// The control is created before the native window negotiates its graphics backend. Refresh the gallery
+			// chrome on the first composition frame, when the winning provider and GPU API are authoritative.
+			Microsoft.UI.Xaml.Media.CompositionTarget.Rendering += OnFirstRendering;
+			Unloaded += OnUnloadedBeforeFirstRendering;
+#endif
+
 			// Benchmark hook: UNO_PERF_OPEN_MENU=1 opens the settings (gear) flyout after the scene settles,
 			// so the flyout-over-animated-content cost is measurable in scripted runs.
 			if (Environment.GetEnvironmentVariable("UNO_PERF_OPEN_MENU") is "1" or "true")
@@ -111,6 +118,21 @@ namespace Uno.UI.Samples.Controls
 				};
 			}
 		}
+
+#if HAS_UNO && __SKIA__
+		private void OnFirstRendering(object sender, object e)
+		{
+			Microsoft.UI.Xaml.Media.CompositionTarget.Rendering -= OnFirstRendering;
+			Unloaded -= OnUnloadedBeforeFirstRendering;
+			(DataContext as SampleChooserViewModel)?.RefreshGraphicsDescription();
+		}
+
+		private void OnUnloadedBeforeFirstRendering(object sender, RoutedEventArgs e)
+		{
+			Microsoft.UI.Xaml.Media.CompositionTarget.Rendering -= OnFirstRendering;
+			Unloaded -= OnUnloadedBeforeFirstRendering;
+		}
+#endif
 
 		private SampleChooserViewModel ViewModel => (SampleChooserViewModel)DataContext;
 

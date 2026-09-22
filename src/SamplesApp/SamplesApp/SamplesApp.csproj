@@ -107,12 +107,15 @@
 		<!-- wgpu-native publishes no tvOS slice, so the backend's P/Invokes have nothing to link against there. -->
 		<UnoDrawingBackendWebGpu Condition="'$(UnoDrawingBackendWebGpu)'=='' and '$(_Platform)' == 'tvos'">false</UnoDrawingBackendWebGpu>
 		<UnoDrawingBackendWebGpu Condition="'$(UnoDrawingBackendWebGpu)'==''">true</UnoDrawingBackendWebGpu>
+		<!-- ProGPU currently adopts the native desktop WebGPU device and presentation target. -->
+		<UnoDrawingBackendProGpu Condition="'$(UnoDrawingBackendProGpu)'==''">false</UnoDrawingBackendProGpu>
 		<DefineConstants Condition="'$(UnoDrawingBackendSkia)'=='true'">$(DefineConstants);UNO_DRAWING_SKIA</DefineConstants>
 		<DefineConstants Condition="'$(UnoDrawingBackendWebGpu)'=='true'">$(DefineConstants);UNO_DRAWING_WEBGPU</DefineConstants>
+		<DefineConstants Condition="'$(UnoDrawingBackendProGpu)'=='true' AND '$(_Platform)' == 'desktop'">$(DefineConstants);UNO_DRAWING_PROGPU</DefineConstants>
 	</PropertyGroup>
 
-	<!-- Provision the modern-ABI wgpu-native next to the app so the WebGPU backend's DllImportResolver finds it. -->
-	<Import Project="..\..\Uno.UI.Composition.WebGpu\wgpu-native.targets" Condition="'$(UnoDrawingBackendWebGpu)'!='false'" />
+	<!-- Both GPU backends use the host's modern-ABI WebGPU device and native library. -->
+	<Import Project="..\..\Uno.UI.Composition.WebGpu\wgpu-native.targets" Condition="'$(UnoDrawingBackendWebGpu)'!='false' OR ('$(UnoDrawingBackendProGpu)'=='true' AND '$(_Platform)' == 'desktop')" />
 	<!-- The browser has no wgpu-native: Dawn's emdawnwebgpu is linked into dotnet.native.wasm instead, so the same
 	     [DllImport("webgpu")] resolves there. Without it the WebGPU backend fails graphics init with a
 	     DllNotFoundException and the app never leaves its loading screen. -->
@@ -122,10 +125,23 @@
 		<ProjectReference Include="..\..\Uno.UI.Composition.Managed\Uno.UI.Composition.Managed.csproj" />
 		<ProjectReference Include="..\..\Uno.UI.Composition.Skia\Uno.UI.Composition.SkiaBackend.csproj" Condition="'$(UnoDrawingBackendSkia)'!='false'" />
 		<ProjectReference Include="..\..\Uno.UI.Composition.WebGpu\Uno.UI.Composition.WebGpu.csproj" Condition="'$(UnoDrawingBackendWebGpu)'!='false'" />
+		<ProjectReference Include="..\..\Uno.UI.Composition.ProGpu\Uno.UI.Composition.ProGpu.csproj" Condition="'$(UnoDrawingBackendProGpu)'=='true' AND '$(_Platform)' == 'desktop'" AdditionalProperties="ProGPUUseWinRTContracts=false" />
 
 		<!-- Backend registration shared by every head's entry point. -->
 		<Compile Include="..\DrawingBackendConfiguration.cs" Link="DrawingBackendConfiguration.cs" />
 	</ItemGroup>
+
+	<!-- An incremental restore may still contain ProGPU's optional compatibility projection. -->
+	<Target Name="AliasProGpuCompatibilityProjection" AfterTargets="ResolveAssemblyReferences" Condition="'$(UnoDrawingBackendProGpu)'=='true' AND '$(_Platform)' == 'desktop'">
+		<ItemGroup>
+			<ReferencePath Update="@(ReferencePath)" Condition="'%(FileName)'=='ProGPU.WinRT'">
+				<Aliases>progpuwinrt</Aliases>
+			</ReferencePath>
+			<ReferencePathWithRefAssemblies Update="@(ReferencePathWithRefAssemblies)" Condition="'%(FileName)'=='ProGPU.WinRT'">
+				<Aliases>progpuwinrt</Aliases>
+			</ReferencePathWithRefAssemblies>
+		</ItemGroup>
+	</Target>
 
 	<!-- ==================== Framework via ProjectReference ==================== -->
 

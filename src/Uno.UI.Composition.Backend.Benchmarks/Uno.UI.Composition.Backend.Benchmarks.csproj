@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<OutputType>Exe</OutputType>
+		<TargetFrameworks>$(NetSkiaPreviousAndCurrent)</TargetFrameworks>
+		<Nullable>enable</Nullable>
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+		<TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+	</PropertyGroup>
+
+	<Import Project="../targetframework-override-noplatform.props" />
+	<Import Project="../Uno.UI.Composition.WebGpu/wgpu-native.targets" />
+
+	<ItemGroup>
+		<ProjectReference Include="..\Uno.UI.Composition.ProGpu\Uno.UI.Composition.ProGpu.csproj" AdditionalProperties="ProGPUUseWinRTContracts=false" />
+		<ProjectReference Include="..\Uno.UI.Composition.WebGpu\Uno.UI.Composition.WebGpu.csproj" />
+		<ProjectReference Include="..\Uno.UI.Composition.Skia\Uno.UI.Composition.SkiaBackend.csproj" />
+		<ProjectReference Include="..\Uno.WinRT\Uno.WinRT.Reference.csproj" Aliases="unouwp" />
+		<ProjectReference Include="..\Uno.Foundation\Uno.Foundation.Reference.csproj" Aliases="unofoundation" />
+	</ItemGroup>
+</Project>

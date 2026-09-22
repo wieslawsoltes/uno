@@ -260,13 +260,6 @@ namespace SampleControl.Presentation
 #if !HAS_UNO
 				return "WinUI";
 #else
-				var renderingType =
-#if __SKIA__
-					"Skia";
-#else
-					"Native";
-#endif
-
 				string targetPlatform;
 				if (OperatingSystem.IsAndroid())
 				{
@@ -301,10 +294,71 @@ namespace SampleControl.Presentation
 					targetPlatform = "Unknown";
 				}
 
-				return $"{renderingType} {targetPlatform}";
+#if __SKIA__
+				if (global::Uno.UI.Composition.Drawing.GraphicsRegistry.CurrentBackend is { } graphics)
+				{
+					if (TryGetRuntimeGraphicsDescription(graphics.ProviderTypeName) is { } runtimeGraphics)
+					{
+						return $"{runtimeGraphics} · {targetPlatform}";
+					}
+
+					return $"{GetBackendDisplayName(graphics.ProviderTypeName)} · {GetGraphicsApiDisplayName(graphics.ContextKind)} · {targetPlatform}";
+				}
+
+				return $"Graphics initializing · {targetPlatform}";
+#else
+				return $"Native · {targetPlatform}";
+#endif
 #endif
 			}
 		}
+
+#if HAS_UNO && __SKIA__
+		internal void RefreshGraphicsDescription() => RaisePropertyChanged(nameof(TargetPlatform));
+
+		private static string GetBackendDisplayName(string providerTypeName) => providerTypeName switch
+		{
+			"ProGpuGraphicsProvider" => "ProGPU",
+			"WebGpuGraphicsProvider" => "WebGPU",
+			"SkiaGraphicsProvider" => "Skia",
+			_ => providerTypeName.EndsWith("GraphicsProvider", StringComparison.Ordinal)
+				? providerTypeName[..^"GraphicsProvider".Length]
+				: providerTypeName,
+		};
+
+		private static string GetGraphicsApiDisplayName(global::Uno.UI.Composition.Drawing.GraphicsContextKind contextKind) => contextKind switch
+		{
+			global::Uno.UI.Composition.Drawing.GraphicsContextKind.WebGpu => "WebGPU",
+			global::Uno.UI.Composition.Drawing.GraphicsContextKind.WebGL => "WebGL",
+			global::Uno.UI.Composition.Drawing.GraphicsContextKind.OpenGL => "OpenGL",
+			global::Uno.UI.Composition.Drawing.GraphicsContextKind.OpenGLES => "OpenGL ES",
+			_ => contextKind.ToString(),
+		};
+
+		private static string TryGetRuntimeGraphicsDescription(string providerTypeName)
+		{
+			if (providerTypeName != "ProGpuGraphicsProvider")
+			{
+				return null;
+			}
+
+			var diagnostics = Type.GetType(
+				"Uno.UI.Composition.ProGpu.ProGpuDiagnostics, Uno.UI.Composition.ProGpu",
+				throwOnError: false);
+			var identity = diagnostics?.GetProperty("GraphicsIdentity")?.GetValue(null);
+			var identityType = identity?.GetType();
+			var api = identityType?.GetProperty("GraphicsApi")?.GetValue(identity) as string;
+			if (string.IsNullOrWhiteSpace(api))
+			{
+				return null;
+			}
+
+			var adapter = identityType?.GetProperty("AdapterName")?.GetValue(identity) as string;
+			return string.IsNullOrWhiteSpace(adapter)
+				? $"ProGPU · {api}"
+				: $"ProGPU · {api} · {adapter}";
+		}
+#endif
 
 		public static string DefaultAppTitle
 		{

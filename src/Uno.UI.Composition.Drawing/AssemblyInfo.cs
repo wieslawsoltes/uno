@@ -26,3 +26,8 @@ using System.Runtime.CompilerServices;
 
 // Unit tests run without a host builder, so their assembly initializer registers the seams itself.
 [assembly: InternalsVisibleTo("Uno.UI.UnitTests")]
+// The in-repo gallery reports the result of graphics negotiation in its chrome. Keep this diagnostic surface
+// internal: applications select providers through the public host-builder API and do not otherwise depend on
+// the framework's process-wide negotiator.
+[assembly: InternalsVisibleTo("SamplesApp")]
+[assembly: InternalsVisibleTo("UnoIslandsSamplesApp.Skia")]
