@@ -1,7 +1,9 @@
-#nullable enable
+﻿#nullable enable
 
 using System;
+using System.Buffers;
 using System.Collections.Generic;
+using System.IO;
 using System.Threading.Tasks;
 using SkiaSharp;
 using Windows.UI.Text;
@@ -24,6 +26,10 @@ internal sealed class SkiaFontProvider : IFontProvider
 	// (or a backend that doesn't return null past the last face) causing an unbounded loop.
 	private const int MaxFontCollectionFaces = 256;
 
+	// Surfaces carry no pixel geometry, so subpixel edging never produced LCD text; on DirectWrite it only made the
+	// grayscale masks lighter and softer than WinUI's. Other scalers keep their edging until measured.
+	internal static readonly SKFontEdging TextEdging = OperatingSystem.IsWindows() ? SKFontEdging.Antialias : SKFontEdging.SubpixelAntialias;
+
 	// Caches codepoint fallback resolution: the SKFontManager.MatchCharacter lookup is comparatively expensive,
 	// and a stable IFont instance lets the FontDetails cache dedupe. Keyed by codepoint + requested style + size.
 	private readonly Dictionary<(int Codepoint, int Weight, FontStretch Stretch, FontStyle Style, float Size), IFont?> _matchCharacterCache = new();
@@ -32,10 +38,62 @@ internal sealed class SkiaFontProvider : IFontProvider
 	// shaping (e.g. Arabic joining).
 	private readonly Dictionary<(string Family, int Weight, FontStretch Stretch, FontStyle Style, float Size), IFont> _matchedFamilyCache = new();
 	private readonly object _matchCharacterGate = new();
+	private readonly bool _enableFallback;
+
+	public SkiaFontProvider(bool enableFallback = true) => _enableFallback = enableFallback;
 
 	public IFont? CreateFont(byte[] data, string? familyNameHint, FontWeight weight, FontStretch stretch, FontStyle style, float fontSize)
 	{
 		using var skData = SKData.CreateCopy(data);
+		return CreateFont(skData, familyNameHint, weight, stretch, style, fontSize);
+	}
+
+	public IFontFile LoadFontFile(Stream stream) => new SkiaFontFile(ReadToNativeData(stream));
+
+	private static SKData ReadToNativeData(Stream stream)
+	{
+		// Straight into native memory: a managed staging copy would be a large-object-heap array per font file,
+		// charged against the gen2 budget on the startup preload path.
+		if (stream.CanSeek)
+		{
+			var length = checked((int)(stream.Length - stream.Position));
+			var data = SKData.Create(length);
+			try
+			{
+				unsafe
+				{
+					stream.ReadExactly(new Span<byte>((void*)data.Data, length));
+				}
+
+				return data;
+			}
+			catch
+			{
+				data.Dispose();
+				throw;
+			}
+		}
+
+		using var native = new SKDynamicMemoryWStream();
+		var buffer = ArrayPool<byte>.Shared.Rent(81920);
+		try
+		{
+			int read;
+			while ((read = stream.Read(buffer, 0, buffer.Length)) > 0)
+			{
+				native.Write(buffer, read);
+			}
+		}
+		finally
+		{
+			ArrayPool<byte>.Shared.Return(buffer);
+		}
+
+		return native.DetachAsData();
+	}
+
+	private static IFont? CreateFont(SKData skData, string? familyNameHint, FontWeight weight, FontStretch stretch, FontStyle style, float fontSize)
+	{
 		var typeface = string.IsNullOrEmpty(familyNameHint)
 			? SKTypeface.FromData(skData, 0)
 			: SelectFaceByFamily(skData, familyNameHint);
@@ -61,8 +119,17 @@ internal sealed class SkiaFontProvider : IFontProvider
 		return MakeFont(ApplyVariableFontAxes(typeface, weight, stretch, style), fontSize);
 	}
 
+	public async ValueTask<IFont?> MatchFamilyAsync(string familyName, FontWeight weight, FontStretch stretch, FontStyle style, float fontSize)
+		=> (_enableFallback ? await FontFallback.MatchFamilyAsync(this, familyName, weight, stretch, style, fontSize) : null)
+			?? MatchFamily(familyName, weight, stretch, style, fontSize);
+
 	public ValueTask<IFont?> MatchCharacterAsync(int codepoint, FontWeight weight, FontStretch stretch, FontStyle style, float fontSize)
 	{
+		if (!_enableFallback)
+		{
+			return default;
+		}
+
 		var key = (codepoint, weight.Weight, stretch, style, fontSize);
 		lock (_matchCharacterGate)
 		{
@@ -79,18 +146,30 @@ internal sealed class SkiaFontProvider : IFontProvider
 			return FontFallback.MatchCharacterAsync(this, codepoint, weight, stretch, style, fontSize);
 		}
 
-		IFont? font;
+		IFont? familyFont;
 		var familyKey = (typeface.FamilyName, weight.Weight, stretch, style, fontSize);
 		lock (_matchCharacterGate)
 		{
-			_matchedFamilyCache.TryGetValue(familyKey, out font);
+			_matchedFamilyCache.TryGetValue(familyKey, out familyFont);
 		}
 
-		font ??= MakeFont(ApplyVariableFontAxes(typeface, weight, stretch, style), fontSize);
+		// The family entry was verified against some other codepoint, so its styled face may not cover this one;
+		// reusing it unchecked would render .notdef. MatchCharacter also ignores the requested style, so re-resolve
+		// the family it found for the run's weight/stretch/style; the matched face stands when no styled face covers it.
+		var font = familyFont is not null && familyFont.ContainsGlyph(codepoint)
+			? familyFont
+			: MatchStyledFamily(typeface.FamilyName, codepoint, weight, stretch, style, fontSize)
+				?? MakeFont(ApplyVariableFontAxes(typeface, weight, stretch, style), fontSize);
 
 		lock (_matchCharacterGate)
 		{
-			_matchedFamilyCache[familyKey] = font;
+			// A per-codepoint fallback must not displace the family entry — the codepoints it does serve have to keep
+			// sharing that one instance, or segment grouping breaks contextual shaping.
+			if (familyFont is null)
+			{
+				_matchedFamilyCache[familyKey] = font;
+			}
+
 			_matchCharacterCache[key] = font;
 		}
 
@@ -104,11 +183,53 @@ internal sealed class SkiaFontProvider : IFontProvider
 		return MakeFont(typeface, fontSize);
 	}
 
+	/// <summary>
+	/// Resolves <paramref name="familyName"/> for the requested style, or <c>null</c> when the family is unknown or
+	/// its styled face no longer covers <paramref name="codepoint"/> (family lookup can land on a default face).
+	/// </summary>
+	private static IFont? MatchStyledFamily(string familyName, int codepoint, FontWeight weight, FontStretch stretch, FontStyle style, float fontSize)
+	{
+		if (string.IsNullOrEmpty(familyName))
+		{
+			return null;
+		}
+
+		var typeface = SKTypeface.FromFamilyName(familyName, weight.ToSkiaWeight(), stretch.ToSkiaWidth(), style.ToSkiaSlant());
+		if (typeface is null || typeface.IsEmpty)
+		{
+			return null;
+		}
+
+		var styled = ApplyVariableFontAxes(typeface, weight, stretch, style);
+
+		// Coverage is probed on the SKFont, before it is wrapped: the typeface-level lookups are obsolete in this
+		// SkiaSharp, and a styled face can drop blocks the matched one had -- returning it then renders .notdef.
+		var skFont = new SKFont(styled, fontSize)
+		{
+			Edging = TextEdging,
+			Subpixel = true,
+		};
+
+		if (!skFont.ContainsGlyph(codepoint))
+		{
+			skFont.Dispose();
+			if (!ReferenceEquals(styled, typeface))
+			{
+				// The variation clone is ours alone; the family face may be shared by the font manager's cache.
+				styled.Dispose();
+			}
+
+			return null;
+		}
+
+		return new SkiaFont(skFont);
+	}
+
 	private static IFont MakeFont(SKTypeface typeface, float fontSize)
 	{
 		var skFont = new SKFont(typeface, fontSize)
 		{
-			Edging = SKFontEdging.SubpixelAntialias,
+			Edging = TextEdging,
 			Subpixel = true,
 		};
 		return new SkiaFont(skFont);
@@ -223,6 +344,19 @@ internal sealed class SkiaFontProvider : IFontProvider
 		{
 			return typeface;
 		}
+	}
+
+	/// <summary>A font file held in one native buffer; every typeface built from it references that buffer rather than copying it.</summary>
+	private sealed class SkiaFontFile : IFontFile
+	{
+		private readonly SKData _data;
+
+		public SkiaFontFile(SKData data) => _data = data;
+
+		public IFont? CreateFont(string? familyNameHint, FontWeight weight, FontStretch stretch, FontStyle style, float fontSize)
+			=> SkiaFontProvider.CreateFont(_data, familyNameHint, weight, stretch, style, fontSize);
+
+		public void Dispose() => _data.Dispose();
 	}
 }
 

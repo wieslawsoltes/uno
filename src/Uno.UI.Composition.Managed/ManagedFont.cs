@@ -2,6 +2,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Windows.UI;
@@ -111,7 +112,9 @@ internal sealed class ManagedFont : IFont
 	{
 		if (_hmtx == 0 || _numHMetrics == 0) { return 0; }
 		var i = glyph < _numHMetrics ? glyph : _numHMetrics - 1;
-		return U16(_data, _hmtx + i * 4);
+		var o = _hmtx + i * 4;
+		// A truncated web font must measure as zero, not throw out of layout.
+		return o + 2 <= _data.Length ? U16(_data, o) : 0;
 	}
 
 	/// <summary>The glyph's advance in pixels (at this font's size).</summary>
@@ -159,6 +162,23 @@ internal sealed class ManagedFont : IFont
 
 	private readonly GlyphRunCache _shapeCache = new();
 
+	/// <summary>
+	/// Shapes a run whose direction the shaper infers from its script. The legacy segment itemizer relies on this
+	/// to give an RTL script its direction even when the surrounding run is left-to-right.
+	/// </summary>
+	public GlyphRun Shape(ReadOnlySpan<char> text, out TextDirection resolvedDirection, bool enableLigatures = true)
+	{
+		var buffer = _shapeBuffer ??= new HbBuffer();
+		buffer.ClearContents();
+		buffer.AddUtf16(text);
+		buffer.GuessSegmentProperties();
+		resolvedDirection = buffer.Direction == HarfBuzzSharp.Direction.RightToLeft
+			? TextDirection.RightToLeft
+			: TextDirection.LeftToRight;
+
+		return Shape(text, resolvedDirection, enableLigatures);
+	}
+
 	public GlyphRun Shape(ReadOnlySpan<char> text, TextDirection direction, bool enableLigatures = true)
 	{
 		if (_shapeCache.TryGet(text, direction, enableLigatures, out var cached))
@@ -166,21 +186,31 @@ internal sealed class ManagedFont : IFont
 			return cached;
 		}
 
+		var run = ShapeCore(text, direction, new ShapingOptions { DisableLigatures = !enableLigatures });
+		_shapeCache.Add(text, direction, enableLigatures, run);
+		return run;
+	}
+
+	public GlyphRun Shape(ReadOnlySpan<char> text, TextDirection direction, in ShapingOptions options)
+		=> options with { DisableLigatures = false } == default
+			? Shape(text, direction, !options.DisableLigatures)
+			: ShapeCore(text, direction, options);
+
+	public bool TryGetTable(uint tag, [NotNullWhen(true)] out byte[]? data)
+	{
+		data = ReadTable(tag);
+		return data is { Length: > 0 };
+	}
+
+	private GlyphRun ShapeCore(ReadOnlySpan<char> text, TextDirection direction, in ShapingOptions options)
+	{
 		var buffer = _shapeBuffer ??= new HbBuffer();
 		buffer.ClearContents();
 		buffer.AddUtf16(text);
 		buffer.GuessSegmentProperties(); // sets the run's script/language for the shaper; direction is set explicitly below
 		buffer.Direction = direction == TextDirection.RightToLeft ? HarfBuzzSharp.Direction.RightToLeft : HarfBuzzSharp.Direction.LeftToRight;
-
-		if (enableLigatures)
-		{
-			GetHarfBuzzFont().Shape(buffer);
-		}
-		else
-		{
-			// Disable the OpenType 'liga' feature (a run may span multiple chars that must stay separately addressable).
-			GetHarfBuzzFont().Shape(buffer, new HarfBuzzSharp.Feature(new HarfBuzzSharp.Tag('l', 'i', 'g', 'a'), 0));
-		}
+		HarfBuzzShapingOptions.Apply(buffer, options);
+		GetHarfBuzzFont().Shape(buffer, HarfBuzzShapingOptions.GetFeatures(options));
 
 		var infos = buffer.GetGlyphInfoSpan();
 		var pos = buffer.GetGlyphPositionSpan();
@@ -198,9 +228,7 @@ internal sealed class ManagedFont : IFont
 			advances[i] = pos[i].XAdvance * scale;
 		}
 
-		var run = new GlyphRun(glyphs, offsets, advances, clusters);
-		_shapeCache.Add(text, direction, enableLigatures, run);
-		return run;
+		return new GlyphRun(glyphs, offsets, advances, clusters);
 	}
 
 	private HbFont GetHarfBuzzFont()
@@ -408,49 +436,66 @@ internal sealed class ManagedFont : IFont
 			if (post != 0 && post + 12 <= data.Length)
 			{
 				underlinePosition = S16(data, post + 8);
-				underlineThickness = S16(data, post + 10);
+				// A zero (or negative) thickness is "unspecified", not "draw nothing" — some icon fonts leave it
+				// at 0 — so report null and let the caller apply its own fallback.
+				var thickness = S16(data, post + 10);
+				underlineThickness = thickness > 0 ? thickness : null;
 			}
 
 			// OS/2: yStrikeoutSize @26, yStrikeoutPosition @28 (font units).
 			int? strikeoutThickness = null, strikeoutPosition = null;
 			if (os2 != 0 && os2 + 30 <= data.Length)
 			{
-				strikeoutThickness = S16(data, os2 + 26);
+				var thickness = S16(data, os2 + 26);
+				strikeoutThickness = thickness > 0 ? thickness : null;
 				strikeoutPosition = S16(data, os2 + 28);
 			}
 
 			var cmapTable = cmap != 0 ? CmapTable.Parse(data, cmap) : null;
 
+			var cffTable = cff != 0 ? CffTable.Parse(data, cff) : null;
+
 			// OS/2 sCapHeight @88 exists from table version 2 on, so the version - not just the table length -
-			// decides whether it is there. Without it, measure the top of 'H'; failing that (no cmap, CFF
-			// outlines, no 'H'), fall back to a fraction of the em, since ascent cannot stand in for cap height.
+			// decides whether it is there. The rest of the chain mirrors Skia (top of 'H', then the ascent), so
+			// both engines report the same tight text bounds for a font that specifies neither.
 			var capHeight = 0;
 			if (os2 != 0 && os2 + 90 <= data.Length && U16(data, os2) >= 2)
 			{
 				capHeight = S16(data, os2 + 88);
 			}
 
-			if (capHeight <= 0 && cmapTable is not null && glyf != 0 && loca != 0)
+			if (capHeight <= 0 && cmapTable is not null)
 			{
 				var h = cmapTable.Map(data, 'H');
-				if (h != 0 && h + 1 <= numGlyphs)
+				if (h != 0 && h < numGlyphs)
 				{
-					var gs = longLoca ? (int)U32(data, loca + h * 4) : U16(data, loca + h * 2) * 2;
-					var ge = longLoca ? (int)U32(data, loca + (h + 1) * 4) : U16(data, loca + (h + 1) * 2) * 2;
-					// yMax sits at +8 of the glyf record, past numberOfContours/xMin/yMin/xMax.
-					if (ge > gs && glyf + gs + 10 <= data.Length)
+					if (glyf != 0 && loca != 0)
 					{
-						capHeight = S16(data, glyf + gs + 8);
+						var gs = longLoca ? (int)U32(data, loca + h * 4) : U16(data, loca + h * 2) * 2;
+						var ge = longLoca ? (int)U32(data, loca + (h + 1) * 4) : U16(data, loca + (h + 1) * 2) * 2;
+						// yMax sits at +8 of the glyf record, past numberOfContours/xMin/yMin/xMax.
+						if (ge > gs && glyf + gs + 10 <= data.Length)
+						{
+							capHeight = S16(data, glyf + gs + 8);
+						}
+					}
+					else if (cffTable is not null)
+					{
+						var probe = new GlyphTopProbe();
+						cffTable.EmitGlyph(probe, h, 0f, 0f, 1f);
+						if (probe.Top > 0f)
+						{
+							capHeight = (int)MathF.Round(probe.Top);
+						}
 					}
 				}
 			}
 
 			if (capHeight <= 0)
 			{
-				capHeight = (int)(unitsPerEm * 0.7f);
+				capHeight = ascent > 0 ? ascent : (int)(unitsPerEm * 0.7f);
 			}
 
-			var cffTable = cff != 0 ? CffTable.Parse(data, cff) : null;
 			var hasOutlines = (glyf != 0 && loca != 0) || cffTable is not null;
 			if (!hasOutlines || unitsPerEm == 0)
 			{
@@ -494,6 +539,12 @@ internal sealed class ManagedFont : IFont
 			return false;
 		}
 
+		var locaEnd = _loca + (_longLoca ? (glyph + 1) * 4 + 4 : (glyph + 1) * 2 + 2);
+		if (locaEnd > _data.Length || locaEnd < 0)
+		{
+			return false;
+		}
+
 		int start, end;
 		if (_longLoca)
 		{
@@ -506,7 +557,7 @@ internal sealed class ManagedFont : IFont
 			end = U16(_data, _loca + (glyph + 1) * 2) * 2;
 		}
 
-		return end > start && S16(_data, _glyf + start) < 0;
+		return start >= 0 && end > start && _glyf + start + 2 <= _data.Length && S16(_data, _glyf + start) < 0;
 	}
 
 	public void BuildGlyphRun(IGeometryFactory geometry, ReadOnlySpan<ushort> glyphs, ReadOnlySpan<Vector2> positions, float baselineY, IList<GlyphRunElement> elements)
@@ -546,7 +597,13 @@ internal sealed class ManagedFont : IFont
 	{
 		if (!ReferenceEquals(_glyphGeometryFactory, factory))
 		{
-			// A different geometry backend is registered: the cached instances belong to the old one.
+			// A different geometry backend is registered: the cached instances belong to the old one, and this
+			// cache created them, so it owes each one a Dispose.
+			foreach (var geometry in _glyphGeometries.Values)
+			{
+				geometry?.Dispose();
+			}
+
 			_glyphGeometries.Clear();
 			_glyphGeometryFactory = factory;
 		}
@@ -560,6 +617,7 @@ internal sealed class ManagedFont : IFont
 		var built = builder.Build();
 		if (built.IsEmpty)
 		{
+			built.Dispose();
 			built = null;
 		}
 
@@ -627,6 +685,14 @@ internal sealed class ManagedFont : IFont
 			return;
 		}
 
+		// A truncated font (a partial download still passes TryCreate) must emit nothing rather than throw out of
+		// the record walk, so every read below is bounded by the glyph's own loca extent.
+		var locaEnd = _loca + (_longLoca ? (glyph + 1) * 4 + 4 : (glyph + 1) * 2 + 2);
+		if (locaEnd > _data.Length || locaEnd < 0)
+		{
+			return;
+		}
+
 		int start, end;
 		if (_longLoca)
 		{
@@ -639,9 +705,15 @@ internal sealed class ManagedFont : IFont
 			end = U16(_data, _loca + (glyph + 1) * 2) * 2;
 		}
 
-		if (end <= start)
+		if (start < 0 || end <= start)
 		{
 			return; // empty glyph (e.g. space)
+		}
+
+		var limit = _glyf + end;
+		if (limit > _data.Length || limit < 0 || _glyf + start + 10 > limit)
+		{
+			return;
 		}
 
 		var p = _glyf + start;
@@ -650,7 +722,12 @@ internal sealed class ManagedFont : IFont
 
 		if (numContours < 0)
 		{
-			EmitCompositeGlyf(builder, p, originX, originY, scale, componentTransform, depth);
+			EmitCompositeGlyf(builder, p, limit, originX, originY, scale, componentTransform, depth);
+			return;
+		}
+
+		if (p + numContours * 2 > limit)
+		{
 			return;
 		}
 
@@ -658,10 +735,19 @@ internal sealed class ManagedFont : IFont
 		for (var c = 0; c < numContours; c++, p += 2)
 		{
 			endPts[c] = U16(_data, p);
+			if (c > 0 && endPts[c] < endPts[c - 1])
+			{
+				return; // non-decreasing endPts, else a contour indexes past the point arrays
+			}
 		}
 
 		var numPoints = numContours == 0 ? 0 : endPts[numContours - 1] + 1;
 		if (numPoints == 0)
+		{
+			return;
+		}
+
+		if (p + 2 > limit)
 		{
 			return;
 		}
@@ -672,10 +758,20 @@ internal sealed class ManagedFont : IFont
 		var flags = new byte[numPoints];
 		for (var i = 0; i < numPoints;)
 		{
+			if (p >= limit)
+			{
+				return;
+			}
+
 			var flag = _data[p++];
 			flags[i++] = flag;
 			if ((flag & 0x08) != 0) // REPEAT_FLAG
 			{
+				if (p >= limit)
+				{
+					return;
+				}
+
 				var repeat = _data[p++];
 				while (repeat-- > 0 && i < numPoints)
 				{
@@ -691,11 +787,21 @@ internal sealed class ManagedFont : IFont
 			var flag = flags[i];
 			if ((flag & 0x02) != 0) // X_SHORT_VECTOR
 			{
+				if (p >= limit)
+				{
+					return;
+				}
+
 				var dx = _data[p++];
 				x += (flag & 0x10) != 0 ? dx : -dx;
 			}
 			else if ((flag & 0x10) == 0) // not X_IS_SAME
 			{
+				if (p + 2 > limit)
+				{
+					return;
+				}
+
 				x += S16(_data, p);
 				p += 2;
 			}
@@ -710,11 +816,21 @@ internal sealed class ManagedFont : IFont
 			var flag = flags[i];
 			if ((flag & 0x04) != 0) // Y_SHORT_VECTOR
 			{
+				if (p >= limit)
+				{
+					return;
+				}
+
 				var dy = _data[p++];
 				y += (flag & 0x20) != 0 ? dy : -dy;
 			}
 			else if ((flag & 0x20) == 0) // not Y_IS_SAME
 			{
+				if (p + 2 > limit)
+				{
+					return;
+				}
+
 				y += S16(_data, p);
 				p += 2;
 			}
@@ -736,11 +852,16 @@ internal sealed class ManagedFont : IFont
 		}
 	}
 
-	private void EmitCompositeGlyf(IPathBuilder builder, int p, float originX, float originY, float scale, Matrix3x2 parentTransform, int depth)
+	private void EmitCompositeGlyf(IPathBuilder builder, int p, int limit, float originX, float originY, float scale, Matrix3x2 parentTransform, int depth)
 	{
 		bool more;
 		do
 		{
+			if (p + 4 > limit)
+			{
+				return;
+			}
+
 			var flags = (ushort)U16(_data, p);
 			p += 2;
 			var componentGlyph = (ushort)U16(_data, p);
@@ -750,12 +871,22 @@ internal sealed class ManagedFont : IFont
 			float dx, dy;
 			if ((flags & 0x0001) != 0) // ARG_1_AND_2_ARE_WORDS
 			{
+				if (p + 4 > limit)
+				{
+					return;
+				}
+
 				dx = S16(_data, p);
 				dy = S16(_data, p + 2);
 				p += 4;
 			}
 			else
 			{
+				if (p + 2 > limit)
+				{
+					return;
+				}
+
 				dx = (sbyte)_data[p];
 				dy = (sbyte)_data[p + 1];
 				p += 2;
@@ -763,6 +894,12 @@ internal sealed class ManagedFont : IFont
 
 			// Point-matching args (bit1 clear) are rare; treat both as an offset (a small positional approximation).
 			float a = 1f, b = 0f, c = 0f, d = 1f;
+			var transformBytes = (flags & 0x0008) != 0 ? 2 : (flags & 0x0040) != 0 ? 4 : (flags & 0x0080) != 0 ? 8 : 0;
+			if (p + transformBytes > limit)
+			{
+				return;
+			}
+
 			if ((flags & 0x0008) != 0) // WE_HAVE_A_SCALE
 			{
 				a = d = F2Dot14(p);
@@ -889,24 +1026,69 @@ internal sealed class ManagedFont : IFont
 	internal static short S16(byte[] d, int o) => (short)U16(d, o);
 	internal static uint U32(byte[] d, int o) => ((uint)d[o] << 24) | ((uint)d[o + 1] << 16) | ((uint)d[o + 2] << 8) | d[o + 3];
 
+	// Collects the control-box top of an emitted outline, so a CFF font's cap height can be measured from 'H'
+	// the way the glyf path reads yMax. Outlines are emitted y-down, so the top is the most negative y.
+	private sealed class GlyphTopProbe : IPathBuilder
+	{
+		private float _minY = float.PositiveInfinity;
+
+		public float Top => float.IsPositiveInfinity(_minY) ? 0f : -_minY;
+
+		public GeometryFillRule FillRule { get; set; }
+
+		public void MoveTo(Vector2 point) => Add(point);
+
+		public void LineTo(Vector2 point) => Add(point);
+
+		public void CubicTo(Vector2 control1, Vector2 control2, Vector2 end)
+		{
+			Add(control1);
+			Add(control2);
+			Add(end);
+		}
+
+		public void QuadraticTo(Vector2 control, Vector2 end)
+		{
+			Add(control);
+			Add(end);
+		}
+
+		public void ArcTo(Vector2 radius, float rotationAngle, bool isLargeArc, bool clockwise, Vector2 end) => Add(end);
+
+		public void Close()
+		{
+		}
+
+		public IGeometry Build() => throw new NotSupportedException("The cap-height probe only measures, it never produces geometry.");
+
+		private void Add(Vector2 point) => _minY = MathF.Min(_minY, point.Y);
+	}
+
 	/// <summary>Unicode <c>cmap</c> subtable (format 4 BMP or format 12 full) mapping codepoints to glyph indices.</summary>
 	private sealed class CmapTable
 	{
 		private readonly int _offset; // absolute offset of the chosen subtable
 		private readonly int _format;
+		private readonly bool _symbol; // Microsoft-Symbol (3,0) encoding
 
-		private CmapTable(int offset, int format) { _offset = offset; _format = format; }
+		private CmapTable(int offset, int format, bool symbol) { _offset = offset; _format = format; _symbol = symbol; }
 
 		public static CmapTable? Parse(byte[] d, int cmap)
 		{
+			if (cmap < 0 || cmap + 4 > d.Length) { return null; }
+
 			int numTables = U16(d, cmap + 2);
-			int best = -1, bestScore = -1;
+			int best = -1, bestScore = -1, bestFormat = 0;
+			var bestSymbol = false;
 			for (var i = 0; i < numTables; i++)
 			{
 				var rec = cmap + 4 + i * 8;
+				if (rec + 8 > d.Length) { break; }
+
 				int plat = U16(d, rec), enc = U16(d, rec + 2);
 				var off = (int)U32(d, rec + 4);
-				// Prefer full-Unicode (3/10, 0/{4,6}) over BMP (3/1, 0/3) over any Unicode platform-0.
+				// Prefer full-Unicode (3/10, 0/{4,6}) over BMP (3/1, 0/3) over any Unicode platform-0, and take a
+				// Microsoft-Symbol table only as a last resort (symbol fonts carry nothing else).
 				var score = (plat, enc) switch
 				{
 					(3, 10) => 5,
@@ -915,27 +1097,54 @@ internal sealed class ManagedFont : IFont
 					(3, 1) => 3,
 					(0, 3) => 3,
 					(0, _) => 2,
+					(3, 0) => 1,
 					_ => -1,
 				};
-				if (score > bestScore) { bestScore = score; best = cmap + off; }
+				if (score <= bestScore) { continue; }
+
+				// The format is part of the choice: a better-scoring subtable this reader can't decode must not
+				// shadow a lower-scoring one it can.
+				var sub = cmap + off;
+				if (sub < 0 || sub + 2 > d.Length) { continue; }
+				var format = U16(d, sub);
+				if (format is not (4 or 12)) { continue; }
+
+				bestScore = score;
+				best = sub;
+				bestFormat = format;
+				bestSymbol = plat == 3 && enc == 0;
 			}
-			if (best < 0) { return null; }
-			var format = U16(d, best);
-			return format is 4 or 12 ? new CmapTable(best, format) : null;
+
+			return best < 0 ? null : new CmapTable(best, bestFormat, bestSymbol);
 		}
 
-		public ushort Map(byte[] d, int codepoint) => _format == 12 ? Map12(d, codepoint) : Map4(d, codepoint);
+		public ushort Map(byte[] d, int codepoint)
+		{
+			var glyph = MapCore(d, codepoint);
+			if (glyph == 0 && _symbol && codepoint < 0x100)
+			{
+				// Microsoft-Symbol cmaps address 0x00-0xFF through the 0xF000 private-use block.
+				glyph = MapCore(d, 0xF000 | codepoint);
+			}
+
+			return glyph;
+		}
+
+		private ushort MapCore(byte[] d, int codepoint) => _format == 12 ? Map12(d, codepoint) : Map4(d, codepoint);
 
 		private ushort Map4(byte[] d, int cp)
 		{
 			if (cp > 0xFFFF) { return 0; }
 			var o = _offset;
+			if (o + 14 > d.Length) { return 0; }
 			var segX2 = U16(d, o + 6);
 			var segCount = segX2 / 2;
 			var endO = o + 14;
 			var startO = endO + segX2 + 2;
 			var deltaO = startO + segX2;
 			var rangeO = deltaO + segX2;
+			// A truncated table must miss, not throw: the shaper treats 0 as .notdef.
+			if (rangeO + segX2 > d.Length) { return 0; }
 			for (var i = 0; i < segCount; i++)
 			{
 				var end = U16(d, endO + i * 2);
@@ -945,7 +1154,9 @@ internal sealed class ManagedFont : IFont
 				int idDelta = S16(d, deltaO + i * 2);
 				var idRange = U16(d, rangeO + i * 2);
 				if (idRange == 0) { return (ushort)((cp + idDelta) & 0xFFFF); }
-				var gi = U16(d, rangeO + i * 2 + idRange + (cp - start) * 2);
+				var glyphO = rangeO + i * 2 + idRange + (cp - start) * 2;
+				if (glyphO < 0 || glyphO + 2 > d.Length) { return 0; }
+				var gi = U16(d, glyphO);
 				return gi == 0 ? (ushort)0 : (ushort)((gi + idDelta) & 0xFFFF);
 			}
 			return 0;
@@ -954,9 +1165,10 @@ internal sealed class ManagedFont : IFont
 		private ushort Map12(byte[] d, int cp)
 		{
 			var o = _offset;
+			if (o + 16 > d.Length) { return 0; }
 			var nGroups = (int)U32(d, o + 12);
 			var g = o + 16;
-			for (var i = 0; i < nGroups; i++, g += 12)
+			for (var i = 0; i < nGroups && g + 12 <= d.Length; i++, g += 12)
 			{
 				uint startC = U32(d, g), endC = U32(d, g + 4), startG = U32(d, g + 8);
 				if (cp >= startC && cp <= endC) { return (ushort)(startG + (cp - startC)); }
@@ -1010,6 +1222,11 @@ internal sealed class ManagedFont : IFont
 			for (var i = 0; i < numLayers; i++)
 			{
 				var p = _layerRecords + (firstLayer + i) * 4;
+				if (p < 0 || p + 4 > _data.Length)
+				{
+					break; // truncated table: emit the layers that are there rather than throwing
+				}
+
 				layers.Add(((ushort)U16(_data, p), U16(_data, p + 2)));
 			}
 
@@ -1027,6 +1244,11 @@ internal sealed class ManagedFont : IFont
 			{
 				var mid = (lo + hi) >> 1;
 				var p = _baseGlyphRecords + mid * 6;
+				if (p < 0 || p + 6 > _data.Length)
+				{
+					return false;
+				}
+
 				var gid = U16(_data, p);
 				if (gid == glyph)
 				{

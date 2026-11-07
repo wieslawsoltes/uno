@@ -1,4 +1,4 @@
-#nullable enable
+﻿#nullable enable
 
 using System;
 using System.Collections.Generic;
@@ -16,7 +16,9 @@ namespace Uno.UI.Composition.Drawing;
 /// </summary>
 internal sealed partial class ManagedGeometry
 {
-	public IGeometry GetStrokeFillGeometry(in StrokeStyle style)
+	public IGeometry GetStrokeFillGeometry(in StrokeStyle style) => GetStrokeFillGeometry(style, 1f);
+
+	public IGeometry GetStrokeFillGeometry(in StrokeStyle style, float scale)
 	{
 		var hw = style.Thickness / 2f;
 		if (hw <= 0)
@@ -26,20 +28,20 @@ internal sealed partial class ManagedGeometry
 
 		// Trim first (if requested), then dash, then stroke the resulting open runs.
 		var source = (style.TrimStart != 0f || style.TrimEnd != 0f)
-			? (ManagedGeometry)Trim(style.TrimStart, style.TrimEnd)
+			? Trim(style.TrimStart, style.TrimEnd, scale)
 			: this;
 
 		var pieces = new List<ManagedContour>();
-		foreach (var run in source.EnumerateStrokeRuns(style))
+		foreach (var run in source.EnumerateStrokeRuns(style, scale))
 		{
 			if (run.ZeroLengthDash)
 			{
-				AddCap(pieces, run.Points[0], -run.Tangent, hw, run.StartCap); // backward
-				AddCap(pieces, run.Points[0], run.Tangent, hw, run.EndCap); // forward
+				AddCap(pieces, run.Points[0], -run.Tangent, hw, run.StartCap, scale); // backward
+				AddCap(pieces, run.Points[0], run.Tangent, hw, run.EndCap, scale); // forward
 				continue;
 			}
 
-			StampRun(pieces, run.Points, run.Closed, run.StartCap, run.EndCap, hw, style);
+			StampRun(pieces, run.Points, run.Closed, run.StartCap, run.EndCap, hw, style, scale);
 		}
 
 		return new ManagedGeometry(pieces, GeometryFillRule.NonZero);
@@ -67,11 +69,11 @@ internal sealed partial class ManagedGeometry
 	}
 
 	/// <summary>Flattens each contour and splits it into the runs to stroke (one per dash, or the whole contour).</summary>
-	private IEnumerable<StrokeRun> EnumerateStrokeRuns(StrokeStyle style)
+	private IEnumerable<StrokeRun> EnumerateStrokeRuns(StrokeStyle style, float scale)
 	{
 		var hasDashes = style.DashArray is { Length: > 0 };
-		var dashes = hasDashes ? ScaleDashes(style.DashArray!, style.Thickness) : null;
-		var dashOffset = style.DashOffset * style.Thickness;
+		var dashes = hasDashes ? NormalizeDashes(style.DashArray!) : null;
+		var dashOffset = style.DashOffset;
 
 		foreach (var contour in Contours)
 		{
@@ -81,7 +83,7 @@ internal sealed partial class ManagedGeometry
 			}
 
 			var points = new List<Vector2> { contour.Start };
-			FlattenInto(contour, includeImplicitClose: contour.Closed, points);
+			FlattenInto(contour, includeImplicitClose: contour.Closed, points, scale);
 
 			if (!hasDashes)
 			{
@@ -97,15 +99,15 @@ internal sealed partial class ManagedGeometry
 		}
 	}
 
-	private static float[] ScaleDashes(float[] dashArray, float thickness)
+	private static float[] NormalizeDashes(float[] dashArray)
 	{
-		var scaled = new float[dashArray.Length % 2 == 0 ? dashArray.Length : dashArray.Length * 2];
-		for (var i = 0; i < scaled.Length; i++)
+		var normalized = new float[dashArray.Length % 2 == 0 ? dashArray.Length : dashArray.Length * 2];
+		for (var i = 0; i < normalized.Length; i++)
 		{
-			scaled[i] = MathF.Max(0f, dashArray[i % dashArray.Length]) * thickness;
+			normalized[i] = MathF.Max(0f, dashArray[i % dashArray.Length]);
 		}
 
-		return scaled;
+		return normalized;
 	}
 
 	private static IEnumerable<StrokeRun> SplitByDashes(List<Vector2> points, float[] dashes, float dashOffset, StrokeStyle style, bool closed)
@@ -140,29 +142,46 @@ internal sealed partial class ManagedGeometry
 		while (pos < pathLength)
 		{
 			var segLen = dashes[idx % dashes.Length];
-			if (segLen > 0)
+			var isOn = idx % 2 == 0;
+			if (segLen <= 0)
 			{
-				var isOn = idx % 2 == 0;
-				if (isOn)
+				// A zero-length "on" interval is the canonical dotted-line idiom ("0 8" with a round cap): it
+				// covers no length, so all it paints is its two caps where the pattern has reached.
+				if (isOn && pos >= 0f && pos <= pathLength && TryPointAt(points, pos, out var dot, out var dotTangent))
 				{
-					var from = MathF.Max(pos, 0f);
-					var to = MathF.Min(pos + segLen, pathLength);
-					if (from < to)
+					yield return new StrokeRun(
+						new[] { dot },
+						closed: false,
+						pos <= 0f && !closed ? style.StartCap : style.DashCap,
+						pos >= pathLength && !closed ? style.EndCap : style.DashCap)
 					{
-						var sub = ExtractSubPolyline(points, from, to);
-						if (sub.Count >= 2)
-						{
-							// Path ends use the real start/end caps; internal dash boundaries use the dash cap.
-							var startCap = from <= 0f && !closed ? style.StartCap : style.DashCap;
-							var endCap = to >= pathLength && !closed ? style.EndCap : style.DashCap;
-							yield return new StrokeRun(sub, closed: false, startCap, endCap);
-						}
-					}
+						ZeroLengthDash = true,
+						Tangent = dotTangent,
+					};
 				}
 
-				pos += segLen;
+				idx++;
+				continue;
 			}
 
+			if (isOn)
+			{
+				var from = MathF.Max(pos, 0f);
+				var to = MathF.Min(pos + segLen, pathLength);
+				if (from < to)
+				{
+					var sub = ExtractSubPolyline(points, from, to);
+					if (sub.Count >= 2)
+					{
+						// Path ends use the real start/end caps; internal dash boundaries use the dash cap.
+						var startCap = from <= 0f && !closed ? style.StartCap : style.DashCap;
+						var endCap = to >= pathLength && !closed ? style.EndCap : style.DashCap;
+						yield return new StrokeRun(sub, closed: false, startCap, endCap);
+					}
+				}
+			}
+
+			pos += segLen;
 			idx++;
 		}
 
@@ -209,6 +228,35 @@ internal sealed partial class ManagedGeometry
 		return false;
 	}
 
+	/// <summary>Point and forward tangent at <paramref name="distance"/> along the polyline.</summary>
+	private static bool TryPointAt(List<Vector2> points, float distance, out Vector2 point, out Vector2 tangent)
+	{
+		var pos = 0f;
+		for (var i = 1; i < points.Count; i++)
+		{
+			var a = points[i - 1];
+			var b = points[i];
+			var segLen = Vector2.Distance(a, b);
+			if (segLen <= 0)
+			{
+				continue;
+			}
+
+			if (distance <= pos + segLen)
+			{
+				point = Vector2.Lerp(a, b, MathF.Max(0f, distance - pos) / segLen);
+				tangent = Dir(a, b);
+				return true;
+			}
+
+			pos += segLen;
+		}
+
+		point = default;
+		tangent = default;
+		return false;
+	}
+
 	private static List<Vector2> ExtractSubPolyline(List<Vector2> points, float from, float to)
 	{
 		var result = new List<Vector2>();
@@ -245,7 +293,7 @@ internal sealed partial class ManagedGeometry
 		return result;
 	}
 
-	private static void StampRun(List<ManagedContour> pieces, IReadOnlyList<Vector2> pts, bool closed, StrokeCap startCap, StrokeCap endCap, float hw, StrokeStyle style)
+	private static void StampRun(List<ManagedContour> pieces, IReadOnlyList<Vector2> pts, bool closed, StrokeCap startCap, StrokeCap endCap, float hw, StrokeStyle style, float scale)
 	{
 		// Drop consecutive duplicates so directions are well-defined.
 		var p = new List<Vector2>(pts.Count);
@@ -264,10 +312,12 @@ internal sealed partial class ManagedGeometry
 
 		if (p.Count < 2)
 		{
-			// A degenerate run (single point) still renders a round/square dot when capped.
-			if (p.Count == 1 && startCap == StrokeCap.Round)
+			// A zero-length subpath still paints a dot from its caps (a disc for Round, a full square for Square);
+			// butt caps paint nothing. The tangent is undefined, so cap along ±X as Skia does.
+			if (p.Count == 1)
 			{
-				AddDisc(pieces, p[0], hw);
+				AddCap(pieces, p[0], new Vector2(-1, 0), hw, startCap, scale);
+				AddCap(pieces, p[0], new Vector2(1, 0), hw, endCap, scale);
 			}
 
 			return;
@@ -284,18 +334,18 @@ internal sealed partial class ManagedGeometry
 		var lastVertex = closed ? count - 1 : count - 1;
 		for (var i = 1; i < lastVertex; i++)
 		{
-			AddJoin(pieces, p[i - 1], p[i], p[i + 1], hw, style);
+			AddJoin(pieces, p[i - 1], p[i], p[i + 1], hw, style, scale);
 		}
 
 		if (closed)
 		{
 			// Join across the closing vertex (p[0]==p[^1]).
-			AddJoin(pieces, p[count - 2], p[0], p[1], hw, style);
+			AddJoin(pieces, p[count - 2], p[0], p[1], hw, style, scale);
 		}
 		else
 		{
-			AddCap(pieces, p[0], Dir(p[1], p[0]), hw, startCap);
-			AddCap(pieces, p[count - 1], Dir(p[count - 2], p[count - 1]), hw, endCap);
+			AddCap(pieces, p[0], Dir(p[1], p[0]), hw, startCap, scale);
+			AddCap(pieces, p[count - 1], Dir(p[count - 2], p[count - 1]), hw, endCap, scale);
 		}
 	}
 
@@ -314,7 +364,7 @@ internal sealed partial class ManagedGeometry
 		AddPolygon(pieces, a + n, b + n, b - n, a - n);
 	}
 
-	private static void AddJoin(List<ManagedContour> pieces, Vector2 prev, Vector2 v, Vector2 next, float hw, StrokeStyle style)
+	private static void AddJoin(List<ManagedContour> pieces, Vector2 prev, Vector2 v, Vector2 next, float hw, StrokeStyle style, float scale)
 	{
 		var dIn = Dir(prev, v);
 		var dOut = Dir(v, next);
@@ -326,7 +376,7 @@ internal sealed partial class ManagedGeometry
 
 		if (style.LineJoin == StrokeJoin.Round)
 		{
-			AddDisc(pieces, v, hw);
+			AddDisc(pieces, v, hw, scale);
 			return;
 		}
 
@@ -339,15 +389,19 @@ internal sealed partial class ManagedGeometry
 
 		if (style.LineJoin is StrokeJoin.Miter or StrokeJoin.MiterOrBevel)
 		{
-			AddMiterJoin(pieces, v, dIn, dOut, hw, style.MiterLimit <= 0 ? 10f : style.MiterLimit);
+			// D2D truncates a Miter join at the limit but BEVELS a MiterOrBevel one; the bevel filler above
+			// already is that bevel, so an over-limit MiterOrBevel just adds nothing more.
+			AddMiterJoin(pieces, v, dIn, dOut, hw, style.MiterLimit <= 0 ? 10f : style.MiterLimit,
+				clipOverLimit: style.LineJoin == StrokeJoin.Miter);
 		}
 	}
 
 	/// <summary>
-	/// Adds the outer-side miter geometry: a full pointed tip within the limit, otherwise the WinUI
-	/// miter-clip trapezoid truncated at the limit (matching SkiaGeometrySource2D's DoLimitedMiter).
+	/// Adds the outer-side miter geometry: a full pointed tip within the limit, otherwise (when
+	/// <paramref name="clipOverLimit"/>) the WinUI miter-clip trapezoid truncated at the limit (matching
+	/// SkiaGeometrySource2D's DoLimitedMiter), or nothing at all — leaving the plain bevel.
 	/// </summary>
-	private static void AddMiterJoin(List<ManagedContour> pieces, Vector2 v, Vector2 dIn, Vector2 dOut, float hw, float miterLimit)
+	private static void AddMiterJoin(List<ManagedContour> pieces, Vector2 v, Vector2 dIn, Vector2 dOut, float hw, float miterLimit, bool clipOverLimit)
 	{
 		var dot = dIn.X * dOut.X + dIn.Y * dOut.Y;
 		var sinHalfSq = (1 + dot) / 2;
@@ -390,6 +444,11 @@ internal sealed partial class ManagedGeometry
 			return;
 		}
 
+		if (!clipOverLimit)
+		{
+			return;
+		}
+
 		// Over the limit: truncate the miter at the limit distance (clipped trapezoid).
 		var cosHalfSq = (1 - dot) / 2;
 		if (cosHalfSq <= 1e-12f)
@@ -407,13 +466,13 @@ internal sealed partial class ManagedGeometry
 		AddPolygon(pieces, bevelIn, bevelIn + dIn * ext, bevelOut - dOut * ext, bevelOut);
 	}
 
-	private static void AddCap(List<ManagedContour> pieces, Vector2 end, Vector2 outwardDir, float hw, StrokeCap cap)
+	private static void AddCap(List<ManagedContour> pieces, Vector2 end, Vector2 outwardDir, float hw, StrokeCap cap, float scale)
 	{
 		var n = Normal(outwardDir) * hw;
 		switch (cap)
 		{
 			case StrokeCap.Round:
-				AddSemicircle(pieces, end, outwardDir, hw);
+				AddSemicircle(pieces, end, outwardDir, hw, scale);
 				break;
 			case StrokeCap.Square:
 				var ext = outwardDir * hw;
@@ -429,10 +488,13 @@ internal sealed partial class ManagedGeometry
 	}
 
 	/// <summary>Half-disc at <paramref name="center"/> bulging toward <paramref name="outwardDir"/> (a round cap).</summary>
-	private static void AddSemicircle(List<ManagedContour> pieces, Vector2 center, Vector2 outwardDir, float radius)
+	private static void AddSemicircle(List<ManagedContour> pieces, Vector2 center, Vector2 outwardDir, float radius, float scale)
 	{
 		var startAngle = MathF.Atan2(-outwardDir.X, outwardDir.Y); // angle of the +normal (-dir.Y, dir.X)
-		const int steps = 16;
+
+		// Step count from the DEVICE radius: a cap that is 2px across locally is 20px across under a 10x ancestor
+		// scale, and the same 16 facets would then be visible.
+		var steps = Math.Clamp((int)MathF.Ceiling(radius * scale), 16, 48);
 		var pts = new Vector2[steps + 1];
 		for (var i = 0; i <= steps; i++)
 		{
@@ -443,9 +505,9 @@ internal sealed partial class ManagedGeometry
 		AddLoop(pieces, pts);
 	}
 
-	private static void AddDisc(List<ManagedContour> pieces, Vector2 center, float radius)
+	private static void AddDisc(List<ManagedContour> pieces, Vector2 center, float radius, float scale)
 	{
-		var steps = Math.Clamp((int)MathF.Ceiling(radius * 2f), 24, 96);
+		var steps = Math.Clamp((int)MathF.Ceiling(radius * 2f * scale), 24, 96);
 		var pts = new Vector2[steps];
 		for (var i = 0; i < steps; i++)
 		{

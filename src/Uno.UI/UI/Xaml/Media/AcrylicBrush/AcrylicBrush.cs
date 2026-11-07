@@ -1,4 +1,4 @@
-using Color = Windows.UI.Color;
+﻿using Color = Windows.UI.Color;
 using System;
 using System.IO;
 using Windows.UI;
@@ -7,6 +7,7 @@ using Windows.Graphics.Effects;
 using Microsoft.Graphics.Canvas;
 using System.Collections.Generic;
 using Microsoft.Graphics.Canvas.Effects;
+using Uno.UI.Helpers.Boxes;
 
 namespace Microsoft.UI.Xaml.Media
 {
@@ -39,7 +40,7 @@ namespace Microsoft.UI.Xaml.Media
 		public double TintOpacity
 		{
 			get => (double)GetValue(TintOpacityProperty);
-			set => SetValue(TintOpacityProperty, value);
+			set => SetValue(TintOpacityProperty, Boxer.Box(value));
 		}
 
 		/// <summary>
@@ -127,7 +128,7 @@ namespace Microsoft.UI.Xaml.Media
 					// on platforms other than WASM and Skia, we default to using fallback where not completely safe
 					// When this is explicitly set to false, Acrylic will be displayed
 #if __SKIA__
-					false
+					BoolBoxes.False
 #else
 					true
 #endif
@@ -239,34 +240,41 @@ namespace Microsoft.UI.Xaml.Media
 			CompositionBrush = _brush;
 		}
 
-		// The noise texture is a small static asset tiled across every acrylic; decode + upload it once, shared across
-		// all AcrylicBrush instances. Null if the asset is missing or no codec/backend is available yet.
-		private static global::Uno.UI.Composition.Drawing.ITexture? _sharedNoiseTexture;
+		// The noise is a small static asset tiled across every acrylic, so it is decoded once and shared. It stays
+		// a CPU-side image here: turning it into a texture binds it to one device, and which device that is only
+		// becomes known when a session paints it.
+		private static readonly object _noiseGate = new();
+		private static global::Uno.UI.Composition.Drawing.IImage? _sharedNoiseImage;
+		private static bool _noiseDecodeFailed;
 
-		private static global::Uno.UI.Composition.Drawing.ITexture? EnsureNoiseTexture()
+		private static global::Uno.UI.Composition.Drawing.IImage? EnsureNoiseImage()
 		{
-			if (_sharedNoiseTexture is not null)
+			lock (_noiseGate)
 			{
-				return _sharedNoiseTexture;
-			}
+				if (_sharedNoiseImage is not null || _noiseDecodeFailed)
+				{
+					return _sharedNoiseImage;
+				}
 
-			using var stream = typeof(AcrylicBrush).Assembly.GetManifestResourceStream(EffectNames.NoiseAsset);
-			if (stream is null
-				|| !global::Uno.UI.Composition.Drawing.ImageEncoderDecoder.Current.TryDecode(stream, null, null, out var frames)
-				|| frames.Frames.Count == 0)
-			{
-				return null;
-			}
+				using var stream = typeof(AcrylicBrush).Assembly.GetManifestResourceStream(EffectNames.NoiseAsset);
+				if (stream is null
+					|| !global::Uno.UI.Composition.Drawing.ImageEncoderDecoder.Current.TryDecode(stream, null, null, out var frames)
+					|| frames.Frames.Count == 0)
+				{
+					_noiseDecodeFailed = true;
+					return null;
+				}
 
-			_sharedNoiseTexture = global::Uno.UI.Composition.Drawing.DrawingFactory.Current.CreateTexture(frames.Frames[0]);
-			return _sharedNoiseTexture;
+				_sharedNoiseImage = frames.Frames[0];
+				return _sharedNoiseImage;
+			}
 		}
 
 		// The direct acrylic material: a dedicated brush doing backdrop blur + luminosity + tint + noise on the neutral
 		// drawing seam, rather than a WinUI composition-effect graph.
 		private CompositionBrush CreateAcrylicBrushDirect(Compositor compositor)
 		{
-			if (EnsureNoiseTexture() is not { } noise)
+			if (EnsureNoiseImage() is not { } noise)
 			{
 				return compositor.CreateColorBrush(FallbackColor);
 			}
@@ -283,7 +291,7 @@ namespace Microsoft.UI.Xaml.Media
 				TintColor = tintColor,
 				BlurSigma = BlurRadius,
 				NoiseOpacity = NoiseOpacity,
-				NoiseTexture = noise,
+				NoiseImage = noise,
 			};
 		}
 

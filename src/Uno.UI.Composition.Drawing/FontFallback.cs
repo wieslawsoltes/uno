@@ -1,4 +1,4 @@
-#nullable enable
+﻿#nullable enable
 
 using System;
 using System.Collections.Generic;
@@ -11,13 +11,14 @@ using Windows.UI.Text;
 namespace Uno.UI.Composition.Drawing;
 
 /// <summary>
-/// The default providers' codepoint fallback: what to render when neither the requested family nor the backend's own
+/// The default providers' fallback: what to render when neither the requested family nor the backend's own
 /// installed-font lookup covers a codepoint. Backend-agnostic — it drives the given <see cref="IFontProvider"/>'s own
 /// <see cref="IFontProvider.CreateFont"/>/<see cref="IFont.ContainsGlyph"/>, so both the Skia and managed providers get
 /// the same fallback. Platform-selected at runtime: the browser fetches Noto fonts on demand (no broadly-covering
 /// installed fonts there); Android scans its bundled system fonts; other platforms rely on the backend lookup and add
 /// nothing here. Public so a backend provider (which stands only on this assembly's public seam) can reuse it from its
-/// <see cref="IFontProvider.MatchCharacterAsync"/>; a third-party provider may call it or supply its own fallback.
+/// <see cref="IFontProvider.MatchFamilyAsync"/>/<see cref="IFontProvider.MatchCharacterAsync"/>; a third-party provider
+/// may call it or supply its own fallback.
 /// </summary>
 public static class FontFallback
 {
@@ -27,8 +28,55 @@ public static class FontFallback
 	// shaping across them (joining scripts render disconnected).
 	private static readonly Dictionary<(IFontProvider, string, FontWeight, FontStretch, FontStyle, float), IFont?> _fetched = new();
 	private static readonly object _fetchedGate = new();
-	private static (byte[] bytes, IFont probe)[]? _androidSystemFonts;
+	private static (string path, IFont probe)[]? _androidSystemFonts;
 	private static readonly object _androidGate = new();
+
+	/// <summary>
+	/// The font for a family the platform itself does not have, when the fallback source knows it by name -- the
+	/// browser has no installed fonts, so a FontFamily naming a Noto family is only resolvable this way. Null when
+	/// nothing can supply it, and the caller falls back to the platform's own family lookup.
+	/// </summary>
+	public static async ValueTask<IFont?> MatchFamilyAsync(IFontProvider provider, string family, FontWeight weight, FontStretch stretch, FontStyle style, float fontSize)
+	{
+		if (!OperatingSystem.IsBrowser())
+		{
+			return null;
+		}
+
+		var key = (provider, family, weight, stretch, style, fontSize);
+		lock (_fetchedGate)
+		{
+			if (_fetched.TryGetValue(key, out var cached))
+			{
+				return cached;
+			}
+		}
+
+		var noto = _noto ??= NotoFontFallbackService.Instance;
+		using var stream = await noto.GetFontStreamForFontFamily(family, weight, stretch, style);
+		if (stream is null)
+		{
+			return null;
+		}
+
+		IFont? font;
+		using (var file = provider.LoadFontFile(stream))
+		{
+			font = file.CreateFont(family, weight, stretch, style, fontSize);
+		}
+
+		lock (_fetchedGate)
+		{
+			if (_fetched.TryGetValue(key, out var raced))
+			{
+				return raced;
+			}
+
+			_fetched[key] = font;
+		}
+
+		return font;
+	}
 
 	/// <summary>
 	/// Resolves a font that can render <paramref name="codepoint"/> via the platform fallback, or <c>null</c>. Callers
@@ -56,7 +104,13 @@ public static class FontFallback
 			}
 
 			using var stream = await noto.GetFontStreamForFontFamily(family, weight, stretch, style);
-			var font = stream is null ? null : provider.CreateFont(ReadAllBytes(stream), family, weight, stretch, style, fontSize);
+			IFont? font = null;
+			if (stream is not null)
+			{
+				using var file = provider.LoadFontFile(stream);
+				font = file.CreateFont(family, weight, stretch, style, fontSize);
+			}
+
 			lock (_fetchedGate)
 			{
 				// A concurrent miss may have raced us here; keep whichever instance got stored first so every
@@ -91,8 +145,35 @@ public static class FontFallback
 					{
 						return cachedAndroid;
 					}
+				}
 
-					var created = provider.CreateFont(fonts[i].bytes, null, weight, stretch, style, fontSize);
+				// Re-read on the hit rather than holding every system font's bytes: /system/fonts carries the CJK
+				// and emoji faces, tens of MB each, and a miss only reaches here once per style. Read outside the
+				// lock so a multi-MB read does not block every other fallback lookup.
+				IFont? created = null;
+				try
+				{
+					using var stream = File.OpenRead(fonts[i].path);
+					using var file = provider.LoadFontFile(stream);
+					created = file.CreateFont(null, weight, stretch, style, fontSize);
+				}
+				catch
+				{
+					// unreadable since enumeration — try the next font that covers the codepoint
+				}
+
+				if (created is null)
+				{
+					continue;
+				}
+
+				lock (_fetchedGate)
+				{
+					if (_fetched.TryGetValue(androidKey, out var raced))
+					{
+						return raced;
+					}
+
 					_fetched[androidKey] = created;
 					return created;
 				}
@@ -102,24 +183,25 @@ public static class FontFallback
 		return null;
 	}
 
-	// Loads Android's bundled system fonts once, using the provider to build a coverage probe per file. Kept in memory
-	// so subsequent codepoint misses resolve synchronously (matching the previous HarfBuzz-based service's caching).
-	private static (byte[] bytes, IFont probe)[] GetAndroidSystemFonts(IFontProvider provider)
+	// Builds a coverage probe per bundled system font once, so subsequent codepoint misses resolve synchronously.
+	// Only the path is kept alongside it: the bytes are re-read when a font is actually selected.
+	private static (string path, IFont probe)[] GetAndroidSystemFonts(IFontProvider provider)
 	{
 		lock (_androidGate)
 		{
 			if (_androidSystemFonts is null)
 			{
-				var loaded = new List<(byte[], IFont)>();
+				var loaded = new List<(string, IFont)>();
 				foreach (var path in SafeEnumerateSystemFonts())
 				{
 					try
 					{
-						var bytes = File.ReadAllBytes(path);
+						using var stream = File.OpenRead(path);
+						using var file = provider.LoadFontFile(stream);
 						// The probe is only used for ContainsGlyph, so the style/size are immaterial.
-						if (provider.CreateFont(bytes, null, FontWeights.Normal, FontStretch.Normal, FontStyle.Normal, 16f) is { } probe)
+						if (file.CreateFont(null, new FontWeight(400), FontStretch.Normal, FontStyle.Normal, 16f) is { } probe)
 						{
-							loaded.Add((bytes, probe));
+							loaded.Add((path, probe));
 						}
 					}
 					catch
@@ -144,17 +226,5 @@ public static class FontFallback
 		{
 			return Array.Empty<string>();
 		}
-	}
-
-	private static byte[] ReadAllBytes(Stream stream)
-	{
-		if (stream is MemoryStream ms && ms.TryGetBuffer(out var seg) && seg.Offset == 0 && seg.Count == seg.Array!.Length)
-		{
-			return seg.Array;
-		}
-
-		using var copy = new MemoryStream();
-		stream.CopyTo(copy);
-		return copy.ToArray();
 	}
 }

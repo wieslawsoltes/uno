@@ -5,8 +5,8 @@
 using System;
 using System.Collections.Generic;
 using System.Numerics;
-using Uno.WebGpu.Native;
-using static Uno.WebGpu.Native.WGPU;
+using Silk.NET.WebGPU;
+using Buffer = Silk.NET.WebGPU.Buffer;
 using WColor = Windows.UI.Color;
 
 namespace Uno.UI.Composition.WebGpu;
@@ -40,7 +40,7 @@ internal sealed unsafe partial class WebGpuFrame
 		var r = outer;
 		// The command's containment proof covers its own recorded clip; the replay site's can still cut it.
 		r.ScissorInert = c.ScissorInert && outer.ScissorInert;
-		r.Coverage = 0; r.CoverageFiltered = false; r.AabbInClipU = false; r.ScissorLoadBearing = false;
+		r.Coverage = null; r.CoverageFiltered = false; r.AabbInClipU = false; r.ScissorLoadBearing = false;
 		if (IsFiniteAabb(c.Aabb))
 		{
 			var a = identity ? c.Aabb : TransformBounds(c.Aabb, m);
@@ -158,10 +158,21 @@ internal sealed unsafe partial class WebGpuFrame
 							var (a0, a1, a2, a3) = identity ? (rc0.P0, rc0.P1, rc0.P2, rc0.P3) : (Map(rc0.P0, m), Map(rc0.P1, m), Map(rc0.P2, m), Map(rc0.P3, m));
 							var ast = (uint)(_rrect.Count / VertexStride.RoundedRect);
 							AppendAaRect(_rrect, rc0.Color, a0, a1, a2, a3);
-							ops.Add(DrawOp.Shared(DrawKind.RoundedRect, ast, 6, IntPtr.Zero, cd, MakeClipBg(cd)));
+							var aop = DrawOp.Shared(DrawKind.RoundedRect, ast, 6, null, cd, MakeClipBg(cd));
+							aop.Bounds = AaRect(a0, a1, a2, a3);
+							if (rc0.Color.A == 255 && ClipIsPlain(cd)) { aop.Cover = aop.Bounds; aop.Fill = rc0.Color; }
+							ops.Add(aop);
 							break;
 						}
-						ops.Add(DrawOp.Shared(DrawKind.Solid, start, (uint)((j - ci) * 6), IntPtr.Zero, cd, MakeClipBg(cd)));
+						var sop = DrawOp.Shared(DrawKind.Solid, start, (uint)((j - ci) * 6), null, cd, MakeClipBg(cd));
+						// Only a run of one: a longer run's rects need not tile the box they share, so its box is not painted.
+						if (j == ci + 1)
+						{
+							var (s0, s1, s2, s3) = identity ? (rc0.P0, rc0.P1, rc0.P2, rc0.P3) : (Map(rc0.P0, m), Map(rc0.P1, m), Map(rc0.P2, m), Map(rc0.P3, m));
+							sop.Bounds = AaRect(s0, s1, s2, s3);
+							if (rc0.Color.A == 255 && ClipIsPlain(cd)) { sop.Cover = sop.Bounds; sop.Fill = rc0.Color; }
+						}
+						ops.Add(sop);
 						ci = j - 1;
 						break;
 					}
@@ -170,9 +181,13 @@ internal sealed unsafe partial class WebGpuFrame
 						var rri = (RoundedRectCmd)cmd;
 						var cd = composer.Compose(outer, rri.Clip, m, inv, direct);
 						uint st = (uint)(_rrect.Count / VertexStride.RoundedRect);
-						if (identity) { AppendRrect(_rrect, rri, rri.P0, rri.P1, rri.P2, rri.P3); }
-						else { AppendRrect(_rrect, rri, Map(rri.P0, m), Map(rri.P1, m), Map(rri.P2, m), Map(rri.P3, m)); }
-						ops.Add(DrawOp.Shared(DrawKind.RoundedRect, st, 6, IntPtr.Zero, cd, MakeClipBg(cd)));
+						var (r0, r1, r2, r3) = identity ? (rri.P0, rri.P1, rri.P2, rri.P3) : (Map(rri.P0, m), Map(rri.P1, m), Map(rri.P2, m), Map(rri.P3, m));
+						var rn = (uint)AppendRrect(_rrect, rri, r0, r1, r2, r3);
+						var rop = DrawOp.Shared(DrawKind.RoundedRect, st, rn, null, cd, MakeClipBg(cd));
+						rop.Bounds = AaRect(r0, r1, r2, r3);
+						rop.Cover = OpaqueRrect(rri) ? Meet(RrectCover(rri, rop.Bounds), ClipInner(cd)) : default;
+						if (rop.Cover != default) { rop.Fill = rri.Color; }
+						ops.Add(rop);
 						break;
 					}
 				case CmdKind.Path:
@@ -253,10 +268,18 @@ internal sealed unsafe partial class WebGpuFrame
 		var dst = owned is null ? _quadVerts : new VertBuf();
 		var first = (uint)(dst.Count / VertexStride.Quad);
 		AppendQuad(dst, p0, p1, p2, p3, im.U0, im.V0, im.U1, im.V1);
-		ops.Add(QuadOp(DrawKind.Image, dst, first, ImageBg(im, owned), cd, owned));
+		var iop = QuadOp(DrawKind.Image, dst, first, ImageBg(im, owned), cd, owned);
+		// A photo over a card hides it. Only a plain draw of an all-opaque texture qualifies -- a tint, a colour
+		// matrix or a sub-1 opacity all let what is underneath through -- and only inside its clip's inner box.
+		iop.Bounds = AaRect(p0, p1, p2, p3);
+		if (im.SourceOpaque && im.Opacity >= 1f && im.TintMode == 0 && im.ColorMatrix is null)
+		{
+			iop.Cover = Meet(iop.Bounds, ClipInner(cd));
+		}
+		ops.Add(iop);
 	}
 
-	private DrawOp QuadOp(DrawKind kind, VertBuf verts, uint first, IntPtr group1, in ClipData cd, OwnedResources owned)
+	private DrawOp QuadOp(DrawKind kind, VertBuf verts, uint first, BindGroup* group1, in ClipData cd, OwnedResources owned)
 		=> owned is null
 			? DrawOp.Shared(kind, first, 6, group1, cd, MakeClipBg(cd))
 			: DrawOp.Own(kind, Vbuf(verts, VertexStride.Quad, owned), 6, group1, cd, MakeClipBg(cd, owned));
@@ -399,8 +422,41 @@ internal sealed unsafe partial class WebGpuFrame
 		if (System.Threading.Interlocked.Decrement(ref e.Refs) > 0) { return; }
 		e.IdleSince = _d.FrameSeq;
 		if (e.ContentKey != 0) { return; }
-		foreach (var st in e.Stamps) { _d.DeferCompiledRelease(null, st.Owned); _d.DeferSiteRelease(st.SiteBg, st.SiteSlot); }
-		_d.DeferCompiledRelease(e.Owned, null);
+		e.ReleaseFinal(_d);
+	}
+
+	// Every entry that holds atlas slots, for EvictAtlasHolders. Weak: a recording that is collected takes its entry.
+	private static readonly List<WeakReference<WebGpuGeometryCache>> s_atlasHolders = new();
+
+	/// <summary>
+	/// Makes atlas room once an entry was refused for want of it. A slot's UVs are baked into its holder's ops, so
+	/// room is made by retiring whole entries: those not drawn this frame or the last hand back their bags (and with
+	/// them their slots) and rebuild on their next replay. The site slots stay with the entry's final release, the
+	/// one place they are freed. Called before the walk.
+	/// </summary>
+	internal void EvictAtlasHolders()
+	{
+		if (!_d.AtlasStarved) { return; }
+		_d.AtlasStarved = false;
+		_d.AtlasEvictions++;
+		for (var i = s_atlasHolders.Count - 1; i >= 0; i--)
+		{
+			if (!s_atlasHolders[i].TryGetTarget(out var e) || e.Evicted) { s_atlasHolders.RemoveAt(i); continue; }
+			if (!ReferenceEquals(e.Device, _d) || e.SitesFrame >= _d.FrameSeq - 1) { continue; }
+			s_atlasHolders.RemoveAt(i);
+			e.Evicted = true;
+			// Unpooled first, so a holder releasing concurrently takes the unpooled path and frees the site slots.
+			if (e.ContentKey != 0 && s_entryPool.TryGetValue(e.ContentKey, out var pooled) && ReferenceEquals(pooled, e)) { s_entryPool.Remove(e.ContentKey); }
+			e.ContentKey = 0;
+			if (e.Refs <= 0)
+			{
+				// No holder left: either only the pool held it and has let it go, or its last holder already freed it.
+				e.ReleaseFinal(_d);
+				continue;
+			}
+			_d.DeferRelease(e.Owned);
+			foreach (var st in e.Stamps) { _d.DeferRelease(st.Owned); }
+		}
 	}
 
 	/// <summary>
@@ -415,8 +471,7 @@ internal sealed unsafe partial class WebGpuFrame
 			var e = kv.Value;
 			if (e.Refs > 0 || !ReferenceEquals(e.Device, _d) || _d.FrameSeq - e.IdleSince < EntryPoolIdleFrames) { continue; }
 			(drop ??= new()).Add(kv.Key);
-			foreach (var st in e.Stamps) { _d.DeferCompiledRelease(null, st.Owned); _d.DeferSiteRelease(st.SiteBg, st.SiteSlot); }
-			_d.DeferCompiledRelease(e.Owned, null);
+			e.ReleaseFinal(_d);
 		}
 		if (drop is not null) { foreach (var k in drop) { s_entryPool.Remove(k); } }
 	}
@@ -448,7 +503,7 @@ internal sealed unsafe partial class WebGpuFrame
 			// two identical recordings different keys and they would never reach the equality check.
 			Mix(c.Clip.ScissorInert ? 1 : 0);
 			if (!c.Clip.ScissorInert) { MixV4(c.Clip.Aabb); }
-			Mix(c.Clip.Coverage);
+			Mix((nint)c.Clip.Coverage);
 			Mix(c.Clip.CoverageFiltered ? 1 : 0);
 			Mix(c.Clip.Entries?.Length ?? 0);
 			if (c.Clip.Entries is { } ents)
@@ -559,6 +614,9 @@ internal sealed unsafe partial class WebGpuFrame
 	/// </summary>
 	private void EmitArena(ReplayRefCmd rr, in Matrix3x2 rm, in ClipData session, List<DrawOp> ops)
 	{
+		// One depth per replay site, rising with draw order. Ops of a site share it, so they never reject each
+		// other; only a LATER site's opaque cover can reject them. Held under 1, which device-space ops own.
+		float siteDepth = MathF.Min(0.999f, ++_siteSeq * SiteDepthStep);
 		var entry = rr.Data.Compiled;
 		if (_emitStats) { StatArenaHits++; }
 		long t0 = _emitStats ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
@@ -574,7 +632,7 @@ internal sealed unsafe partial class WebGpuFrame
 			if (_emitStats) { StatPoolHits++; }
 		}
 		bool miss = entry is null;
-		if (miss || AtlasNeedsRebuild(entry, rm))
+		if (miss || entry.Evicted || (entry.StarvedBeforeEviction >= 0 && _d.AtlasEvictions > entry.StarvedBeforeEviction) || AtlasNeedsRebuild(entry, rm))
 		{
 			if (_emitStats) { _statArenaRebuilds++; if (miss) { _statArMiss++; } else { _statArMasks++; } }
 			// Shared entries are released by their last holder (or the pool sweep), never by whoever rebuilds first.
@@ -584,9 +642,11 @@ internal sealed unsafe partial class WebGpuFrame
 			bool hasPath = false; foreach (var c in rr.Commands) { if (c is PathCmd) { hasPath = true; break; } }
 			int atlasBefore = WebGpuCoverage.AtlasHit + WebGpuCoverage.AtlasBaked;
 			int maskBefore = WebGpuCoverage.ClipMasksBaked + WebGpuCoverage.FillMasksBaked + WebGpuCoverage.FillMaskHits;
+			int noRoomBefore = WebGpuCoverage.AtlasNoRoom;
 			bool atlasSafe = TryAtlasScale(rm, out var scale);
 			BuildCoalesced(rr.Commands, built, owned, atlasScale: atlasSafe ? scale : null, maskScale: atlasSafe ? scale : MaskScale(rm), place: new Vector2(rm.M31, rm.M32));
 			RealizeOwnedVertices(built, owned);
+			owned.ClipMemo = null;
 			bool hasPathClip = false; foreach (var o in built) { if (o.Clip.Paths is not null) { hasPathClip = true; break; } }
 			entry = new WebGpuGeometryCache
 			{
@@ -603,6 +663,8 @@ internal sealed unsafe partial class WebGpuFrame
 			};
 			entry.Refs = 1;
 			entry.ContentKey = key;
+			if (WebGpuCoverage.AtlasNoRoom != noRoomBefore) { entry.StarvedBeforeEviction = _d.AtlasEvictions; }
+			if (entry.HasAtlas || entry.HasClipMask) { s_atlasHolders.Add(new WeakReference<WebGpuGeometryCache>(entry)); }
 			if (key != 0)
 			{
 				if (s_entryPool.TryGetValue(key, out var displaced) && !ReferenceEquals(displaced, entry))
@@ -674,15 +736,23 @@ internal sealed unsafe partial class WebGpuFrame
 			// When the site's clip can ride the site uniform, no op's clip depends on where the recording sits any
 			// more -- so a move writes THIS block and nothing else.
 			var siteCarries = SiteCanCarry(session);
-			WriteSite(slot.SiteSlot, rm, session, siteCarries);
+			WriteSite(slot.SiteSlot, rm, session, siteCarries, siteDepth);
 			// The ops' scissor, once for the whole site.
 			SetSiteScissor(slot.SiteSlot, IsFiniteAabb(session.Aabb) ? session.Aabb : ClipData.None.Aabb);
+			// An op's ClipU holds finv's linear part and the per-pixel steps derived from it, so only a stamp made at
+			// the same scale and rotation can be reused or patched where it lies.
+			var sameLinear = !fresh
+				&& slot.Xform.M11 == rm.M11 && slot.Xform.M12 == rm.M12
+				&& slot.Xform.M21 == rm.M21 && slot.Xform.M22 == rm.M22;
 			// Every op of this site is then independent of where the site is, so a move reuses the list as it
 			// stands -- no per-op work at all, which is the point of the site block.
-			if (siteCarries && !fresh && slot.SiteOps)
+			if (siteCarries && sameLinear && slot.SiteOps)
 			{
+				// The slot now serves this site: a later site still matching the old placement would rewrite the
+				// uniform these ops read and draw this site there.
+				slot.Xform = rm; slot.Clip = session; slot.Basis = basis; slot.SessionEntries = sessionEntries;
 				slot.Frame = _d.FrameSeq;
-				ops.AddRange(slot.Ops);
+				AppendSite(ops, slot.Ops, rm, session, siteDepth);
 				return;
 			}
 			var stampOwned = fresh ? new OwnedResources() : slot.Owned;
@@ -696,10 +766,8 @@ internal sealed unsafe partial class WebGpuFrame
 			// copied. This is the scrolling case -- the one that restamps every op of every record every frame.
 			// The basis is free to move with it: it reaches the ClipU only through two finv translation floats,
 			// which the patch recomputes.
-			var moved = !fresh
+			var moved = sameLinear
 				&& session.Paths is null && !entry.HasPathClip
-				&& slot.Xform.M11 == rm.M11 && slot.Xform.M12 == rm.M12
-				&& slot.Xform.M21 == rm.M21 && slot.Xform.M22 == rm.M22
 				&& !(IsFiniteAabb(session.Aabb) && (finv.M12 != 0 || finv.M21 != 0))
 				&& SessionShapeUnchanged(slot.Clip, session);
 			Dictionary<PathClip[], PathClip[]> pathsMemo = null;
@@ -739,13 +807,15 @@ internal sealed unsafe partial class WebGpuFrame
 				}
 				else
 				{
-					var clipBg = MakeClipBgOwned(uClip, stampOwned, rm, finv, out var buf, out var folded);
+					// A later move patches each slot from the op's own clip, so only ops whose clip is unfolded may share one.
+					var clipBg = MakeClipBgOwned(uClip, stampOwned, rm, finv, out var buf, out var folded, share: siteCarries);
 					scissorClip.AabbInClipU = folded;
 					scissorClip.ScissorLoadBearing = !folded;
 					bufs.Add(buf);
 					stamped.Add(op.WithClipSite(scissorClip, clipBg, slot.SiteBg, siteCarries ? slot.SiteSlot : 0));
 				}
 			}
+			stampOwned.ClipMemo = null;
 			slot.Owned = stampOwned; slot.Ops = stamped; slot.Bufs = bufs; slot.SiteOps = siteCarries;
 			slot.Xform = rm; slot.Clip = session; slot.Basis = basis; slot.SessionEntries = sessionEntries;
 			if (_emitStats) { StampTicks += System.Diagnostics.Stopwatch.GetTimestamp() - t0; }
@@ -754,13 +824,132 @@ internal sealed unsafe partial class WebGpuFrame
 		{
 			// A matched stamp keeps its ops, but the site block they read is per-slot GPU state that another
 			// render may have moved on from - rewrite it so the ops are placed and scissored for THIS replay.
-			WriteSite(slot.SiteSlot, rm, session, slot.SiteOps);
+			WriteSite(slot.SiteSlot, rm, session, slot.SiteOps, siteDepth);
 			SetSiteScissor(slot.SiteSlot, IsFiniteAabb(session.Aabb) ? session.Aabb : ClipData.None.Aabb);
 		}
 
 		slot.Frame = _d.FrameSeq;
-		ops.AddRange(slot.Ops);
+		AppendSite(ops, slot.Ops, rm, session, siteDepth);
 	}
+
+	// A stamp's ops into the pass list, each op's box lifted from its recording's space into device pixels -- that is
+	// the space the occlusion cull compares in, and a stamp's ops are shared across the sites replaying it.
+	private static void AppendSite(List<DrawOp> ops, List<DrawOp> stamped, in Matrix3x2 rm, in ClipData session, float depth)
+	{
+		// A rotated or skewed placement does not map a box to the box it paints.
+		bool boxes = rm.M12 == 0f && rm.M21 == 0f;
+		// A session clip beyond a plain rect need not cost the site every cover it has: the op still paints at full
+		// alpha wherever that clip is fully inside, which is its inner box. Without this one rounded corner on the
+		// card disqualifies everything inside it from ever occluding.
+		// This is also the ONLY place the session restriction can be applied: the session clip is in device space
+		// while a recorded op's own clip is in its recording's, so the prepass cannot intersect the two later.
+		var sessionInner = boxes ? ClipInner(session) : default;
+		bool innerOk = sessionInner != default;
+		foreach (var op in stamped)
+		{
+			// Nothing of it lands inside the site's clip. Dropped from this frame only: the stamp keeps the op for
+			// the replays (a scroll) that bring it into view.
+			if (boxes && op.Extent != default && IsEmpty(ClampToClip(TransformBounds(op.Extent, rm), session)))
+			{
+				StatClipCulled++;
+				continue;
+			}
+
+			var o = op;
+			o.Depth = depth;
+			o.Bounds = boxes && op.Bounds != default ? TransformBounds(op.Bounds, rm) : default;
+			o.Cover = op.Cover != default && innerOk ? Meet(TransformBounds(op.Cover, rm), sessionInner) : default;
+			ops.Add(o);
+		}
+	}
+
+	/// <summary>
+	/// The rounded rect a recording's opaque content fills, in the recording's own space. A drop shadow is the
+	/// blurred ALPHA of its content, so when one opaque shape covers everything the recording draws, the shadow is
+	/// that shape's -- the photo, scrim and caption inside a card contribute nothing. Memoised: a recording's
+	/// commands are immutable, so this is answered once and reused for its life.
+	/// </summary>
+	private static bool TrySilhouette(WebGpuRenderRecord rec, out Vector4 rect, out Vector4 radii)
+	{
+		if (rec.SilhouetteMemo is { } memo) { rect = memo.Rect; radii = memo.Radii; return memo.Known; }
+		var found = Silhouette(rec.Commands, CmdListBounds(rec.Commands), out rect, out radii);
+		rec.SilhouetteMemo = (rect, radii, found);
+		return found;
+	}
+
+	private static bool Silhouette(List<WebGpuCommand> cmds, in Vector4 bounds, out Vector4 rect, out Vector4 radii)
+	{
+		rect = default; radii = default;
+		if (bounds.Z <= bounds.X) { return false; }
+		foreach (var c in cmds)
+		{
+			// A nested recording: its own opaque shape can be the silhouette, moved into this space and cut by the
+			// clip the reference carries -- which is where a CornerRadius over overflowing content ends up, so
+			// dropping it hands back the unclipped, square inner shape.
+			if (c is ReplayRefCmd rr && rr.Commands is not null)
+			{
+				if (!Silhouette(rr.Commands, CmdListBounds(rr.Commands), out var ir, out var irad)) { continue; }
+				var moved = TransformBounds(ir, rr.Transform2);
+				if (!ClipSilhouette(rr.Clip, ref moved, ref irad)) { continue; }
+				if (Covers(moved, bounds)) { rect = moved; radii = irad; return true; }
+				continue;
+			}
+			if (c is RoundedRectCmd rq && OpaqueRrect(rq) && ClipIsPlain(rq.Clip))
+			{
+				var box = AaRect(rq.P0, rq.P1, rq.P2, rq.P3);
+				if (Covers(box, bounds)) { rect = box; radii = rq.Radii; return true; }
+			}
+			// An opaque image is a hard-edged quad; a rounded clip around it makes the outline rounded.
+			else if (c is ImageCmd im && im.SourceOpaque && im.Opacity >= 1f && im.TintMode == 0 && im.ColorMatrix is null)
+			{
+				var box = AaRect(im.P0, im.P1, im.P2, im.P3);
+				var ent = im.Clip.Entries;
+				if (ent is { Length: 1 } && !ent[0].Exclude && !ent[0].Mask && ent[0].Radii == ent[0].RadiiY)
+				{
+					var meet = Meet(box, ent[0].Rect);
+					if (Covers(meet, bounds)) { rect = meet; radii = ent[0].Radii; return true; }
+				}
+				else if (ent is null or { Length: 0 } && Covers(box, bounds))
+				{
+					rect = box; radii = Vector4.Zero; return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	/// <summary>Cuts a silhouette by a clip. Only a single plain rounded-rect entry can be carried: anything else
+	/// leaves a shape this cannot describe, so the caller gives up.</summary>
+	private static bool ClipSilhouette(in ClipData cd, ref Vector4 rect, ref Vector4 radii)
+	{
+		if (cd.Paths is not null || cd.Coverage != null) { return false; }
+		if (!cd.ScissorInert && IsFiniteAabb(cd.Aabb)) { rect = Meet(rect, cd.Aabb); }
+		var ents = cd.Entries;
+		if (ents is null || ents.Length == 0) { return rect.Z > rect.X && rect.W > rect.Y; }
+		if (ents.Length != 1) { return false; }
+		ref readonly var e = ref ents[0];
+		// Axis-aligned only: a rotated clip does not leave a rounded RECT.
+		if (e.Exclude || e.Mask || e.Radii != e.RadiiY
+			|| MathF.Abs(e.M.M12) > 1e-6f || MathF.Abs(e.M.M21) > 1e-6f) { return false; }
+		var er = new Vector4(
+			e.Rect.X * e.M.M11 + e.M.M31, e.Rect.Y * e.M.M22 + e.M.M32,
+			e.Rect.Z * e.M.M11 + e.M.M31, e.Rect.W * e.M.M22 + e.M.M32);
+		// Taking the clip's corners is only right where the clip is what bounds the shape.
+		if (er.X >= rect.X - 0.6f && er.Y >= rect.Y - 0.6f && er.Z <= rect.Z + 0.6f && er.W <= rect.W + 0.6f)
+		{
+			radii = e.Radii * MathF.Abs(e.M.M11);
+		}
+		rect = Meet(rect, er);
+		return rect.Z > rect.X && rect.W > rect.Y;
+	}
+
+	// Does `a` cover `b`, to within the half pixel an analytic edge is soft over?
+	private static bool Covers(in Vector4 a, in Vector4 b)
+		=> a.X <= b.X + 0.6f && a.Y <= b.Y + 0.6f && a.Z >= b.Z - 0.6f && a.W >= b.W - 0.6f;
+
+	// How much smaller a shadow layer may be rendered: everything the blur pyramid would have discarded at once,
+	// held back one level so the shortened pyramid still has a tap to do. Capped so a small blur stays 1:1.
+	private static int ShadowDownsample(float sigma) => 1 << Math.Clamp(WebGpuEffects.BlurLevels(sigma) - 1, 0, 2);
 
 	// An atlas quad or mask is baked for one replay scale; a different one, or a transform that now allows the
 	// atlas where the build could not use it, rebuilds so the content is neither mis-sized nor left aliased.
@@ -791,7 +980,7 @@ internal sealed unsafe partial class WebGpuFrame
 		}
 		var blurView = Effects.RenderShadow(sh, out var origin, out var size, out var uv);
 		var bg = TintedImageBg(blurView, sh.Color);
-		ops.Add(DrawOp.Own(DrawKind.Image, MakeBuffer(TexturedQuad(origin, size, uv)), 6, bg, sh.Clip, MakeClipBg(sh.Clip)));
+		ops.Add(DrawOp.Own(DrawKind.Image, (nint)MakeBuffer(TexturedQuad(origin, size, uv)), 6, bg, sh.Clip, MakeClipBg(sh.Clip)));
 	}
 
 	// ----------------------------------------------------------------------------------------------------- layers
@@ -822,6 +1011,11 @@ internal sealed unsafe partial class WebGpuFrame
 	{
 		var content = ClampToClip(TransformBounds(CmdListBounds(lyr.Commands), m), cd);
 		bool plain = lyr.CompositeMode == 0 && lyr.ColorMatrix is null;
+		// Which kind of layer the walk is actually paying for; per frame, so a reset each stats interval is right.
+		if (lyr.ShadowEffect is not null) { StatLayerShadow++; }
+		else if (lyr.ColorMatrix is not null) { StatLayerMatrix++; }
+		else if (lyr.CompositeMode != 0) { StatLayerMask++; }
+		else { StatLayerPlain++; }
 		if (plain)
 		{
 			// Content or shadow may each be empty (clipped out); an empty layer is culled, never rendered. A mask must
@@ -869,11 +1063,47 @@ internal sealed unsafe partial class WebGpuFrame
 		int slotX = 0, slotY = 0;
 		float tx = _basisOx, ty = _basisOy, tw = BasisW, th = BasisH;   // the target's device rect
 		LayerDepth++;
-		if (sub && Effects.TryReserveLayerSlot(subW, subH, lyr.ShadowEffect is { } sfe ? 1 << WebGpuEffects.BlurLevels(MathF.Max(sfe.SigmaX, sfe.SigmaY)) : 1, out sheet, out slotX, out slotY))
+		// A shadow layer is only ever read blurred, and the pyramid throws away three to four levels before its
+		// first tap, so rendering it pixel for pixel shades detail nothing ever looks at. Render it smaller and
+		// shorten the pyramid by the same amount: the shadow lands on the same texels either way.
+		// A shadow is the blurred ALPHA of its content. When that content is opaque out to a rounded outline, the
+		// shadow is that outline's -- so a wall of identical cards shares ONE blurred shape instead of each card
+		// being replayed into a sheet slot and the whole sheet blurred, every frame.
+		if (lyr.ShadowEffect is { } shfx && lyr.Commands.Count == 1 && lyr.Commands[0] is ReplayRefCmd shref
+			&& shref.Data is { } shrec && TrySilhouette(shrec, out var silR, out var silRad))
+		{
+			var placed = shref.Transform2 * m;
+			var devR = TransformBounds(silR, placed);
+			var natural = TransformBounds(CmdListBounds(lyr.Commands), m);
+			// Axis-aligned only: a rotated card's outline is no longer a rounded rect. And the content must lie
+			// INSIDE the shape -- a silhouette larger than the content is normal, since a card clipped by the
+			// viewport still casts its whole shadow, cut at composite time.
+			if (MathF.Abs(placed.M12) < 1e-6f && MathF.Abs(placed.M21) < 1e-6f
+				&& natural.X >= devR.X - 1f && natural.Y >= devR.Y - 1f
+				&& natural.Z <= devR.Z + 1f && natural.W <= devR.W + 1f)
+			{
+				float sig = MathF.Max(shfx.SigmaX, shfx.SigmaY);
+				if (Effects.TryShapeShadow(devR.Z - devR.X, devR.W - devR.Y, silRad.X * MathF.Abs(placed.M11), sig, out var shView, out var shPad))
+				{
+					var org = new Vector2(shfx.Dx + devR.X - shPad, shfx.Dy + devR.Y - shPad);
+					var sz = new Vector2(devR.Z - devR.X + 2f * shPad, devR.W - devR.Y + 2f * shPad);
+					ops.Add(DrawOp.Own(DrawKind.Image, (nint)MakeBuffer(TexturedQuad(org, sz, new Vector4(0f, 0f, 1f, 1f))), 6,
+						TintedImageBg(shView, shfx.Color), cd, MakeClipBg(cd)));
+					// A shadow layer is only ever a shadow; its content is replayed directly by the caller.
+					return;
+				}
+			}
+		}
+		int sdn = lyr.ShadowEffect is { } sfe ? ShadowDownsample(MathF.Max(sfe.SigmaX, sfe.SigmaY)) : 1;
+		float sSigma = lyr.ShadowEffect is { } sfg ? MathF.Max(sfg.SigmaX, sfg.SigmaY) / sdn : 0f;
+		int slotW = (subW + sdn - 1) / sdn, slotH = (subH + sdn - 1) / sdn;
+		if (sub && Effects.TryReserveLayerSlot(slotW, slotH, lyr.ShadowEffect is not null ? 1 << WebGpuEffects.BlurLevels(sSigma) : 1, out sheet, out slotX, out slotY))
 		{
 			surface = sheet.Surface;
 			tx = subOx; ty = subOy; tw = subW; th = subH;
-			sheet.Builds.Add(BuildPass(lyr.Commands, m, outer, surface, subOx - slotX, subOy - slotY, WebGpuEffects.LayerSheetSize, WebGpuEffects.LayerSheetSize, new Vector4(subOx, subOy, subOx + subW, subOy + subH)));
+			sheet.Builds.Add(BuildPass(lyr.Commands, m, outer, surface, subOx - sdn * slotX, subOy - sdn * slotY,
+				sdn * WebGpuEffects.LayerSheetSize, sdn * WebGpuEffects.LayerSheetSize,
+				new Vector4(subOx, subOy, subOx + subW, subOy + subH), null, sdn));
 		}
 		else if (sub)
 		{
@@ -899,22 +1129,27 @@ internal sealed unsafe partial class WebGpuFrame
 			float rw = MathF.Min(tx + tw, MathF.Ceiling(rg.Z)) - rx, rh = MathF.Min(ty + th, MathF.Ceiling(rg.W)) - ry;
 			if (rw >= 1f && rh >= 1f)
 			{
-				IntPtr blur; var uv = new Vector4(0f, 0f, 1f, 1f);
+				TextureView* blur; var uv = new Vector4(0f, 0f, 1f, 1f);
 				if (sheet is not null)
 				{
-					blur = Effects.LayerSheetBlur(sheet, MathF.Max(fx.SigmaX, fx.SigmaY));
-					float sx0 = rx - subOx + slotX, sy0 = ry - subOy + slotY;
-					uv = new Vector4(sx0, sy0, sx0 + rw, sy0 + rh) / WebGpuEffects.LayerSheetSize;
+					blur = Effects.LayerSheetBlur(sheet, sSigma);
+					float sx0 = slotX + (rx - subOx) / sdn, sy0 = slotY + (ry - subOy) / sdn;
+					uv = new Vector4(sx0, sy0, sx0 + rw / sdn, sy0 + rh / sdn) / WebGpuEffects.LayerSheetSize;
 				}
 				else
 				{
 					blur = Effects.BlurPyramidRegion(surface.View, (int)tw, (int)th, rx - tx, ry - ty, rw, rh, fx.SigmaX, fx.SigmaY);
 				}
 				var sbg = TintedImageBg(blur, fx.Color);
-				ops.Add(DrawOp.Own(DrawKind.Image, MakeBuffer(TexturedQuad(new Vector2(fx.Dx + rx, fx.Dy + ry), new Vector2(rw, rh), uv)), 6, sbg, cd, MakeClipBg(cd)));
+				ops.Add(DrawOp.Own(DrawKind.Image, (nint)MakeBuffer(TexturedQuad(new Vector2(fx.Dx + rx, fx.Dy + ry), new Vector2(rw, rh), uv)), 6, sbg, cd, MakeClipBg(cd)));
 			}
 		}
 
+		// A shadow layer is only ever a shadow. The single producer of an IEffectFilter layer is
+		// ShadowState.GetShadowFilter, and its one caller replays the same content directly right after the layer --
+		// so compositing the layer's colour here would draw that content a second time for nothing. Every other
+		// SaveLayer overload carries an IColorFilter and lands in ColorMatrix, never here.
+		if (lyr.ShadowEffect is not null) { return; }
 		// Pop the target: the content as one textured quad over the target's rect, sampling its slot 1:1.
 		var cuv = sheet is not null
 			? new Vector4(slotX, slotY, slotX + tw, slotY + th) / WebGpuEffects.LayerSheetSize
@@ -936,7 +1171,7 @@ internal sealed unsafe partial class WebGpuFrame
 
 	// The image bind group for a layer composite: no tint, no edge antialiasing (the layer's own alpha is the shape),
 	// the colour matrix when the group carries one.
-	private IntPtr LayerBg(IntPtr view, float[] colorMatrix)
+	private BindGroup* LayerBg(TextureView* view, float[] colorMatrix)
 	{
 		var ubuf = MakeUniform(WebGpuDevice.ImageUniformBytes);
 		var u = stackalloc float[36];
@@ -951,12 +1186,12 @@ internal sealed unsafe partial class WebGpuFrame
 			u[20] = mm[15]; u[21] = mm[16]; u[22] = mm[17]; u[23] = mm[18];
 			u[24] = mm[4]; u[25] = mm[9]; u[26] = mm[14]; u[27] = mm[19];
 		}
-		wgpuQueueWriteBuffer(_d.Q, ubuf, 0, (IntPtr)u, WebGpuDevice.ImageUniformBytes);
-		var e = stackalloc WGPUBindGroupEntry[3];
-		e[0] = new WGPUBindGroupEntry { Binding = 0, TextureView = view };
-		e[1] = new WGPUBindGroupEntry { Binding = 1, Sampler = _d.Smp };
-		e[2] = new WGPUBindGroupEntry { Binding = 2, Buffer = ubuf, Offset = 0, Size = WebGpuDevice.ImageUniformBytes };
-		var bgd = new WGPUBindGroupDescriptor { Layout = _d.ImgBgl, EntryCount = 3, Entries = e };
+		Api.QueueWriteBuffer(_d.Q, ubuf, 0, u, WebGpuDevice.ImageUniformBytes);
+		var e = stackalloc BindGroupEntry[3];
+		e[0] = new BindGroupEntry { Binding = 0, TextureView = view };
+		e[1] = new BindGroupEntry { Binding = 1, Sampler = _d.Smp };
+		e[2] = new BindGroupEntry { Binding = 2, Buffer = ubuf, Offset = 0, Size = WebGpuDevice.ImageUniformBytes };
+		var bgd = new BindGroupDescriptor { Layout = _d.ImgBgl, EntryCount = 3, Entries = e };
 		return Bg(ref bgd, null);
 	}
 }

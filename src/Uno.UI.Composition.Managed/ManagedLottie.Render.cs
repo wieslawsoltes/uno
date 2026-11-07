@@ -26,41 +26,129 @@ internal sealed partial class ManagedLottie
 			return;
 		}
 
-		var frame = InPoint + Math.Clamp(progress, 0f, 1f) * Math.Max(0, OutPoint - InPoint);
+		// Layers are visible on [ip, op), so the end of the timeline (progress 1) is held just before op: at op itself
+		// every layer would already be out, and the last frame would come out empty.
+		var frame = Math.Min(
+			InPoint + Math.Clamp(progress, 0f, 1f) * Math.Max(0, OutPoint - InPoint),
+			MathF.BitDecrement(OutPoint));
 
 		session.Save();
 		session.Translate((float)area.X, (float)area.Y);
 		session.Scale((float)(area.Width / Width), (float)(area.Height / Height));
-
-		// Lottie layer order is top-first; paint back-to-front so earlier layers land on top.
-		for (var i = Layers.Count - 1; i >= 0; i--)
-		{
-			var layer = Layers[i];
-			if (layer.Type != 4 || frame < layer.InPoint || frame >= layer.OutPoint || layer.Shapes.Count == 0)
-			{
-				continue; // v1 draws shape layers only; null layers still contribute via parenting (WorldMatrix)
-			}
-
-			session.Save();
-			session.Concat(new Matrix4x4(WorldMatrix(layer, frame, 0)));
-			RenderShapes(session, geometry, layer.Shapes, frame, layer.Transform.Opacity.Evaluate(frame) / 100f);
-			session.Restore();
-		}
-
+		RenderComposition(session, geometry, Root, frame, 0);
 		session.Restore();
 	}
 
-	private Matrix3x2 WorldMatrix(Layer layer, float frame, int depth)
+	// Bounds a precomp that (malformed) shows itself, directly or through another asset.
+	private const int MaxPrecompDepth = 16;
+
+	private static void RenderComposition(IDrawingSession session, IGeometryFactory geometry, Composition composition, float frame, int depth)
+	{
+		// Lottie layer order is top-first; paint back-to-front so earlier layers land on top.
+		for (var i = composition.Layers.Count - 1; i >= 0; i--)
+		{
+			var layer = composition.Layers[i];
+			if (frame < layer.InPoint || frame >= layer.OutPoint)
+			{
+				continue;
+			}
+
+			var isShape = layer.Type == 4 && layer.Shapes.Count > 0;
+			var isPrecomp = layer.Type == 0 && layer.Precomp is not null && depth < MaxPrecompDepth;
+			if (!isShape && !isPrecomp)
+			{
+				continue; // null layers still contribute via parenting (WorldMatrix)
+			}
+
+			var layerOpacity = layer.Transform.Opacity.Evaluate(frame) / 100f;
+			if (layerOpacity <= 0)
+			{
+				continue;
+			}
+
+			session.Save();
+			session.Concat(new Matrix4x4(WorldMatrix(composition, layer, frame, 0)));
+
+			// A translucent layer fades as a whole: drawn opaque into a layer composited at its opacity, so its own
+			// overlapping shapes don't show through each other.
+			IColorFilter? fade = null;
+			if (layerOpacity < 1f)
+			{
+				fade = session.Factory.CreateColorMatrixColorFilter(OpacityMatrix(layerOpacity));
+				session.SaveLayer(fade);
+			}
+
+			if (isShape)
+			{
+				RenderShapes(session, geometry, layer.Shapes, frame, 1f);
+			}
+			else
+			{
+				// A precomp shows its composition through a w x h window, on the layer's clock: st and sr only map the
+				// time of what it contains, the layer's own keyframes run on the parent's time like any layer's.
+				if (layer.Width > 0 && layer.Height > 0)
+				{
+					session.ClipRect(new Rect(0, 0, layer.Width, layer.Height));
+				}
+				RenderComposition(session, geometry, layer.Precomp!, layer.LocalFrame(frame), depth + 1);
+			}
+
+			if (fade is not null)
+			{
+				session.Restore();
+				fade.Dispose();
+			}
+			session.Restore();
+		}
+	}
+
+	// Rows R, G, B, A of a 4x5 colour matrix (last column the bias) scaling alpha alone.
+	private static float[] OpacityMatrix(float opacity) =>
+	[
+		1f, 0f, 0f, 0f, 0f,
+		0f, 1f, 0f, 0f, 0f,
+		0f, 0f, 1f, 0f, 0f,
+		0f, 0f, 0f, opacity, 0f,
+	];
+
+	// Parents are looked up in the layer's own composition.
+	private static Matrix3x2 WorldMatrix(Composition composition, Layer layer, float frame, int depth)
 	{
 		var m = layer.Transform.Matrix(frame);
-		if (depth < 32 && layer.ParentIndex is { } pi && LayersByIndex.TryGetValue(pi, out var parent) && parent != layer)
+		if (depth < 32 && layer.ParentIndex is { } pi && composition.LayersByIndex.TryGetValue(pi, out var parent) && parent != layer)
 		{
-			m *= WorldMatrix(parent, frame, depth + 1);
+			m *= WorldMatrix(composition, parent, frame, depth + 1);
 		}
 		return m;
 	}
 
-	private static void RenderShapes(IDrawingSession session, IGeometryFactory geometry, IReadOnlyList<ShapeItem> items, float frame, float opacity)
+	private static IReadOnlyList<TrimShape>? TrimsAfter(IReadOnlyList<ShapeItem> items, int index, IReadOnlyList<TrimShape>? inherited)
+	{
+		List<TrimShape>? trims = null;
+		for (var j = index + 1; j < items.Count; j++)
+		{
+			if (items[j] is TrimShape trim)
+			{
+				(trims ??= new()).Add(trim);
+			}
+		}
+
+		if (trims is null)
+		{
+			return inherited;
+		}
+
+		if (inherited is not null)
+		{
+			trims.AddRange(inherited);
+		}
+
+		return trims;
+	}
+
+	// A trim applies to every path before it in its list, nested groups included, so a group also takes the trims that
+	// follow it in its ancestors' lists (inheritedTrims, innermost first).
+	private static void RenderShapes(IDrawingSession session, IGeometryFactory geometry, IReadOnlyList<ShapeItem> items, float frame, float opacity, IReadOnlyList<TrimShape>? inheritedTrims = null)
 	{
 		var localOpacity = opacity;
 		TransformShape? tr = null;
@@ -88,13 +176,31 @@ internal sealed partial class ManagedLottie
 		{
 			if (it is TrimShape trim && combined is not null)
 			{
-				var trimmed = ApplyTrim(combined, trim, frame);
+				var trimmed = ApplyTrim(combined, trim, frame, GeometryFlatteningScale.From(session.TotalMatrix));
 				if (!ReferenceEquals(trimmed, combined))
 				{
 					combined.Dispose();
 					combined = trimmed;
 				}
 				break;
+			}
+		}
+
+		if (inheritedTrims is not null)
+		{
+			foreach (var trim in inheritedTrims)
+			{
+				if (combined is null)
+				{
+					break;
+				}
+
+				var trimmed = ApplyTrim(combined, trim, frame, GeometryFlatteningScale.From(session.TotalMatrix));
+				if (!ReferenceEquals(trimmed, combined))
+				{
+					combined.Dispose();
+					combined = trimmed;
+				}
 			}
 		}
 
@@ -114,28 +220,61 @@ internal sealed partial class ManagedLottie
 					var w = stroke.Width.Evaluate(frame);
 					if (w > 0)
 					{
-						session.StrokePath(combined, WithOpacity(stroke.Color.Evaluate(frame), localOpacity * stroke.Opacity.Evaluate(frame) / 100f), w);
+						StrokeCombined(session, combined, WithOpacity(stroke.Color.Evaluate(frame), localOpacity * stroke.Opacity.Evaluate(frame) / 100f), w, stroke.Cap, stroke.Join);
 					}
 				}
 			}
 			combined.Dispose();
 		}
 
-		// Nested groups carry their own transform/paints.
-		foreach (var it in items)
+		// Nested groups carry their own transform/paints, and are trimmed by the trims that follow them here. Like layers,
+		// shapes are listed top-first: paint back-to-front so an earlier group lands on top.
+		for (var i = items.Count - 1; i >= 0; i--)
 		{
-			if (it is GroupShape group)
+			if (items[i] is GroupShape group)
 			{
-				RenderShapes(session, geometry, group.Items, frame, localOpacity);
+				RenderShapes(session, geometry, group.Items, frame, localOpacity, TrimsAfter(items, i, inheritedTrims));
 			}
 		}
 
 		session.Restore();
 	}
 
+	/// <summary>
+	/// Strokes the group's combined path. <see cref="IDrawingSession.StrokePath"/> implies flat caps and is gated on
+	/// <see cref="DrawingCapabilities.NativeStroking"/>, so anything else is widened to a fill — a rounded cap is what
+	/// a rotating-arc spinner, the commonest Lottie asset, is made of.
+	/// </summary>
+	private static void StrokeCombined(IDrawingSession session, IGeometry path, Color color, float width, int lottieCap, int lottieJoin)
+	{
+		// Lottie line styles: cap 1=butt, 2=round, 3=square; join 1=miter, 2=round, 3=bevel.
+		var cap = lottieCap switch { 2 => StrokeCap.Round, 3 => StrokeCap.Square, _ => StrokeCap.Butt };
+		var join = lottieJoin switch { 2 => StrokeJoin.Round, 3 => StrokeJoin.Bevel, _ => StrokeJoin.Miter };
+
+		if (cap == StrokeCap.Butt && DrawingCapabilities.NativeStroking)
+		{
+			session.StrokePath(path, color, width, join);
+			return;
+		}
+
+		using var widened = path.GetStrokeFillGeometry(
+			new StrokeStyle
+			{
+				Thickness = width,
+				StartCap = cap,
+				EndCap = cap,
+				DashCap = cap,
+				LineJoin = join,
+				MiterLimit = 4f,
+			},
+			GeometryFlatteningScale.From(session.TotalMatrix));
+
+		session.DrawPath(widened, color);
+	}
+
 	// Trim [Start,End]% of the concatenated path length, rotated by Offset (deg, 360 = full). Returns the original
 	// when the trim is a no-op (full path). Wrap (range crossing the seam) is a best-effort union of the two arcs.
-	private static IGeometry? ApplyTrim(IGeometry geom, TrimShape trim, float frame)
+	private static IGeometry? ApplyTrim(IGeometry geom, TrimShape trim, float frame, float scale)
 	{
 		var offset = trim.Offset.Evaluate(frame) / 360f;
 		var a = trim.Start.Evaluate(frame) / 100f + offset;
@@ -147,7 +286,7 @@ internal sealed partial class ManagedLottie
 		var len = b - a;
 		if (len <= 1e-4f)
 		{
-			return geom.GetFilledGeometry(0f, 0f) is { } empty ? empty : geom;   // nothing visible
+			return null;   // fully collapsed trim: nothing visible
 		}
 		if (len >= 1f)
 		{
@@ -159,12 +298,12 @@ internal sealed partial class ManagedLottie
 		b -= shift;
 		if (b <= 1f)
 		{
-			return geom.GetFilledGeometry(a, b);
+			return geom.GetFilledGeometry(a, b, scale);
 		}
 		// Wrap across the seam: [a,1] ∪ [0,b-1].
-		var g1 = geom.GetFilledGeometry(a, 1f);
-		var g2 = geom.GetFilledGeometry(0f, b - 1f);
-		var union = g1.Combine(g2, GeometryCombineMode.Union);
+		var g1 = geom.GetFilledGeometry(a, 1f, scale);
+		var g2 = geom.GetFilledGeometry(0f, b - 1f, scale);
+		var union = g1.Combine(g2, GeometryCombineMode.Union, scale);
 		g1.Dispose();
 		g2.Dispose();
 		return union;

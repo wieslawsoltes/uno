@@ -6,6 +6,7 @@ using System;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using Uno.UI.Composition.Drawing;
+using Uno.UI.Composition.Managed;
 using BitmapAlphaMode = unouwp::Windows.Graphics.Imaging.BitmapAlphaMode;
 using BitmapEncoderFormat = unouwp::Uno.UI.Composition.Drawing.BitmapEncoderFormat;
 using BitmapPixelFormat = unouwp::Windows.Graphics.Imaging.BitmapPixelFormat;
@@ -19,7 +20,7 @@ namespace Uno.UI.Composition.ProGpu;
 /// </summary>
 public sealed class ProGpuImageEncoderDecoder : IImageEncoderDecoder
 {
-	private readonly ManagedImageDecoderBackend _codec = new();
+	private readonly IImageEncoderDecoder _codec = ManagedBackend.CreateImageDecoder();
 
 	public bool TryDecode(Stream stream, int? targetWidth, int? targetHeight, [NotNullWhen(true)] out ImageFrames? frames) =>
 		_codec.TryDecode(stream, targetWidth, targetHeight, out frames);
@@ -40,18 +41,15 @@ public sealed class ProGpuImageEncoderDecoder : IImageEncoderDecoder
 /// </summary>
 public sealed class ProGpuSvgRenderer : ISvgRenderer
 {
-	private readonly ProGpuFontProvider _fonts;
-	private readonly ManagedSvgRenderer _renderer = new();
+	private readonly ISvgRenderer _renderer = ManagedBackend.CreateSvgRenderer();
 
 	public ProGpuSvgRenderer(ProGpuFontProvider fonts) =>
-		_fonts = fonts ?? throw new ArgumentNullException(nameof(fonts));
+		ArgumentNullException.ThrowIfNull(fonts);
 
-	public ISvgDocument? Parse(byte[] svg, IGeometryFactory geometry, IDrawingFactory drawing)
+	public ISvgDocument? Parse(byte[] svg, IGeometryFactory geometry)
 	{
 		ArgumentNullException.ThrowIfNull(svg);
 		ArgumentNullException.ThrowIfNull(geometry);
-		ArgumentNullException.ThrowIfNull(drawing);
-		_ = _fonts; // retained as the SVG text/fallback authority for the typed fast path.
-		return _renderer.Parse(svg, geometry, drawing);
+		return _renderer.Parse(svg, geometry);
 	}
 }

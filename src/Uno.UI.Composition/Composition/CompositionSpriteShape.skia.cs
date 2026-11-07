@@ -27,11 +27,11 @@ namespace Microsoft.UI.Composition
 
 		// Set by BorderVisual for a rounded-rect background: lets the fill go through the backend's analytic
 		// DrawRoundedRect (one SDF quad) instead of a tessellated path. Null → unchanged path behaviour.
-		internal (Rect Rect, Vector4 Radii)? RoundedRectFillHint { get; set; }
+		internal RoundRectangle? RoundedRectFillHint { get; set; }
 
 		// Set by BorderVisual for a rounded border stroke: the fill goes through DrawRoundedRectBorder (one analytic
 		// annulus SDF quad, outer minus inner) instead of a tessellated ring path. Null → unchanged path behaviour.
-		internal (Rect Outer, Vector4 OuterRadii, Rect Inner, Vector4 InnerRadii)? RoundedRectBorderHint { get; set; }
+		internal (RoundRectangle Outer, RoundRectangle Inner)? RoundedRectBorderHint { get; set; }
 
 		/// <summary>
 		/// This is largely a hack that's needed for MUX.Shapes.Path with Data set to a PathGeometry that has some
@@ -85,23 +85,13 @@ namespace Microsoft.UI.Composition
 		private static global::Windows.UI.Color WithOpacity(global::Windows.UI.Color c, float opacity)
 			=> opacity >= 1f ? c : global::Windows.UI.Color.FromArgb((byte)(c.A * opacity), c.R, c.G, c.B);
 
-		// radii = (TopLeft, TopRight, BottomRight, BottomLeft) scalars → a RoundRectangle with circular corners.
-		private static RoundRectangle ToRoundRect(Rect rect, Vector4 radii) => new()
-		{
-			Rect = rect,
-			TopLeft = new Vector2(radii.X, radii.X),
-			TopRight = new Vector2(radii.Y, radii.Y),
-			BottomRight = new Vector2(radii.Z, radii.Z),
-			BottomLeft = new Vector2(radii.W, radii.W),
-		};
-
 		internal override void Paint(in Visual.PaintingSession session)
 		{
 			if (_geometryWithTransformations is { } geometryWithTransformations)
 			{
 				if (FillBrush is { } fill && _fillGeometryWithTransformations is { } finalFillGeometryWithTransformations)
 				{
-					using var fillGeometry = GetTrimmedFilledGeometry(finalFillGeometryWithTransformations, Geometry);
+					using var fillGeometry = GetTrimmedFilledGeometry(finalFillGeometryWithTransformations, Geometry, GeometryFlatteningScale.From(session.Session.TotalMatrix));
 
 					// A solid colour (a theme/transition background, or a plain colour brush) can fill the geometry
 					// directly. Clip-to-shape + fill-rect is equivalent but forces a per-shape clip — a coverage
@@ -121,8 +111,8 @@ namespace Microsoft.UI.Composition
 					if (solidFill is { } sc)
 					{
 						var oc = WithOpacity(sc, session.Opacity);
-						if (brHint is { } b) { session.Session.DrawRoundedRectBorder(b.Outer, b.OuterRadii, b.Inner, b.InnerRadii, oc); }
-						else if (rrHint is { } h) { session.Session.DrawRoundedRect(h.Rect, h.Radii, oc); }
+						if (brHint is { } b) { session.Session.DrawRoundedRectBorder(b.Outer, b.Inner, oc); }
+						else if (rrHint is { } h) { session.Session.DrawRoundedRect(h, oc); }
 						else { session.Session.DrawPath(fillGeometry, oc); }
 					}
 					// A brush that cannot paint (a fully transparent colour) must not reach the clip-and-fill path
@@ -135,16 +125,16 @@ namespace Microsoft.UI.Composition
 						// bounds. When the shape is a rounded rect (the hint), clip ANALYTICALLY (ClipRoundRect, 0
 						// draws) instead of a tessellated path clip (stencil + depth draws per visual).
 						session.Session.Save();
-						if (rrHint is { } hc) { session.Session.ClipRoundRect(ToRoundRect(hc.Rect, hc.Radii)); }
+						if (rrHint is { } hc) { session.Session.ClipRoundRect(hc); }
 						else if (brHint is { } bc)
 						{
 							// A rounded border ring also clips analytically: intersect the outer round rect, exclude the
 							// inner one. Matters for gradient borders (Fluent's ControlElevationBorderBrush puts one on
 							// every Button): a tessellated ring clip costs a stencil mask per visual and defeats coalescing.
-							session.Session.ClipRoundRect(ToRoundRect(bc.Outer, bc.OuterRadii));
-							if (bc.Inner.Width > 0 && bc.Inner.Height > 0)
+							session.Session.ClipRoundRect(bc.Outer);
+							if (bc.Inner.Rect.Width > 0 && bc.Inner.Rect.Height > 0)
 							{
-								session.Session.ClipRoundRect(ToRoundRect(bc.Inner, bc.InnerRadii), ClipOperation.Difference);
+								session.Session.ClipRoundRect(bc.Inner, ClipOperation.Difference);
 							}
 						}
 						else { session.Session.ClipPath(fillGeometry); }
@@ -158,14 +148,14 @@ namespace Microsoft.UI.Composition
 					if (Uno.UI.Composition.Drawing.DrawingCapabilities.NativeStroking
 						&& stroke is CompositionColorBrush nativeStrokeColor && stroke.CanPaint()
 						&& _strokeDashArray is not { Count: > 0 }
-						&& (Geometry?.TrimStart ?? 0f) == 0f && (Geometry?.TrimEnd ?? 0f) == 0f
+						&& !TryResolveTrim(Geometry, out _, out _, out _)
 						&& StrokeStartCap == CompositionStrokeCap.Flat && StrokeEndCap == CompositionStrokeCap.Flat)
 					{
 						session.Session.StrokePath(geometryWithTransformations, WithOpacity(nativeStrokeColor.Color, session.Opacity), StrokeThickness, ToDrawingJoin(StrokeLineJoin));
 						return;
 					}
 
-					using var strokeGeometry = GetTrimmedStrokeGeometry(geometryWithTransformations);
+					using var strokeGeometry = GetTrimmedStrokeGeometry(geometryWithTransformations, GeometryFlatteningScale.From(session.Session.TotalMatrix));
 
 					if (stroke is CompositionColorBrush strokeColor && stroke.CanPaint())
 					{
@@ -304,7 +294,7 @@ namespace Microsoft.UI.Composition
 		// What CompositionShape.Render applies to the session before painting: the shape's CombinedTransformMatrix
 		// (Scale/Rotation/TransformMatrix around CenterPoint) and then its Offset, matching the Translate + Concat
 		// order there. TryGetRenderBounds must apply it too so damage matches the painted pixels.
-		private Matrix3x2 GetRenderTransform()
+		internal Matrix3x2 GetRenderTransform()
 		{
 			var transform = CombinedTransformMatrix;
 			var offset = Offset;
@@ -334,23 +324,90 @@ namespace Microsoft.UI.Composition
 		};
 
 		/// <summary>Strokes <paramref name="geometry"/> through the resolved trim window (see <see cref="TryResolveTrim"/>).</summary>
-		private IGeometry GetTrimmedStrokeGeometry(IGeometry geometry)
+		private IGeometry GetTrimmedStrokeGeometry(IGeometry geometry, float scale = 1f)
 		{
+			var dashed = _strokeDashArray is { Count: > 0 };
 			if (!TryResolveTrim(Geometry, out var start, out var end, out var wrapEnd))
 			{
-				return geometry.GetStrokeFillGeometry(GetStrokeStyle(0f, 0f));
+				if (dashed && Geometry?.BuildDashGeometry() is { } dashSource)
+				{
+					using var dashGeometry = dashSource.Transform(_geometryTransform);
+					return dashGeometry.GetStrokeFillGeometry(GetStrokeStyle(0f, 0f), scale);
+				}
+
+				return geometry.GetStrokeFillGeometry(GetStrokeStyle(0f, 0f), scale);
 			}
 
-			var trimmed = geometry.GetStrokeFillGeometry(GetStrokeStyle(start, end));
-			if (wrapEnd is not { } wrapped)
+			if (IsEmptyTrim(start, end, wrapEnd))
+			{
+				return EmptyGeometry();
+			}
+
+			if (dashed)
+			{
+				return GetTrimmedDashedStrokeGeometry(geometry, start, end, wrapEnd, scale);
+			}
+
+			var trimmed = geometry.GetStrokeFillGeometry(GetStrokeStyle(start, end), scale);
+			if (wrapEnd is not { } wrapped || wrapped <= 0f)
 			{
 				return trimmed;
 			}
 
 			using (trimmed)
-			using (var head = geometry.GetStrokeFillGeometry(GetStrokeStyle(0f, wrapped)))
+			using (var head = geometry.GetStrokeFillGeometry(GetStrokeStyle(0f, wrapped), scale))
 			{
-				return trimmed.Combine(head, GeometryCombineMode.Union);
+				return trimmed.Combine(head, GeometryCombineMode.Union, scale);
+			}
+		}
+
+		// WinUI trims first and then dashes the trimmed path, so the pattern starts at the trim start and runs on
+		// across a window that wraps through the path origin.
+		private IGeometry GetTrimmedDashedStrokeGeometry(IGeometry geometry, float start, float end, float? wrapEnd, float scale)
+		{
+			using var path = geometry.GetFilledGeometry(start, end, scale);
+			var trimmed = path.GetStrokeFillGeometry(GetStrokeStyle(0f, 0f), scale);
+			if (wrapEnd is not { } wrapped || wrapped <= 0f)
+			{
+				return trimmed;
+			}
+
+			var headStyle = GetStrokeStyle(0f, 0f) with { DashOffset = StrokeDashOffset + PathLength.Of(path, scale) };
+			using (trimmed)
+			using (var headPath = geometry.GetFilledGeometry(0f, wrapped, scale))
+			using (var head = headPath.GetStrokeFillGeometry(headStyle, scale))
+			{
+				return trimmed.Combine(head, GeometryCombineMode.Union, scale);
+			}
+		}
+
+		private sealed class PathLength : IFlattenedPathSink
+		{
+			private Vector2 _start;
+			private Vector2 _last;
+			private float _length;
+
+			public static float Of(IGeometry geometry, float scale)
+			{
+				var sink = new PathLength();
+				geometry.StreamFlattened(sink, scale);
+				return sink._length;
+			}
+
+			public void BeginContour(Vector2 start) => _start = _last = start;
+
+			public void LineTo(Vector2 point)
+			{
+				_length += Vector2.Distance(_last, point);
+				_last = point;
+			}
+
+			public void EndContour(bool closed)
+			{
+				if (closed)
+				{
+					LineTo(_start);
+				}
 			}
 		}
 
@@ -366,26 +423,14 @@ namespace Microsoft.UI.Composition
 			end = 0f;
 			wrapEnd = null;
 
-			if (geometry is not { } g || (g.TrimStart == default && g.TrimEnd == default && g.TrimOffset == default))
+			// A window covering the whole path draws it untrimmed, whatever the offset — wrapping its endpoints
+			// into [0,1) would otherwise collapse it to nothing.
+			if (geometry is not { } g || g.TrimEnd - g.TrimStart >= 1f)
 			{
 				return false;
 			}
 
-			if (g.TrimOffset == default)
-			{
-				start = g.TrimStart;
-				end = g.TrimEnd;
-				return true;
-			}
-
-			// A full (or wider) window stays full regardless of offset — wrapping its endpoints into [0,1)
-			// would otherwise collapse it to nothing.
-			if (g.TrimEnd - g.TrimStart >= 1f)
-			{
-				end = 1f;
-				return true;
-			}
-
+			// Like WinUI, a start past the end wraps through the path origin even without an offset.
 			start = Wrap01(g.TrimStart + g.TrimOffset);
 			end = Wrap01(g.TrimEnd + g.TrimOffset);
 
@@ -404,23 +449,36 @@ namespace Microsoft.UI.Composition
 			return value < 0f ? value + 1f : value;
 		}
 
-		private static IGeometry GetTrimmedFilledGeometry(IGeometry geometry, CompositionGeometry? source)
+		// A resolved window of zero length draws NOTHING, but the backends read "is there a trim?" back off the
+		// values, so asking for [0,0] there would mean "no trim" and draw the whole path. The empty case is
+		// therefore answered here instead of being handed down.
+		private static bool IsEmptyTrim(float start, float end, float? wrapEnd)
+			=> wrapEnd is { } wrapped ? wrapped <= 0f && start >= 1f : end <= start;
+
+		private static IGeometry EmptyGeometry() => GeometryFactory.Current.CreateRectangleGeometry(default);
+
+		private static IGeometry GetTrimmedFilledGeometry(IGeometry geometry, CompositionGeometry? source, float scale = 1f)
 		{
 			if (!TryResolveTrim(source, out var start, out var end, out var wrapEnd))
 			{
-				return geometry.GetFilledGeometry(0f, 0f);
+				return geometry.GetFilledGeometry(0f, 0f, scale);
 			}
 
-			var trimmed = geometry.GetFilledGeometry(start, end);
-			if (wrapEnd is not { } wrapped)
+			if (IsEmptyTrim(start, end, wrapEnd))
+			{
+				return EmptyGeometry();
+			}
+
+			var trimmed = geometry.GetFilledGeometry(start, end, scale);
+			if (wrapEnd is not { } wrapped || wrapped <= 0f)
 			{
 				return trimmed;
 			}
 
 			using (trimmed)
-			using (var head = geometry.GetFilledGeometry(0f, wrapped))
+			using (var head = geometry.GetFilledGeometry(0f, wrapped, scale))
 			{
-				return trimmed.Combine(head, GeometryCombineMode.Union);
+				return trimmed.Combine(head, GeometryCombineMode.Union, scale);
 			}
 		}
 

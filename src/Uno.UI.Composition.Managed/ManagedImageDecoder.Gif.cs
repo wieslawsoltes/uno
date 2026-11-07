@@ -1,4 +1,4 @@
-#nullable enable
+﻿#nullable enable
 
 using System;
 using System.Collections.Generic;
@@ -27,13 +27,17 @@ internal static partial class ManagedImageDecoder
 			p += globalTable.Length;
 		}
 
-		if (screenWidth <= 0 || screenHeight <= 0)
+		if (ExceedsPixelCap(screenWidth, screenHeight))
 		{
 			return false;
 		}
 
 		var frames = new List<byte[]>();
 		var durations = new List<int>();
+
+		// Every frame is kept as a full canvas copy, so an unbounded frame count is an unbounded allocation.
+		var canvasBytes = (long)screenWidth * screenHeight * 4;
+		var maxFrames = (int)Math.Max(1, MaxDecodedBytes / Math.Max(1, canvasBytes));
 
 		// Persistent canvas that each frame composites onto (per GIF disposal semantics).
 		var canvas = new byte[screenWidth * screenHeight * 4];
@@ -74,12 +78,23 @@ internal static partial class ManagedImageDecoder
 				break;
 			}
 
+			if (frames.Count >= maxFrames)
+			{
+				break;
+			}
+
 			var left = ReadU16LE(d, p);
 			var top = ReadU16LE(d, p + 2);
 			var frameWidth = ReadU16LE(d, p + 4);
 			var frameHeight = ReadU16LE(d, p + 6);
 			var imgPacked = d[p + 8];
 			p += 9;
+
+			// The image descriptor's own rect drives the index buffer, independently of the logical screen.
+			if (ExceedsPixelCap(frameWidth, frameHeight))
+			{
+				return false;
+			}
 
 			var localTable = globalTable;
 			if ((imgPacked & 0x80) != 0)
@@ -108,11 +123,13 @@ internal static partial class ManagedImageDecoder
 			frames.Add((byte[])canvas.Clone());
 			durations.Add(delayMs);
 
-			ApplyDisposal(canvas, screenWidth, disposalMethod, left, top, frameWidth, frameHeight, previousCanvas);
+			ApplyDisposal(canvas, screenWidth, screenHeight, disposalMethod, left, top, frameWidth, frameHeight, previousCanvas);
 
-			// Reset per-frame graphic control state.
+			// Reset per-frame graphic control state: each frame carries its own graphic control extension, so a
+			// delay must not leak from the previous frame.
 			transparentIndex = -1;
 			disposalMethod = 0;
+			delayMs = 100;
 		}
 
 		if (frames.Count == 0)
@@ -156,20 +173,21 @@ internal static partial class ManagedImageDecoder
 		}
 	}
 
-	private static void ApplyDisposal(byte[] canvas, int canvasWidth, int disposalMethod, int left, int top, int frameWidth, int frameHeight, byte[]? previousCanvas)
+	private static void ApplyDisposal(byte[] canvas, int canvasWidth, int canvasHeight, int disposalMethod, int left, int top, int frameWidth, int frameHeight, byte[]? previousCanvas)
 	{
 		switch (disposalMethod)
 		{
-			case 2: // restore to background (transparent)
-				for (var y = top; y < top + frameHeight; y++)
+			case 2:
+				// Restore to background (transparent), clamped to the canvas: a frame rect wider than the
+				// screen would otherwise wrap into the next row.
+				var right = Math.Min(left + frameWidth, canvasWidth);
+				var bottom = Math.Min(top + frameHeight, canvasHeight);
+				for (var y = Math.Max(0, top); y < bottom; y++)
 				{
-					for (var x = left; x < left + frameWidth; x++)
+					for (var x = Math.Max(0, left); x < right; x++)
 					{
 						var o = (y * canvasWidth + x) * 4;
-						if (o >= 0 && o + 3 < canvas.Length)
-						{
-							canvas[o] = canvas[o + 1] = canvas[o + 2] = canvas[o + 3] = 0;
-						}
+						canvas[o] = canvas[o + 1] = canvas[o + 2] = canvas[o + 3] = 0;
 					}
 				}
 				break;
@@ -291,11 +309,16 @@ internal static partial class ManagedImageDecoder
 			var currentCode = code;
 			if (code >= next)
 			{
+				if (previousCode < 0)
+				{
+					return output; // first code after a clear can't be a KwKwK back-reference — corrupt, stop here
+				}
+
 				stack[sp++] = firstByte[previousCode]; // KwKwK
 				currentCode = previousCode;
 			}
 
-			while (currentCode >= clearCode)
+			while (currentCode >= clearCode && sp < stack.Length)
 			{
 				stack[sp++] = suffix[currentCode];
 				currentCode = prefix[currentCode];

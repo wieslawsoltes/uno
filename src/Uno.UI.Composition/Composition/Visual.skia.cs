@@ -7,7 +7,6 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Numerics;
-using System.Runtime.CompilerServices;
 using System.Text;
 using Windows.Foundation;
 using Uno.Extensions;
@@ -40,8 +39,13 @@ public partial class Visual : global::Microsoft.UI.Composition.CompositionObject
 	// fallback (also forced by the ForceFallbackRetainedRendering test seam). Replay is on the IRenderRecord
 	// (data.Replay(session)); a native recording only replays into its own backend's session, the command-list
 	// fallback into any.
-	private static ICommandRecorder CreateRecording()
-		=> ForceFallbackRetainedRendering ? new CommandListRecorder() : DrawingFactory.Current.CreateRecording();
+	// The visual's own target supplies the backend: with two windows open the process-wide factory holds
+	// whichever registered last, so one window would record through the other's device.
+	// The backend comes from the session being painted into, not from the visual: a subtree can legitimately be
+	// rendered while detached from any window (offscreen capture, damage tests), and the session is the only
+	// thing that knows which device the result is destined for.
+	private static ICommandRecorder CreateRecording(IDrawingFactory renderer)
+		=> ForceFallbackRetainedRendering ? new CommandListRecorder(renderer) : renderer.CreateRecording();
 
 	private bool _enablePictureCollapsingOptimization;
 	private int _pictureCollapsingOptimizationFrameThreshold;
@@ -50,10 +54,19 @@ public partial class Visual : global::Microsoft.UI.Composition.CompositionObject
 	private CompositionClip? _clip;
 	private Vector2 _anchorPoint = Vector2.Zero; // Backing for scroll offsets
 	private int _zIndex;
-	private (Matrix4x4 matrix, bool isLocalMatrixIdentity) _totalMatrix = (Matrix4x4.Identity, true);
+	private (Matrix4x4 matrix, Matrix4x4 localMatrix) _totalMatrix = (Matrix4x4.Identity, Matrix4x4.Identity);
 	// Opaque per-visual retained state owned by the rendering backend (Skia: an SKPicture). _content is
 	// this visual's own painted content; _childrenContent is a collapsed subtree cache.
 	private IRenderRecord? _content;
+
+	/// <summary>This visual's own recorded content, so tests can tell a re-record from a replay.</summary>
+	internal IRenderRecord? RecordedContentForTesting => _content;
+
+	/// <summary>The cached picture this visual's subtree is replayed from instead of being walked, if collapsed.</summary>
+	internal IRenderRecord? ChildrenContentForTesting => _childrenContent;
+
+	/// <summary>The subtree recording the non-analytic drop-shadow fallback replays, if this visual took that path.</summary>
+	internal IRenderRecord? ShadowFallbackContentForTesting => _shadowFallbackContent;
 	private IRenderRecord? _childrenContent;
 	// Placement bookkeeping for _childrenContent: the recording is local-space and survives ancestor moves,
 	// but a replay under a changed matrix must still damage the screen area the subtree left and now covers
@@ -65,6 +78,9 @@ public partial class Visual : global::Microsoft.UI.Composition.CompositionObject
 	// so ancestor moves — e.g. scrolling — keep it valid; invalidated like _childrenContent plus own PaintDirty).
 	private IRenderRecord? _shadowFallbackContent;
 	private float _shadowFallbackOpacity;
+	private Matrix4x4 _shadowFallbackMatrix;
+	private bool _hasShadowFallbackDamageRect;
+	private Rect _shadowFallbackDamageRect;
 	// Cached analytic-shadow silhouette walk result (regions are in this visual's local space, so ancestor moves
 	// keep them valid). The walk does per-visual geometry booleans over the whole subtree — far too expensive to
 	// redo every frame for every shadowed item in a scrolling list. Same invalidation gates as the fallback cache.
@@ -259,63 +275,79 @@ public partial class Visual : global::Microsoft.UI.Composition.CompositionObject
 			{
 				_flags &= ~VisualFlags.MatrixDirty;
 
-				var isLocalMatrixIdentity = true;
+				var localMatrix = Matrix4x4.Identity;
 
 				// Start out with the final matrix of the parent
 				var matrix = Parent?.TotalMatrix ?? Matrix4x4.Identity;
 
 				// Set the position of the visual on the canvas (i.e. change coordinates system to the "XAML element" one)
-				var totalOffset = GetTotalOffset();
-				var offsetMatrix = new Matrix4x4(
-					1, 0, 0, 0,
-					0, 1, 0, 0,
-					0, 0, 1, 0,
-					totalOffset.X + AnchorPoint.X, totalOffset.Y + AnchorPoint.Y, 0, 1);
+				var offsetMatrix = GetOffsetMatrix();
 				if (!offsetMatrix.IsIdentity)
 				{
-					isLocalMatrixIdentity = false;
+					localMatrix = offsetMatrix;
 					matrix = offsetMatrix * matrix;
 				}
 
 				// Apply the rending transformation matrix (i.e. change coordinates system to the "rendering" one)
 				if (GetTransform() is { IsIdentity: false } transform)
 				{
-					isLocalMatrixIdentity = false;
+					localMatrix = transform * localMatrix;
 					matrix = transform * matrix;
 				}
 
-				_totalMatrix = (matrix, isLocalMatrixIdentity);
+				_totalMatrix = (matrix, localMatrix);
 			}
 
 			return _totalMatrix.matrix;
-
-			Matrix4x4 GetTransform()
-			{
-				var transform = TransformMatrix;
-
-				var scale = Scale;
-				if (scale != Vector3.One)
-				{
-					transform *= Matrix4x4.CreateScale(scale, CenterPoint);
-				}
-
-				var orientation = Orientation;
-				if (orientation != Quaternion.Identity)
-				{
-					transform *= Matrix4x4.CreateFromQuaternion(orientation);
-				}
-
-				var rotation = RotationAngle;
-				if (rotation is not 0)
-				{
-					transform *= Matrix4x4.CreateTranslation(-CenterPoint);
-					transform *= Matrix4x4.CreateFromAxisAngle(RotationAxis, rotation);
-					transform *= Matrix4x4.CreateTranslation(CenterPoint);
-				}
-
-				return transform;
-			}
 		}
+	}
+
+	// TotalMatrix without the parent's: this visual's own transform and position within its parent.
+	private protected Matrix4x4 LocalMatrix
+	{
+		get
+		{
+			// Reading TotalMatrix recomputes both when dirty.
+			_ = TotalMatrix;
+			return _totalMatrix.localMatrix;
+		}
+	}
+
+	private Matrix4x4 GetOffsetMatrix()
+	{
+		var totalOffset = GetTotalOffset();
+		return new Matrix4x4(
+			1, 0, 0, 0,
+			0, 1, 0, 0,
+			0, 0, 1, 0,
+			totalOffset.X + AnchorPoint.X, totalOffset.Y + AnchorPoint.Y, 0, 1);
+	}
+
+	private Matrix4x4 GetTransform()
+	{
+		var transform = TransformMatrix;
+
+		var scale = Scale;
+		if (scale != Vector3.One)
+		{
+			transform *= Matrix4x4.CreateScale(scale, CenterPoint);
+		}
+
+		var orientation = Orientation;
+		if (orientation != Quaternion.Identity)
+		{
+			transform *= Matrix4x4.CreateFromQuaternion(orientation);
+		}
+
+		var rotation = RotationAngle;
+		if (rotation is not 0)
+		{
+			transform *= Matrix4x4.CreateTranslation(-CenterPoint);
+			transform *= Matrix4x4.CreateFromAxisAngle(RotationAxis, rotation);
+			transform *= Matrix4x4.CreateTranslation(CenterPoint);
+		}
+
+		return transform;
 	}
 
 #if DEBUG
@@ -336,10 +368,8 @@ public partial class Visual : global::Microsoft.UI.Composition.CompositionObject
 	}
 
 	/// <summary>
-	/// Discards this visual's and its whole subtree's cached recordings. Used when the active
-	/// <see cref="Microsoft.UI.Xaml.Media.CompositionTarget"/> renderer changes (e.g. the WebGPU device is
-	/// imported asynchronously on WebAssembly, replacing the default Skia renderer): recordings retained by the
-	/// previous backend can't be replayed by the new one, so every visual must re-record under it.
+	/// Discards this visual's and its whole subtree's cached recordings, for when the window's backend is replaced
+	/// and recordings made for the old one can't be replayed by the new one.
 	/// </summary>
 	internal void InvalidatePaintRecursive()
 	{
@@ -446,40 +476,45 @@ public partial class Visual : global::Microsoft.UI.Composition.CompositionObject
 			return;
 		}
 
-		// Since we're acting as if this visual is a root visual, we undo the parent's TotalMatrix
-		// so that when concatenated with this visual's TotalMatrix, the result is only the transforms
-		// from this visual.
-		// It's important to set the default to the session's current transform, not identity, in case there's
-		// an initial global transformation set (e.g. if the renderer sets scaling for dpi or we're rendering from a VisualSurface)
-		var initialTransform = drawingSession.TotalMatrix;
-		if (Parent?.TotalMatrix is { } parentTotalMatrix)
-		{
-			Matrix4x4.Invert(parentTotalMatrix, out var invertedParentTotalMatrix);
-			initialTransform = invertedParentTotalMatrix * initialTransform;
-		}
-
-		if (offsetOverride is { } offset)
-		{
-			var totalOffset = GetTotalOffset();
-			var translation = Matrix4x4.Identity with { M41 = -(offset.X + totalOffset.X + AnchorPoint.X), M42 = -(offset.Y + totalOffset.Y + AnchorPoint.Y) };
-			initialTransform = translation * initialTransform;
-		}
-
-		_factory.CreateInstance(this,
-						  drawingSession,
-						  ref initialTransform.IsIdentity ? ref Unsafe.NullRef<Matrix4x4>() : ref initialTransform,
-						  opacity: 1.0f,
-						  damage,
-						  out var session);
+		// The walk concatenates each visual's own transform, so it starts from wherever the canvas already is (e.g. scaled
+		// for dpi, or a VisualSurface's transform): there is nothing of the parent's to take back out.
+		_factory.CreateInstance(this, drawingSession, opacity: 1.0f, damage, out var session);
 
 		using (session)
 		{
-			// we set the matrix here similarly to CreateLocalMatrix in case the SetMatrix call there is
-			// omitted.
-			drawingSession.SetMatrix(initialTransform.IsIdentity ? TotalMatrix : TotalMatrix * initialTransform);
+			if (offsetOverride is { } offset)
+			{
+				drawingSession.Concat(GetOffsetOverrideTranslation(offset));
+			}
+
 			// Live (non-recorded) walk: leaf culling is armed and narrows at each rect-shaped clip below.
-			Render(session, applyChildOptimization: true, cullRect: InfiniteClipRect);
+			Render(session, applyChildOptimization: true, cullRect: InfiniteClipRect, inheritedClipBounds: InfiniteClipRect);
 		}
+	}
+
+	private Matrix4x4 GetOffsetOverrideTranslation(Vector2 offset)
+	{
+		var totalOffset = GetTotalOffset();
+		var translation = Matrix4x4.Identity with { M41 = -(offset.X + totalOffset.X + AnchorPoint.X), M42 = -(offset.Y + totalOffset.Y + AnchorPoint.Y) };
+		if (Parent is not { } parent)
+		{
+			return translation;
+		}
+
+		// The translation acts in the parent's space, so it is conjugated by the parent's transform. One that flattens Z
+		// has no inverse, but with Z kept apart from X, Y and W the result doesn't depend on M33.
+		var parentMatrix = parent.TotalMatrix;
+		if (!Matrix4x4.Invert(parentMatrix, out var invertedParent))
+		{
+			parentMatrix = parentMatrix with { M13 = 0, M23 = 0, M43 = 0, M31 = 0, M32 = 0, M34 = 0, M33 = 1 };
+			if (!Matrix4x4.Invert(parentMatrix, out invertedParent))
+			{
+				// The parent collapses its plane onto a line, so what it draws has no area to misplace.
+				return translation;
+			}
+		}
+
+		return parentMatrix * translation * invertedParent;
 	}
 
 	/// <summary>
@@ -489,7 +524,7 @@ public partial class Visual : global::Microsoft.UI.Composition.CompositionObject
 	/// <param name="cullRect">Root-space AABB of the ancestors' rect-shaped clips; a leaf provably outside it is
 	/// skipped. <c>default</c> (empty) disables culling — recordings must contain the full subtree, since they are
 	/// replayed under other transforms later (e.g. after a scroll).</param>
-	private void Render(in PaintingSession parentSession, bool applyChildOptimization = true, Rect cullRect = default, bool ancestorClipChanged = false)
+	private void Render(in PaintingSession parentSession, bool applyChildOptimization = true, Rect cullRect = default, bool ancestorClipChanged = false, Rect inheritedClipBounds = default)
 	{
 #if TRACE_COMPOSITION
 		var indent = int.TryParse(Comment?.Split(new char[] { '-' }, 2, StringSplitOptions.TrimEntries).FirstOrDefault(), out var depth)
@@ -509,6 +544,11 @@ public partial class Visual : global::Microsoft.UI.Composition.CompositionObject
 			}
 			return;
 		}
+
+		// The clip in effect for this visual's own content, in root coordinates: the parent's, narrowed by this
+		// visual's own rect-shaped clip. Computed once here and threaded to the children, so each visual pays
+		// O(1) instead of walking its whole ancestor chain.
+		var clipBounds = NarrowClipBounds(inheritedClipBounds);
 
 		// Leaf culling: a childless, size-bounded visual entirely outside the ancestors' clips renders nothing —
 		// skip its session/damage/replay work (dominant in long flat lists where most items sit outside the
@@ -559,9 +599,9 @@ public partial class Visual : global::Microsoft.UI.Composition.CompositionObject
 					_shadowFallbackContent.Dispose();
 					_shadowFallbackContent = null;
 				}
-				PaintStep(this, session, clipChanged);
+				PaintStep(this, session, clipChanged, clipBounds);
 				PostPaintingClipStep(this, in session);
-				RenderChildrenStep(this, session, applyChildOptimization, cullRect, clipChanged);
+				RenderChildrenStep(this, session, applyChildOptimization, cullRect, clipChanged, clipBounds);
 			}
 			else
 			{
@@ -575,19 +615,17 @@ public partial class Visual : global::Microsoft.UI.Composition.CompositionObject
 					|| RequiresRepaintOnEveryFrame
 					|| _shadowFallbackOpacity != session.Opacity)
 				{
-					var recording = CreateRecording();
-					// child.Render will reapply the total transform matrix, so we need to invert ours.
-					Matrix4x4.Invert(TotalMatrix, out var rootTransform);
-					_factory.CreateInstance(this, recording, ref rootTransform, session.Opacity, session.Damage, out var childSession);
+					var recording = CreateRecording(parentSession.Session.Factory);
+					_factory.CreateInstance(this, recording, session.Opacity, session.Damage, out var childSession);
 					using (childSession)
 					{
-						PaintStep(this, childSession, clipChanged);
+						PaintStep(this, childSession, clipChanged, clipBounds);
 						PostPaintingClipStep(this, in childSession);
 						// No culling inside the recording — it survives ancestor moves, so it must be complete.
-						RenderChildrenStep(this, childSession, applyChildOptimization, cullRect: default, clipChanged);
-						renderData = recording.Finish();
+						RenderChildrenStep(this, childSession, applyChildOptimization, cullRect: default, clipChanged, clipBounds);
 					}
 
+					renderData = recording.Finish();
 					_shadowFallbackContent?.Dispose();
 					// A descendant can invalidate mid-render (see RenderChildrenStep) — don't cache a stale record.
 					if ((_flags & VisualFlags.ChildrenSKPictureInvalid) == 0)
@@ -599,6 +637,29 @@ public partial class Visual : global::Microsoft.UI.Composition.CompositionObject
 					{
 						_shadowFallbackContent = null;
 					}
+				}
+
+				// Replaying under a changed matrix (an ancestor moved, e.g. scrolling): nothing inside the record
+				// contributes its move damage, so damage this subtree's effective clip at its previous and current
+				// placements instead -- the same compensation the cached children replay makes below.
+				if (session.Damage is { } shadowDamage && TotalMatrix != _shadowFallbackMatrix)
+				{
+					if (_hasShadowFallbackDamageRect)
+					{
+						shadowDamage.UnionRect(_shadowFallbackDamageRect);
+					}
+
+					var shadowClip = GetTotalClipPath(skipPostPaintingClipping: false);
+					var shadowBounds = shadowClip.IsEmpty ? default : shadowClip.Bounds;
+					shadowClip.Release();
+					_hasShadowFallbackDamageRect = !IsRectEmpty(shadowBounds);
+					if (_hasShadowFallbackDamageRect)
+					{
+						shadowDamage.UnionRect(shadowBounds);
+						_shadowFallbackDamageRect = shadowBounds;
+					}
+
+					_shadowFallbackMatrix = TotalMatrix;
 				}
 
 				session.Session.SaveLayer(ShadowState.GetShadowFilter(session.Session.Factory));
@@ -613,7 +674,7 @@ public partial class Visual : global::Microsoft.UI.Composition.CompositionObject
 			}
 		}
 
-		static void PaintStep(Visual visual, in PaintingSession session, bool clipChanged)
+		static void PaintStep(Visual visual, in PaintingSession session, bool clipChanged, Rect clipBounds)
 		{
 			// Rendering shouldn't depend on matrix or clip adjustments happening in a visual's Paint. That should
 			// be specific to that visual and should not affect the rendering of any other visual.
@@ -624,7 +685,7 @@ public partial class Visual : global::Microsoft.UI.Composition.CompositionObject
 			{
 				visual.InvalidateParentChildrenPicture(includeSelf: false);
 				// Repaint-every-frame content (e.g. an effect brush over already-drawn area): paint directly, uncached.
-				visual.ContributeDamageOnPaint(contentChanged: true, session.Damage, clipChanged);
+				visual.ContributeDamageOnPaint(contentChanged: true, session.Damage, clipChanged, clipBounds);
 				visual.Paint(session);
 			}
 			else
@@ -634,10 +695,13 @@ public partial class Visual : global::Microsoft.UI.Composition.CompositionObject
 				{
 					visual._flags &= ~VisualFlags.PaintDirty;
 
-					var recording = CreateRecording();
-					_factory.CreateInstance(visual, recording, ref session.RootTransform, session.Opacity, session.Damage, out var recorderSession);
-					// To debug what exactly gets repainted, replace the following line with `Paint(in session);`
-					visual.Paint(in recorderSession);
+					var recording = CreateRecording(session.Session.Factory);
+					_factory.CreateInstance(visual, recording, session.Opacity, session.Damage, out var recorderSession);
+					using (recorderSession)
+					{
+						// To debug what exactly gets repainted, replace the following line with `Paint(in session);`
+						visual.Paint(in recorderSession);
+					}
 
 					visual._content?.Dispose();
 					visual._content = recording.Finish();
@@ -645,7 +709,7 @@ public partial class Visual : global::Microsoft.UI.Composition.CompositionObject
 
 				// Contribute damage whether or not the content was re-recorded: a moved-but-unchanged visual keeps its
 				// cached content and own-content path, but its new position still needs to be repainted (and its old one).
-				visual.ContributeDamageOnPaint(contentChanged, session.Damage, clipChanged);
+				visual.ContributeDamageOnPaint(contentChanged, session.Damage, clipChanged, clipBounds);
 
 				if (visual._content is { } content)
 				{
@@ -660,7 +724,7 @@ public partial class Visual : global::Microsoft.UI.Composition.CompositionObject
 		static void PostPaintingClipStep(Visual visual, in PaintingSession session)
 			=> visual.ApplyPostPaintingClipping(session.Session);
 
-		static void RenderChildrenStep(Visual visual, PaintingSession session, bool applyChildOptimization, Rect cullRect, bool clipChanged)
+		static void RenderChildrenStep(Visual visual, PaintingSession session, bool applyChildOptimization, Rect cullRect, bool clipChanged, Rect clipBounds)
 		{
 			if (visual._childrenContent is { } childrenContent)
 			{
@@ -697,21 +761,19 @@ public partial class Visual : global::Microsoft.UI.Composition.CompositionObject
 				var childCullRect = visual.NarrowCullRect(cullRect);
 				foreach (var child in visual.GetChildrenInRenderOrder())
 				{
-					child.Render(in session, applyChildOptimization, childCullRect, clipChanged);
+					child.Render(in session, applyChildOptimization, childCullRect, clipChanged, clipBounds);
 				}
 			}
 			else
 			{
-				var recording = CreateRecording();
-				// child.Render will reapply the total transform matrix, so we need to invert ours.
-				Matrix4x4.Invert(visual.TotalMatrix, out var rootTransform);
-				_factory.CreateInstance(visual, recording, ref rootTransform, session.Opacity, session.Damage, out var childSession);
+				var recording = CreateRecording(session.Session.Factory);
+				_factory.CreateInstance(visual, recording, session.Opacity, session.Damage, out var childSession);
 				using (childSession)
 				{
 					foreach (var child in visual.GetChildrenInRenderOrder())
 					{
 						// No culling inside the recording — it survives ancestor moves, so it must be complete.
-						child.Render(in childSession, applyChildOptimization: false, ancestorClipChanged: clipChanged);
+						child.Render(in childSession, applyChildOptimization: false, ancestorClipChanged: clipChanged, inheritedClipBounds: clipBounds);
 					}
 				}
 
@@ -753,13 +815,27 @@ public partial class Visual : global::Microsoft.UI.Composition.CompositionObject
 			return clipPath;
 		}
 
-		var localMatrix = TotalMatrix.ToMatrix3x2();
-		var ownClip = GetPrePaintingClipping() ?? GeometryFactory.Current.CreateRectangleGeometry(new Rect(0, 0, Size.X, Size.Y));
-		var ownClipInParent = ownClip.Transform(localMatrix);
-		ownClip.Release();
-		// clipFromParent belongs to the caller, so it is not released here.
-		var localClip = ownClipInParent.Combine(clipFromParent, GeometryCombineMode.Intersect);
-		ownClipInParent.Release();
+		// A 2D matrix cannot carry a projection, so a projective visual's own clip is not mapped at all rather than
+		// mapped wrongly -- it simply narrows nothing. The walk still has to continue: bailing out here would stop
+		// a native host under a projection from ever being unioned in, and it would vanish altogether.
+		var planar = TotalMatrix.IsPlanarAffine();
+		var localMatrix = planar ? TotalMatrix.ToMatrix3x2() : Matrix3x2.Identity;
+		IGeometry localClip;
+		if (planar)
+		{
+			var ownClip = GetPrePaintingClipping() ?? GeometryFactory.Current.CreateRectangleGeometry(new Rect(0, 0, Size.X, Size.Y));
+			var ownClipInParent = ownClip.Transform(localMatrix);
+			ownClip.Release();
+			// clipFromParent belongs to the caller, so it is not released here.
+			localClip = ownClipInParent.Combine(clipFromParent, GeometryCombineMode.Intersect);
+			ownClipInParent.Release();
+		}
+		else
+		{
+			// Borrowed from the caller: AddRef so the single Release below is balanced either way.
+			clipFromParent.AddRef();
+			localClip = clipFromParent;
+		}
 
 		if (IsNativeHostVisual || CanPaint())
 		{
@@ -772,7 +848,7 @@ public partial class Visual : global::Microsoft.UI.Composition.CompositionObject
 		}
 
 		var childClip = localClip;
-		if (GetPostPaintingClipping() is { } postClip)
+		if (planar && GetPostPaintingClipping() is { } postClip)
 		{
 			var postClipInParent = postClip.Transform(localMatrix);
 			postClip.Release();
@@ -800,6 +876,13 @@ public partial class Visual : global::Microsoft.UI.Composition.CompositionObject
 		var dst = Parent is Visual parent
 			? parent.GetTotalClipPath(false)
 			: GeometryFactory.Current.CreateRectangleGeometry(InfiniteClipRect);
+
+		// Same as above: without a projective transform this visual's own clips cannot be mapped, and reporting
+		// no narrowing only ever widens what callers think is visible.
+		if (!TotalMatrix.IsPlanarAffine())
+		{
+			return dst;
+		}
 
 		var totalMatrix = TotalMatrix.ToMatrix3x2();
 		if (GetPrePaintingClipping() is { } pre)
@@ -889,6 +972,15 @@ public partial class Visual : global::Microsoft.UI.Composition.CompositionObject
 		// it only depends on the subtree's content — ancestor moves (scrolling) keep it valid. Re-walking every
 		// frame costs per-visual geometry booleans over the whole subtree, so reuse the last verdict + regions
 		// under the same gates as the fallback-recording cache.
+		// Ahead of the cache, not inside it: a TransformMatrix change raises no PaintDirty and deliberately keeps
+		// this visual's own shadow cache, so a caster animating into a projection would otherwise keep replaying
+		// regions walked while it was still affine.
+		if (!TotalMatrix.IsPlanarAffine())
+		{
+			_hasAnalyticShadowVerdict = false;
+			return false;
+		}
+
 		var cacheValid = _hasAnalyticShadowVerdict && !_shadowSubtreeChangedThisFrame
 			&& (_flags & VisualFlags.PaintDirty) == 0
 			&& !RequiresRepaintOnEveryFrame;
@@ -1000,6 +1092,13 @@ public partial class Visual : global::Microsoft.UI.Composition.CompositionObject
 			return true;
 		}
 
+		// The root was checked before the walk, but a descendant can carry its own projection, and its silhouette
+		// would then be mapped by an affine approximation.
+		if (!visual.TotalMatrix.IsPlanarAffine())
+		{
+			return false;
+		}
+
 		var toRoot = visual.TotalMatrix.ToMatrix3x2() * inverseRootMatrix;
 
 		IGeometry? effectiveClip = null;
@@ -1026,12 +1125,18 @@ public partial class Visual : global::Microsoft.UI.Composition.CompositionObject
 		var canSkipOwnContribution = false;
 		if (visual is { PaintsWithinOwnSize: true, Size: { X: > 0, Y: > 0 } size })
 		{
-			var sizeCandidate = GeometryFactory.Current.CreateRectangleGeometry(new Rect(0, 0, size.X, size.Y)).Transform(toRoot);
+			var sizeRect = GeometryFactory.Current.CreateRectangleGeometry(new Rect(0, 0, size.X, size.Y));
+			var sizeCandidate = sizeRect.Transform(toRoot);
+			sizeRect.Release();
 			if (effectiveClip is not null)
 			{
-				sizeCandidate = sizeCandidate.Combine(effectiveClip, GeometryCombineMode.Intersect);
+				var clipped = sizeCandidate.Combine(effectiveClip, GeometryCombineMode.Intersect);
+				sizeCandidate.Release();
+				sizeCandidate = clipped;
 			}
+
 			canSkipOwnContribution = accumulator.IsFullyCovered(sizeCandidate);
+			sizeCandidate.Release();
 		}
 		else if (effectiveClip is not null)
 		{
@@ -1160,7 +1265,13 @@ public partial class Visual : global::Microsoft.UI.Composition.CompositionObject
 			return false;
 		}
 
-		var bounds = new Rect(0, 0, Math.Max(0f, Size.X), Math.Max(0f, Size.Y)).Transform(TotalMatrix.ToMatrix3x2());
+		// Under perspective the footprint is not the affine one, so culling against that approximation would
+		// drop content that is actually on screen.
+		if (!new Rect(0, 0, Math.Max(0f, Size.X), Math.Max(0f, Size.Y)).TryTransformBounds(TotalMatrix, out var bounds))
+		{
+			return false;
+		}
+
 		return IsRectEmpty(Intersect(bounds, cullRect));
 	}
 
@@ -1176,7 +1287,11 @@ public partial class Visual : global::Microsoft.UI.Composition.CompositionObject
 			return cullRect;
 		}
 
-		var clipInRoot = localClip.Transform(TotalMatrix.ToMatrix3x2());
+		if (!localClip.TryTransformBounds(TotalMatrix, out var clipInRoot))
+		{
+			return cullRect;
+		}
+
 		var narrowed = Intersect(cullRect, clipInRoot);
 		// Fully clipped-out subtree: an empty rect would read as "culling disabled", so keep a degenerate
 		// non-empty rect instead — every size-bounded leaf then tests as outside (still conservative).
@@ -1219,8 +1334,6 @@ public partial class Visual : global::Microsoft.UI.Composition.CompositionObject
 	/// </summary>
 	private void CreateLocalSession(in PaintingSession parentSession, out PaintingSession session)
 	{
-		ref var rootTransform = ref parentSession.RootTransform;
-
 		var opacity = Opacity == 1.0f ? parentSession.Opacity : parentSession.Opacity * Opacity;
 
 		// MUX Reference hwwalk.cpp, ShouldOverrideRenderOpacity.
@@ -1229,43 +1342,14 @@ public partial class Visual : global::Microsoft.UI.Composition.CompositionObject
 			opacity = 1.0f;
 		}
 
-		_factory.CreateInstance(this, parentSession.Session, ref rootTransform, opacity, parentSession.Damage, out session);
+		_factory.CreateInstance(this, parentSession.Session, opacity, parentSession.Damage, out session);
 
-		if ((_flags & VisualFlags.MatrixDirty) != 0 || !_totalMatrix.isLocalMatrixIdentity)
+		// Concatenated onto what the walk has accumulated, so a subtree draws relative to wherever it is drawn, even under
+		// a matrix that flattens Z and has no inverse. The session's save undoes it on dispose.
+		if (LocalMatrix is { IsIdentity: false } localMatrix)
 		{
-			Matrix4x4 totalMatrix;
-
-			if (Unsafe.IsNullRef(ref rootTransform))
-			{
-				totalMatrix = TotalMatrix;
-			}
-			else
-			{
-				totalMatrix = TotalMatrix * rootTransform;
-			}
-
-			if (!_totalMatrix.isLocalMatrixIdentity)
-			{
-				session.Session.SetMatrix(totalMatrix);
-			}
+			session.Session.Concat(localMatrix);
 		}
-#if DEBUG
-		else
-		{
-			var actual = parentSession.Session.TotalMatrix;
-			var expected = Unsafe.IsNullRef(ref rootTransform) ? TotalMatrix : TotalMatrix * rootTransform;
-			var diff = actual - expected;
-			// Due to the limited precision of doubles, instead of comparing the two matrices directly we compare the Frobenius norm of their difference to zero
-			var frobeniusSquared =
-				diff.M11 * diff.M11 + diff.M12 * diff.M12 + diff.M13 * diff.M13 + diff.M14 * diff.M14 +
-				diff.M21 * diff.M21 + diff.M22 * diff.M22 + diff.M23 * diff.M23 + diff.M24 * diff.M24 +
-				diff.M31 * diff.M31 + diff.M32 * diff.M32 + diff.M33 * diff.M33 + diff.M34 * diff.M34 +
-				diff.M41 * diff.M41 + diff.M42 * diff.M42 + diff.M43 * diff.M43 + diff.M44 * diff.M44;
-			Debug.Assert(Unsafe.IsNullRef(ref rootTransform)
-				? actual == TotalMatrix
-				: CompositionMathHelpers.IsCloseRealZero(frobeniusSquared, 1e-5f));
-		}
-#endif
 	}
 
 	internal void PrintSubtree(StringBuilder sb, int indent = 0)

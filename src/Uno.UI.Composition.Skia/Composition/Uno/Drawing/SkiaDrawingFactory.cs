@@ -4,6 +4,7 @@ using System;
 using System.Numerics;
 using Microsoft.UI.Composition;
 using SkiaSharp;
+using Uno.Foundation.Logging;
 using Windows.Foundation;
 using Windows.UI;
 
@@ -21,6 +22,8 @@ internal sealed class SkiaDrawingFactory :
 	IDrawingFactory<IVulkanRenderTarget>,
 	System.IDisposable
 {
+	private const long WebGlResourceCacheBytes = 256 * 1024 * 1024;
+
 	// GL state (built lazily on the first GL present, once the host's GL context is current; per backend
 	// instance, i.e. per graphics context). Null for the software / host-canvas cases.
 	private GRContext? _glContext;
@@ -59,13 +62,19 @@ internal sealed class SkiaDrawingFactory :
 
 
 	// Typed present per kind: the target arrives already narrowed, so there is no cast/switch here.
-	public IPresentSession BeginPresent(IGLRenderTarget target) => PresentForGL(target);
+	public IPresentSession BeginPresent(IGLRenderTarget target, ReadOnlySpan<Rect> damage) => Damaged(PresentForGL(target), damage);
 
-	public IPresentSession BeginPresent(ISoftwareRenderTarget target) => SkiaPresentSession.ForSoftware(target, this);
+	public IPresentSession BeginPresent(ISoftwareRenderTarget target, ReadOnlySpan<Rect> damage) => Damaged(SkiaPresentSession.ForSoftware(target, this), damage);
 
-	public IPresentSession BeginPresent(IMetalRenderTarget target) => PresentForMetal(target);
+	public IPresentSession BeginPresent(IMetalRenderTarget target, ReadOnlySpan<Rect> damage) => Damaged(PresentForMetal(target), damage);
 
-	public IPresentSession BeginPresent(IVulkanRenderTarget target) => PresentForVulkan(target);
+	public IPresentSession BeginPresent(IVulkanRenderTarget target, ReadOnlySpan<Rect> damage) => Damaged(PresentForVulkan(target), damage);
+
+	private static IPresentSession Damaged(IPresentSession session, ReadOnlySpan<Rect> damage)
+	{
+		if (session is SkiaPresentSession skia) { skia.ClipToDamage(damage); }
+		return session;
+	}
 
 	// Build/reuse a GRContext-Vulkan from the host's device context and wrap the per-frame render VkImage as an
 	// SKSurface (cached, rebuilt on image/size change). ResetContext each frame because the host's external
@@ -92,11 +101,15 @@ internal sealed class SkiaDrawingFactory :
 
 		if (_vulkanSurface is null || _vulkanImage != vk.Image || vk.Width != _vulkanWidth || vk.Height != _vulkanHeight)
 		{
-			_vulkanWidth = vk.Width;
-			_vulkanHeight = vk.Height;
-			_vulkanImage = vk.Image;
+			// Drop the cache (fields and keys together) before rebuilding: a failed wrap must leave nothing behind
+			// that a later frame could mistake for a live surface, or the window never recovers.
 			_vulkanRenderTarget?.Dispose();
 			_vulkanSurface?.Dispose();
+			_vulkanRenderTarget = null;
+			_vulkanSurface = null;
+			_vulkanImage = 0;
+			_vulkanWidth = 0;
+			_vulkanHeight = 0;
 
 			var info = new GRVkImageInfo
 			{
@@ -111,11 +124,21 @@ internal sealed class SkiaDrawingFactory :
 				Protected = vk.Protected,
 				Alloc = new GRVkAlloc { Memory = vk.Memory, Size = vk.MemorySize },
 			};
-			_vulkanRenderTarget = new GRBackendRenderTarget(vk.Width, vk.Height, info);
+			var renderTarget = new GRBackendRenderTarget(vk.Width, vk.Height, info);
 			// The colour type must match the image's own Vulkan format or Skia refuses the wrap and returns null.
-			var colorType = vk.ColorFormat == GraphicsColorFormat.Rgba8888 ? SKColorType.Rgba8888 : SKColorType.Bgra8888;
-			_vulkanSurface = SKSurface.Create(_vulkanContext, _vulkanRenderTarget, GRSurfaceOrigin.TopLeft, colorType, SKColorSpace.CreateSrgb())
-				?? throw new System.NotSupportedException($"Skia could not wrap the host's Vulkan image ({colorType}, format {vk.Format}).");
+			var colorType = ToColorType(vk.ColorFormat);
+			var surface = SKSurface.Create(_vulkanContext, renderTarget, GRSurfaceOrigin.TopLeft, colorType, SKColorSpace.CreateSrgb());
+			if (surface is null)
+			{
+				renderTarget.Dispose();
+				throw new System.NotSupportedException($"Skia could not wrap the host's Vulkan image ({colorType}, format {vk.Format}).");
+			}
+
+			_vulkanRenderTarget = renderTarget;
+			_vulkanSurface = surface;
+			_vulkanImage = vk.Image;
+			_vulkanWidth = vk.Width;
+			_vulkanHeight = vk.Height;
 		}
 
 		return SkiaPresentSession.ForCachedGpuSurface(_vulkanSurface, _vulkanContext, this);
@@ -128,12 +151,11 @@ internal sealed class SkiaDrawingFactory :
 		_metalContext ??= GRContext.CreateMetal(new GRMtlBackendContext { DeviceHandle = _metalDevice!.Device, QueueHandle = _metalDevice!.Queue })
 			?? throw new System.NotSupportedException("Failed to create a Metal GRContext.");
 
-		var colorType = metal.ColorFormat == GraphicsColorFormat.Bgra8888 ? SKColorType.Bgra8888 : SKColorType.Rgba8888;
-		var target = new GRBackendRenderTarget(metal.Width, metal.Height, new GRMtlTextureInfo(metal.Texture));
+		var colorType = ToColorType(metal.ColorFormat);
+		// The render target descriptor is consumed by SKSurface.Create; the surface is disposed on present.
+		using var target = new GRBackendRenderTarget(metal.Width, metal.Height, new GRMtlTextureInfo(metal.Texture));
 		var surface = SKSurface.Create(_metalContext, target, GRSurfaceOrigin.TopLeft, colorType)
 			?? throw new System.NotSupportedException($"Skia could not wrap the host's Metal texture ({colorType}).");
-		// The render target descriptor is consumed by SKSurface.Create; the surface is disposed on present.
-		target.Dispose();
 
 		// Render straight into the host's texture; retention (partial repaint) is the host's business (it hands back a
 		// stable texture when it preserves contents).
@@ -141,37 +163,77 @@ internal sealed class SkiaDrawingFactory :
 	}
 
 	// Build/reuse a GRContext-GL and an SKSurface over the host's (already-current) window framebuffer.
+	internal static SKColorType ToColorType(GraphicsColorFormat format) => format switch
+	{
+		GraphicsColorFormat.Rgba8888 => SKColorType.Rgba8888,
+		GraphicsColorFormat.Rgb888x => SKColorType.Rgb888x,
+		_ => SKColorType.Bgra8888,
+	};
+
 	private IPresentSession PresentForGL(IGLRenderTarget gl)
 	{
 		// GLES/WebGL assemble the interface from the host's proc loader. Desktop GL uses SkiaSharp's compiled-in
 		// native interface (Create()) instead: the proc-assembled variant segfaults on Mesa/llvmpipe.
 		var loader = _glDevice!.GetProcAddress;
-		_glContext ??= GRContext.CreateGl(
-				(_glDevice!.Kind switch
-				{
-					GraphicsContextKind.OpenGLES => GRGlInterface.CreateGles(name => loader(name)),
-					GraphicsContextKind.WebGL => GRGlInterface.CreateWebGl(name => loader(name)),
-					_ => GRGlInterface.Create(),
-				})
-				?? throw new System.NotSupportedException("OpenGL is not available (GRGlInterface create failed)."))
-			?? throw new System.NotSupportedException("Failed to create an OpenGL GRContext.");
+		if (_glContext is null)
+		{
+			_glContext = GRContext.CreateGl(
+					(_glDevice!.Kind switch
+					{
+						GraphicsContextKind.OpenGLES => GRGlInterface.CreateGles(name => loader(name)),
+						GraphicsContextKind.WebGL => GRGlInterface.CreateWebGl(name => loader(name)),
+						_ => GRGlInterface.Create(),
+					})
+					?? throw new System.NotSupportedException("OpenGL is not available (GRGlInterface create failed)."))
+				?? throw new System.NotSupportedException("Failed to create an OpenGL GRContext.");
+
+			if (_glDevice.Kind == GraphicsContextKind.WebGL)
+			{
+				// The browser host needs a far larger resource cache than Skia's default: with the default the
+				// canvas-sized GPU resources are evicted and rebuilt constantly.
+				_glContext.SetResourceCacheLimit(WebGlResourceCacheBytes);
+			}
+		}
 
 		if (_glSurface is null || gl.Width != _glWidth || gl.Height != _glHeight)
 		{
-			_glWidth = gl.Width;
-			_glHeight = gl.Height;
+			// Drop the cache (fields and keys together) before rebuilding: a failed wrap must leave nothing behind
+			// that a later frame could mistake for a live surface, or the window never recovers.
 			_glRenderTarget?.Dispose();
 			_glSurface?.Dispose();
+			_glRenderTarget = null;
+			_glSurface = null;
+			_glWidth = 0;
+			_glHeight = 0;
 
-			var info = new GRGlFramebufferInfo(gl.FramebufferId, SKColorType.Rgba8888.ToGlSizedFormat());
-			_glRenderTarget = new GRBackendRenderTarget(gl.Width, gl.Height, gl.SampleCount, gl.StencilBits, info);
+			var colorType = ToColorType(gl.ColorFormat);
+			var info = new GRGlFramebufferInfo(gl.FramebufferId, colorType.ToGlSizedFormat());
+			// A host can report more GL_SAMPLES than Skia can wrap for this color type (common on Android GLES),
+			// and an unclamped count makes SKSurface.Create return null instead of quietly downgrading MSAA.
+			var samples = Math.Min(gl.SampleCount, _glContext.GetMaxSurfaceSampleCount(colorType));
+			var renderTarget = new GRBackendRenderTarget(gl.Width, gl.Height, samples, gl.StencilBits, info);
 			// BottomLeft to match OpenGL's origin.
-			_glSurface = SKSurface.Create(_glContext, _glRenderTarget, GRSurfaceOrigin.BottomLeft, SKColorType.Rgba8888)
-				?? throw new System.NotSupportedException("Skia could not wrap the host's OpenGL framebuffer.");
+			var surface = SKSurface.Create(_glContext, renderTarget, GRSurfaceOrigin.BottomLeft, colorType);
+			if (surface is null)
+			{
+				renderTarget.Dispose();
+				throw new System.NotSupportedException("Skia could not wrap the host's OpenGL framebuffer.");
+			}
+
+			_glRenderTarget = renderTarget;
+			_glSurface = surface;
+			_glWidth = gl.Width;
+			_glHeight = gl.Height;
 		}
 
-		// Render straight into the host's framebuffer; retention (partial repaint) is the host's business (it hands
-		// back a stable framebuffer that survives its present when it preserves contents).
+		// A host that retains through its own framebuffer blits with raw GL calls at present, which rebinds
+		// GL_FRAMEBUFFER behind Skia's back. Skia caches GL state, so without this it keeps believing the host's
+		// framebuffer is bound and draws into the default one instead — the window then freezes on the last frame
+		// the blit legitimately copied.
+		_glContext.ResetContext();
+
+		// Straight into whatever framebuffer the host handed over; retention (so the damage region survives the
+		// host's present) is the host's business, not the backend's.
 		return new SkiaPresentSession(_glSurface.Canvas, this);
 	}
 
@@ -205,7 +267,15 @@ internal sealed class SkiaDrawingFactory :
 			throw new System.ArgumentException("Texture was not produced by SkiaDrawingFactory.", nameof(texture));
 		}
 
-		return System.Threading.Tasks.Task.FromResult<IImage>(new SkiaImage(skia.Image));
+		// The returned image must own its pixels: the texture stays independently alive and disposable, and both
+		// wrappers free their SKImage.
+		using var bitmap = new SKBitmap(new SKImageInfo(skia.PixelWidth, skia.PixelHeight, SKColorType.Bgra8888, SKAlphaType.Premul));
+		if (!skia.Image.ReadPixels(bitmap.Info, bitmap.GetPixels(), bitmap.RowBytes, 0, 0))
+		{
+			throw new System.InvalidOperationException("Failed to read the texture's pixels back.");
+		}
+
+		return System.Threading.Tasks.Task.FromResult<IImage>(new SkiaImage(SKImage.FromBitmap(bitmap)));
 	}
 
 	public ITexture CreateTexture(IImage image)
@@ -344,14 +414,32 @@ internal sealed class SkiaDrawingFactory :
 
 	public IEffectFilter? CreateEffectFilter(EffectNode tree, Rect bounds)
 	{
-		var filter = new SkiaEffectFuser().Fuse(tree, bounds.ToSKRect());
-		return filter is null ? null : new SkiaEffectFilter(filter);
+		var fuser = new SkiaEffectFuser();
+		var filter = fuser.FuseGraph(tree, bounds.ToSKRect());
+		if (filter is null)
+		{
+			// Nothing downstream surfaces this: the brush then paints nothing at all, so name what could not be realized.
+			if (this.Log().IsEnabled(LogLevel.Error))
+			{
+				this.Log().Error($"The Skia backend could not realize the effect graph rooted at '{tree.GetType().Name}': {fuser.FailureReason}.");
+			}
+
+			return null;
+		}
+
+		return new SkiaEffectFilter(filter);
 	}
 
 	public IEffectFilter CreateDropShadowFilter(float dx, float dy, float sigmaX, float sigmaY, Color color)
-		=> new SkiaEffectFilter(SKImageFilter.CreateOffset(dx, dy, SKImageFilter.CreateCompose(
-			SKImageFilter.CreateBlur(sigmaX, sigmaY),
-			SKImageFilter.CreateColorFilter(SKColorFilter.CreateBlendMode(color.ToSKColor(), SKBlendMode.Modulate)))));
+	{
+		// Skia filters are natively refcounted and each parent takes its own reference, so the interior wrappers are
+		// released as soon as the root is built.
+		using var tint = SKColorFilter.CreateBlendMode(color.ToSKColor(), SKBlendMode.Modulate);
+		using var tintFilter = SKImageFilter.CreateColorFilter(tint);
+		using var blur = SKImageFilter.CreateBlur(sigmaX, sigmaY);
+		using var composed = SKImageFilter.CreateCompose(blur, tintFilter);
+		return new SkiaEffectFilter(SKImageFilter.CreateOffset(dx, dy, composed));
+	}
 
 	private static SKShaderTileMode ToSK(GradientTileMode mode) => mode switch
 	{

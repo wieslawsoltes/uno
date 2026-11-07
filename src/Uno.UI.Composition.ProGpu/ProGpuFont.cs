@@ -6,6 +6,7 @@ extern alias unouwp;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Numerics;
 using System.Threading;
@@ -73,6 +74,10 @@ public sealed class ProGpuFontProvider : IFontProvider
 			return null;
 		}
 	}
+
+	public async ValueTask<IFont?> MatchFamilyAsync(string familyName, FontWeight weight, FontStretch stretch, FontStyle style, float fontSize)
+		=> await FontFallback.MatchFamilyAsync(this, familyName, weight, stretch, style, fontSize)
+			?? MatchFamily(familyName, weight, stretch, style, fontSize);
 
 	public IFont? MatchFamily(string familyName, FontWeight weight, FontStretch stretch, FontStyle style, float fontSize)
 	{
@@ -164,6 +169,21 @@ public sealed class ProGpuFont : IFont
 	public float? StrikeoutThickness => Font.StrikeoutThickness is { } value ? Math.Abs(value * _scale) : null;
 	public string FamilyName => Font.FamilyName;
 
+	[ThreadStatic]
+	private static HarfBuzzSharp.Buffer? _directionBuffer;
+
+	public GlyphRun Shape(ReadOnlySpan<char> text, out TextDirection resolvedDirection, bool enableLigatures = true)
+	{
+		var buffer = _directionBuffer ??= new HarfBuzzSharp.Buffer();
+		buffer.ClearContents();
+		buffer.AddUtf16(text);
+		buffer.GuessSegmentProperties();
+		resolvedDirection = buffer.Direction == HarfBuzzSharp.Direction.RightToLeft
+			? TextDirection.RightToLeft
+			: TextDirection.LeftToRight;
+		return Shape(text, resolvedDirection, enableLigatures);
+	}
+
 	public GlyphRun Shape(ReadOnlySpan<char> text, TextDirection direction, bool enableLigatures = true)
 	{
 		if (_shapeCache.TryGet(text, direction, enableLigatures, out var cached))
@@ -176,6 +196,68 @@ public sealed class ProGpuFont : IFont
 			? TextShapingOptions.Default
 			: TextShapingOptions.WithFeatures(new OpenTypeFeatureSetting("liga", 0)))
 			.WithDirection(shapingDirection);
+		var run = ShapeCore(text, options);
+		_shapeCache.Add(text, direction, enableLigatures, run);
+		return run;
+	}
+
+	public GlyphRun Shape(ReadOnlySpan<char> text, TextDirection direction, in ShapingOptions options)
+	{
+		if (!options.DisableKerning && !options.SmallCaps && options.Language is null && options.Script is null)
+		{
+			return Shape(text, direction, !options.DisableLigatures);
+		}
+		var features = TextShapingOptions.WithFeatures(
+			new OpenTypeFeatureSetting("liga", options.DisableLigatures ? 0 : 1),
+			new OpenTypeFeatureSetting("kern", options.DisableKerning ? 0 : 1),
+			new OpenTypeFeatureSetting("smcp", options.SmallCaps ? 1 : 0));
+		return ShapeCore(text, new TextShapingOptions
+		{
+			Features = features.Features,
+			ExplicitFeatureTags = features.ExplicitFeatureTags,
+			Direction = direction == TextDirection.RightToLeft ? ShapingDirection.RightToLeft : ShapingDirection.LeftToRight,
+			Language = NormalizeLanguage(options.Language),
+			Script = options.Script?.ToLowerInvariant() switch { "hira" => "kana", "laoo" => "lao ", var script => script },
+		});
+	}
+
+	public bool TryGetTable(uint tag, [NotNullWhen(true)] out byte[]? data)
+	{
+		var name = new string([(char)(tag >> 24), (char)((tag >> 16) & 255), (char)((tag >> 8) & 255), (char)(tag & 255)]);
+		if (Font.TryGetTable(name, out var table))
+		{
+			data = table.ToArray();
+			return true;
+		}
+		data = null;
+		return false;
+	}
+
+	private static string? NormalizeLanguage(string? language)
+	{
+		if (language is null)
+		{
+			return null;
+		}
+		var parts = language.Replace('_', '-').ToLowerInvariant().Split('-');
+		if (parts[0] != "zh")
+		{
+			return parts[0];
+		}
+		// Preserve Chinese script and regional OpenType language systems.
+		if (Array.IndexOf(parts, "hans") >= 0)
+		{
+			return "zh-hans";
+		}
+		if (Array.IndexOf(parts, "hk") >= 0 || Array.IndexOf(parts, "mo") >= 0)
+		{
+			return "zh-hk";
+		}
+		return Array.IndexOf(parts, "hant") >= 0 || Array.IndexOf(parts, "tw") >= 0 ? "zh-hant" : "zh";
+	}
+
+	private GlyphRun ShapeCore(ReadOnlySpan<char> text, TextShapingOptions options)
+	{
 		var shaped = OpenTypeTextShaper.Shape(text.ToString(), Font, Size, options);
 		var glyphs = new ushort[shaped.Count];
 		var offsets = new Vector2[shaped.Count];
@@ -189,9 +271,7 @@ public sealed class ProGpuFont : IFont
 			advances[i] = glyph.AdvanceX;
 			clusters[i] = glyph.Cluster;
 		}
-		var run = new GlyphRun(glyphs, offsets, advances, clusters);
-		_shapeCache.Add(text, direction, enableLigatures, run);
-		return run;
+		return new GlyphRun(glyphs, offsets, advances, clusters);
 	}
 
 	private float ResolveCapHeight()

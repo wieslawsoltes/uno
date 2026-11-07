@@ -28,12 +28,15 @@ public partial class ShapeVisual
 		// session.Session.ClipRect(new Rect(0, 0, Size.X, Size.Y));
 
 		// TODO: ViewBox.Stretch, ViewBox.HorizontalAlignmentRatio and ViewBox.VerticalAlignmentRatio
-		if (ViewBox is not null)
+		// Scoped to the shapes: repainting every frame paints straight into the session the children draw in next.
+		var viewBox = ViewBox;
+		if (viewBox is not null)
 		{
+			session.Session.Save();
 			session.Session.Scale(
-				ViewBox.Size.X > 0 ? Size.X / ViewBox.Size.X : 1,
-				ViewBox.Size.Y > 0 ? Size.Y / ViewBox.Size.Y : 1);
-			session.Session.Translate(-ViewBox.Offset.X, -ViewBox.Offset.Y); // translate before scaling
+				viewBox.Size.X > 0 ? Size.X / viewBox.Size.X : 1,
+				viewBox.Size.Y > 0 ? Size.Y / viewBox.Size.Y : 1);
+			session.Session.Translate(-viewBox.Offset.X, -viewBox.Offset.Y); // translate before scaling
 		}
 
 		if (_shapes is { Count: not 0 } shapes)
@@ -42,6 +45,11 @@ public partial class ShapeVisual
 			{
 				shapes[i].Render(in session);
 			}
+		}
+
+		if (viewBox is not null)
+		{
+			session.Session.Restore();
 		}
 
 		base.Paint(in session);
@@ -220,6 +228,16 @@ public partial class ShapeVisual
 			{
 				continue;
 			}
+			// The shape's own transform, which CompositionShape.Render applies before painting it. Without it the
+			// silhouette is the untransformed geometry, so a shape carrying an Offset or a rotation -- typical of
+			// LottieGen output -- casts its shadow in the wrong place.
+			if (sprite.GetRenderTransform() is { IsIdentity: false } shapeTransform)
+			{
+				var untransformed = geometry;
+				geometry = geometry.Transform(shapeTransform);
+				untransformed.Dispose();
+			}
+
 			if (ViewBox is { } viewBox && viewBox.Size.X > 0 && viewBox.Size.Y > 0)
 			{
 				var m = Matrix3x2.CreateTranslation(-viewBox.Offset.X, -viewBox.Offset.Y)

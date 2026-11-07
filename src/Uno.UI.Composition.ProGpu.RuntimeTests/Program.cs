@@ -11,21 +11,13 @@ using ProGPU.Vector;
 using Silk.NET.WebGPU;
 using Uno.UI.Composition.Drawing;
 using Uno.UI.Composition.ProGpu;
-using N = Uno.WebGpu.Native;
 using Color = unouwp::Windows.UI.Color;
 using FontStretch = unouwp::Windows.UI.Text.FontStretch;
 using FontStyle = unouwp::Windows.UI.Text.FontStyle;
 using FontWeight = unouwp::Windows.UI.Text.FontWeight;
 using Rect = unofoundation::Windows.Foundation.Rect;
 
-var initType = typeof(N.WGPU).Assembly.GetType("Uno.UI.Composition.WebGpu.WebGpuInitDevice", throwOnError: true)!;
-using var deviceOwner = (IDisposable)Activator.CreateInstance(
-	initType,
-	BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
-	binder: null,
-	args: [N.WGPUTextureFormat.BGRA8Unorm],
-	culture: null)!;
-var device = (IWebGpuDeviceContext)deviceOwner;
+using var device = GpuTestDevice.Create();
 
 var backendOptions = new ProGpuBackendOptions
 {
@@ -44,6 +36,7 @@ using var factory = (ProGpuDrawingFactory)provider.CreateGraphics(device);
 RunGradientLocalMatrixContractSmoke(factory);
 var geometryFactory = new ProGpuGeometryFactory();
 await ContentContractTests.Run(factory, geometryFactory);
+await RefreshContractTests.Run(factory, geometryFactory);
 {
 	var geometryBuilder = geometryFactory.CreatePrimitiveGeometryBuilder();
 	geometryBuilder.AddRectangle(new Rect(0, 0, 1, 1));
@@ -70,7 +63,7 @@ using var texture = factory.RenderOffscreen(64, 64, drawing =>
 {
 	drawing.Clear(Color.FromArgb(0, 0, 0, 0));
 	drawing.DrawRect(new Rect(8, 8, 48, 48), Color.FromArgb(255, 240, 30, 20));
-	drawing.DrawRoundedRect(new Rect(16, 16, 32, 32), new System.Numerics.Vector4(8), Color.FromArgb(255, 20, 80, 220));
+	drawing.DrawRoundedRect(new RoundRectangle { Rect = new Rect(16, 16, 32, 32), TopLeft = new Vector2(8), TopRight = new Vector2(8), BottomRight = new Vector2(8), BottomLeft = new Vector2(8) }, Color.FromArgb(255, 20, 80, 220));
 	drawing.SaveLayer(shadow);
 	drawing.DrawRect(new Rect(48, 48, 4, 4), Color.FromArgb(255, 255, 255, 255));
 	drawing.Restore();
@@ -115,6 +108,9 @@ await RunUnfilteredLayerSmoke(factory);
 await RunDestinationInLayerSmoke(factory);
 await RunTransparentSourceBlendCoverageSmoke(factory);
 RunStablePresentCacheSmoke(device, factory);
+RunResizeAndSharedDeviceSmoke(device, provider);
+RunConcurrentRenderSmoke(device, provider);
+RunFrameCallbackSmoke(device, provider);
 await RunNestedRecordClearSmoke(factory);
 await RunDefaultTrimSmoke(factory, geometryFactory);
 await RunAnalyticEllipseStrokeSmoke(factory, geometryFactory);
@@ -328,8 +324,8 @@ static async Task RunAllBlendModesLayerSmoke(ProGpuDrawingFactory factory)
 				Color.FromArgb(255, (byte)(45 + (i * 17) % 155), (byte)(55 + (i * 29) % 145), (byte)(65 + (i * 37) % 135)),
 				blendModes[i], tile);
 			drawing.SaveLayer(blend);
-			drawing.DrawRoundedRect(new Rect(left + 2, top + 2, 13, 19), new Vector4(3), Color.FromArgb(205, 235, 48, 72));
-			drawing.DrawRoundedRect(new Rect(left + 7, top + 9, 11, 18), new Vector4(4), Color.FromArgb(165, 32, 210, 238));
+			drawing.DrawRoundedRect(new RoundRectangle { Rect = new Rect(left + 2, top + 2, 13, 19), TopLeft = new Vector2(3), TopRight = new Vector2(3), BottomRight = new Vector2(3), BottomLeft = new Vector2(3) }, Color.FromArgb(205, 235, 48, 72));
+			drawing.DrawRoundedRect(new RoundRectangle { Rect = new Rect(left + 7, top + 9, 11, 18), TopLeft = new Vector2(4), TopRight = new Vector2(4), BottomRight = new Vector2(4), BottomLeft = new Vector2(4) }, Color.FromArgb(165, 32, 210, 238));
 			drawing.Restore();
 			drawing.Restore();
 		}
@@ -504,40 +500,40 @@ static async Task RunBorrowedDeviceOwnershipSmoke(
 
 static unsafe void RunPostFactoryDisposeDeviceSmoke(IWebGpuDeviceContext device)
 {
-	var descriptor = new N.WGPUTextureDescriptor
+	var descriptor = new TextureDescriptor
 	{
-		Size = new N.WGPUExtent3D { Width = 4, Height = 4, DepthOrArrayLayers = 1 },
-		Format = N.WGPUTextureFormat.BGRA8Unorm,
+		Size = new Extent3D { Width = 4, Height = 4, DepthOrArrayLayers = 1 },
+		Format = TextureFormat.Bgra8Unorm,
 		MipLevelCount = 1,
 		SampleCount = 1,
-		Dimension = N.WGPUTextureDimension._2D,
-		Usage = N.WGPUTextureUsage.RenderAttachment | N.WGPUTextureUsage.CopySrc,
+		Dimension = TextureDimension.Dimension2D,
+		Usage = TextureUsage.RenderAttachment | TextureUsage.CopySrc,
 	};
-	var nativeTexture = N.WGPU.wgpuDeviceCreateTexture(device.Device, &descriptor);
-	if (nativeTexture == 0)
+	var nativeTexture = device.Api.DeviceCreateTexture(device.Device, &descriptor);
+	if (nativeTexture == null)
 	{
 		throw new InvalidOperationException(
 			"Disposing ProGPU released the Uno-owned WebGPU device instead of only its borrowed lifetime.");
 	}
 
-	_ = N.WGPU.wgpuDevicePoll(device.Device, 1, null);
-	N.WGPU.wgpuTextureDestroy(nativeTexture);
-	N.WGPU.wgpuTextureRelease(nativeTexture);
+	device.Api.InstanceProcessEvents(device.Instance);
+	device.Api.TextureDestroy(nativeTexture);
+	device.Api.TextureRelease(nativeTexture);
 }
 
 static unsafe void RunPresentSmoke(IWebGpuDeviceContext device, ProGpuDrawingFactory factory)
 {
-	var descriptor = new N.WGPUTextureDescriptor
+	var descriptor = new TextureDescriptor
 	{
-		Size = new N.WGPUExtent3D { Width = 64, Height = 64, DepthOrArrayLayers = 1 },
-		Format = N.WGPUTextureFormat.BGRA8Unorm,
+		Size = new Extent3D { Width = 64, Height = 64, DepthOrArrayLayers = 1 },
+		Format = TextureFormat.Bgra8Unorm,
 		MipLevelCount = 1,
 		SampleCount = 1,
-		Dimension = N.WGPUTextureDimension._2D,
-		Usage = N.WGPUTextureUsage.RenderAttachment | N.WGPUTextureUsage.CopySrc,
+		Dimension = TextureDimension.Dimension2D,
+		Usage = TextureUsage.RenderAttachment | TextureUsage.CopySrc,
 	};
-	var nativeTexture = N.WGPU.wgpuDeviceCreateTexture(device.Device, &descriptor);
-	var nativeView = N.WGPU.wgpuTextureCreateView(nativeTexture, null);
+	var nativeTexture = device.Api.DeviceCreateTexture(device.Device, &descriptor);
+	var nativeView = device.Api.TextureCreateView(nativeTexture, null);
 	using var target = new SmokeTarget(nativeView, 64, 64);
 	var recorder = factory.CreateRecording();
 	recorder.DrawRect(new Rect(0, 0, 64, 64), Color.FromArgb(255, 15, 25, 35));
@@ -547,10 +543,10 @@ static unsafe void RunPresentSmoke(IWebGpuDeviceContext device, ProGpuDrawingFac
 		record.Replay(present);
 		present.DrawLine(new Vector2(0, 0), new Vector2(63, 63), Color.FromArgb(255, 250, 250, 250), 2);
 	}
-	_ = N.WGPU.wgpuDevicePoll(device.Device, 1, null);
-	N.WGPU.wgpuTextureViewRelease(nativeView);
-	N.WGPU.wgpuTextureDestroy(nativeTexture);
-	N.WGPU.wgpuTextureRelease(nativeTexture);
+	device.Api.InstanceProcessEvents(device.Instance);
+	device.Api.TextureViewRelease(nativeView);
+	device.Api.TextureDestroy(nativeTexture);
+	device.Api.TextureRelease(nativeTexture);
 }
 
 static async Task RunHostBackdropSmoke(
@@ -585,26 +581,26 @@ static unsafe void RunHostBackdropPresentSmoke(
 	ProGpuDrawingFactory factory,
 	IRenderRecord record)
 {
-	var descriptor = new N.WGPUTextureDescriptor
+	var descriptor = new TextureDescriptor
 	{
-		Size = new N.WGPUExtent3D { Width = 64, Height = 64, DepthOrArrayLayers = 1 },
-		Format = N.WGPUTextureFormat.BGRA8Unorm,
+		Size = new Extent3D { Width = 64, Height = 64, DepthOrArrayLayers = 1 },
+		Format = TextureFormat.Bgra8Unorm,
 		MipLevelCount = 1,
 		SampleCount = 1,
-		Dimension = N.WGPUTextureDimension._2D,
-		Usage = N.WGPUTextureUsage.RenderAttachment | N.WGPUTextureUsage.CopySrc,
+		Dimension = TextureDimension.Dimension2D,
+		Usage = TextureUsage.RenderAttachment | TextureUsage.CopySrc,
 	};
-	var nativeTexture = N.WGPU.wgpuDeviceCreateTexture(device.Device, &descriptor);
-	var nativeView = N.WGPU.wgpuTextureCreateView(nativeTexture, null);
+	var nativeTexture = device.Api.DeviceCreateTexture(device.Device, &descriptor);
+	var nativeView = device.Api.TextureCreateView(nativeTexture, null);
 	using var target = new SmokeTarget(nativeView, 64, 64);
 	using (var present = factory.BeginPresent(target))
 	{
 		record.Replay(present);
 	}
-	_ = N.WGPU.wgpuDevicePoll(device.Device, 1, null);
-	N.WGPU.wgpuTextureViewRelease(nativeView);
-	N.WGPU.wgpuTextureDestroy(nativeTexture);
-	N.WGPU.wgpuTextureRelease(nativeTexture);
+	device.Api.InstanceProcessEvents(device.Instance);
+	device.Api.TextureViewRelease(nativeView);
+	device.Api.TextureDestroy(nativeTexture);
+	device.Api.TextureRelease(nativeTexture);
 }
 
 static IRenderRecord CreateHostBackdropRecord(
@@ -755,8 +751,7 @@ static async Task RunEffectPrimitiveBoundsSmoke(
 		shadow,
 		"non-uniform rounded rectangle",
 		drawing => drawing.DrawRoundedRect(
-			new Rect(12, 20, 12, 8),
-			new Vector4(1, 2, 3, 2),
+			new RoundRectangle { Rect = new Rect(12, 20, 12, 8), TopLeft = new Vector2(1), TopRight = new Vector2(2), BottomRight = new Vector2(3), BottomLeft = new Vector2(2) },
 			Color.FromArgb(255, 255, 255, 255)),
 		26,
 		24);
@@ -765,10 +760,8 @@ static async Task RunEffectPrimitiveBoundsSmoke(
 		shadow,
 		"rounded border",
 		drawing => drawing.DrawRoundedRectBorder(
-			new Rect(12, 20, 12, 8),
-			new Vector4(2, 3, 2, 3),
-			new Rect(14, 22, 8, 4),
-			new Vector4(1),
+			new RoundRectangle { Rect = new Rect(12, 20, 12, 8), TopLeft = new Vector2(2), TopRight = new Vector2(3), BottomRight = new Vector2(2), BottomLeft = new Vector2(3) },
+			new RoundRectangle { Rect = new Rect(14, 22, 8, 4), TopLeft = new Vector2(1), TopRight = new Vector2(1), BottomRight = new Vector2(1), BottomLeft = new Vector2(1) },
 			Color.FromArgb(255, 255, 255, 255)),
 		21,
 		24);
@@ -923,19 +916,140 @@ static async Task RunAdditiveShadowSmoke(
 	}
 }
 
+
+static unsafe void RunFrameCallbackSmoke(IWebGpuDeviceContext device, ProGpuGraphicsProvider provider)
+{
+	using var factory = (ProGpuDrawingFactory)provider.CreateGraphics(device);
+	var context = (WgpuContext)typeof(ProGpuDrawingFactory).GetField("_context", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(factory)!;
+	using var targetTexture = new GpuTexture(context, 64, 64, TextureFormat.Bgra8Unorm,
+		TextureUsage.RenderAttachment | TextureUsage.CopySrc, "Frame callback target");
+	using var target = new SmokeTarget(targetTexture.ViewPtr, 64, 64);
+	using var capture = factory.RenderOffscreen(8, 8, session => session.Clear(Color.FromArgb(255, 20, 60, 120)));
+	var called = false;
+	void OnFrameCompleted(object? sender, ProGpuFrameMetrics metrics)
+	{
+		called = true;
+		var snapshotTask = factory.SnapshotAsync(capture);
+		if (!snapshotTask.Wait(TimeSpan.FromSeconds(5)))
+		{
+			throw new InvalidOperationException("Frame callbacks must permit synchronous off-thread readback without holding the render lock.");
+		}
+		using var snapshot = snapshotTask.GetAwaiter().GetResult();
+		var pixels = new byte[8 * 8 * 4];
+		snapshot.CopyPixels(pixels);
+		if (pixels[0] != 120 || pixels[3] != 255)
+		{
+			throw new InvalidOperationException("Frame callback readback returned incorrect pixels.");
+		}
+	}
+	ProGpuDiagnostics.FrameCompleted += OnFrameCompleted;
+	try
+	{
+		using var present = factory.BeginPresent(target);
+		present.Clear(Color.FromArgb(255, 20, 60, 120));
+	}
+	finally
+	{
+		ProGpuDiagnostics.FrameCompleted -= OnFrameCompleted;
+	}
+	if (!called)
+	{
+		throw new InvalidOperationException("Presentation must publish its frame diagnostics.");
+	}
+}
+
+static unsafe void RunConcurrentRenderSmoke(IWebGpuDeviceContext device, ProGpuGraphicsProvider provider)
+{
+	using var factory = (ProGpuDrawingFactory)provider.CreateGraphics(device);
+	var context = (WgpuContext)typeof(ProGpuDrawingFactory).GetField("_context", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(factory)!;
+	using var texture = new GpuTexture(context, 64, 64, TextureFormat.Bgra8Unorm,
+		TextureUsage.RenderAttachment | TextureUsage.CopySrc, "Concurrent host target");
+	using var target = new SmokeTarget(texture.ViewPtr, 64, 64);
+	using var start = new System.Threading.ManualResetEventSlim();
+	void Draw(IDrawingSession session, int frame)
+	{
+		session.Clear(Color.FromArgb(255, 20, 60, 120));
+		for (var i = 0; i < 256; i++)
+		{
+			session.DrawRect(new Rect(i % 16 * 4, i / 16 * 4, 2, 2), Color.FromArgb(255, (byte)frame, 100, 200));
+		}
+	}
+	var presentation = Task.Run(() =>
+	{
+		start.Wait();
+		for (var frame = 0; frame < 32; frame++)
+		{
+			using var present = factory.BeginPresent(target);
+			Draw(present, frame);
+		}
+	});
+	var capture = Task.Run(() =>
+	{
+		start.Wait();
+		for (var frame = 0; frame < 32; frame++)
+		{
+			using var image = factory.RenderOffscreen(64, 64, session => Draw(session, frame));
+			using var snapshot = factory.SnapshotAsync(image).GetAwaiter().GetResult();
+			var pixels = new byte[64 * 64 * 4];
+			snapshot.CopyPixels(pixels);
+			if (pixels[^4] != 120 || pixels[^3] != 60 || pixels[^2] != 20 || pixels[^1] != 255)
+			{
+				throw new InvalidOperationException("Concurrent offscreen capture lost its clear color.");
+			}
+		}
+	});
+	start.Set();
+	Task.WhenAll(presentation, capture).GetAwaiter().GetResult();
+	factory.WaitForGpuCompletion();
+	var presented = texture.ReadPixels();
+	if (presented[2] != 31 || presented[^4] != 120 || presented[^1] != 255)
+	{
+		throw new InvalidOperationException("Concurrent presentation lost its final frame.");
+	}
+	Console.WriteLine("Concurrent presentation, offscreen capture, and readback passed.");
+}
+
+static unsafe void RunResizeAndSharedDeviceSmoke(IWebGpuDeviceContext device, ProGpuGraphicsProvider provider)
+{
+	using var first = (ProGpuDrawingFactory)provider.CreateGraphics(device);
+	using var second = (ProGpuDrawingFactory)provider.CreateGraphics(device);
+	var context = (WgpuContext)typeof(ProGpuDrawingFactory).GetField("_context", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(second)!;
+	foreach (var (width, height) in new[] { (32, 64), (96, 32), (16, 128) })
+	{
+		using var texture = new GpuTexture(context, (uint)width, (uint)height, TextureFormat.Bgra8Unorm,
+			TextureUsage.RenderAttachment | TextureUsage.CopySrc, "Resized host target");
+		using var target = new SmokeTarget(texture.ViewPtr, width, height);
+		using (var present = second.BeginPresent(target, [new Rect(0, 0, 1, 1)]))
+		{
+			present.Clear(Color.FromArgb(0, 0, 0, 0));
+			present.DrawRect(new Rect(0, 0, width, height), Color.FromArgb(255, 20, 60, 120));
+		}
+		first.Dispose();
+		second.WaitForGpuCompletion();
+		var pixels = texture.ReadPixels();
+		foreach (var index in new[] { 0, (width * height - 1) * 4 })
+		{
+			if (pixels[index] != 120 || pixels[index + 1] != 60 || pixels[index + 2] != 20 || pixels[index + 3] != 255)
+			{
+				throw new InvalidOperationException("Resized target did not repaint fully after another factory released the shared device.");
+			}
+		}
+	}
+}
+
 static unsafe void RunStablePresentCacheSmoke(IWebGpuDeviceContext device, ProGpuDrawingFactory factory)
 {
-	var descriptor = new N.WGPUTextureDescriptor
+	var descriptor = new TextureDescriptor
 	{
-		Size = new N.WGPUExtent3D { Width = 64, Height = 64, DepthOrArrayLayers = 1 },
-		Format = N.WGPUTextureFormat.BGRA8Unorm,
+		Size = new Extent3D { Width = 64, Height = 64, DepthOrArrayLayers = 1 },
+		Format = TextureFormat.Bgra8Unorm,
 		MipLevelCount = 1,
 		SampleCount = 1,
-		Dimension = N.WGPUTextureDimension._2D,
-		Usage = N.WGPUTextureUsage.RenderAttachment | N.WGPUTextureUsage.CopySrc,
+		Dimension = TextureDimension.Dimension2D,
+		Usage = TextureUsage.RenderAttachment | TextureUsage.CopySrc,
 	};
-	var nativeTexture = N.WGPU.wgpuDeviceCreateTexture(device.Device, &descriptor);
-	var nativeView = N.WGPU.wgpuTextureCreateView(nativeTexture, null);
+	var nativeTexture = device.Api.DeviceCreateTexture(device.Device, &descriptor);
+	var nativeView = device.Api.TextureCreateView(nativeTexture, null);
 	using var target = new SmokeTarget(nativeView, 64, 64);
 	using var replacementTarget = new SmokeTarget(nativeView, 64, 64);
 	var context = (WgpuContext)typeof(ProGpuDrawingFactory)
@@ -1027,9 +1141,9 @@ static unsafe void RunStablePresentCacheSmoke(IWebGpuDeviceContext device, ProGp
 		throw new InvalidOperationException(
 			$"A stable replacement target was not reused: reused={metrics?.TargetContentReused}, draws={metrics?.DrawCallCount}, vertices={metrics?.VectorVertexCount}.");
 	}
-	N.WGPU.wgpuTextureViewRelease(nativeView);
-	N.WGPU.wgpuTextureDestroy(nativeTexture);
-	N.WGPU.wgpuTextureRelease(nativeTexture);
+	device.Api.TextureViewRelease(nativeView);
+	device.Api.TextureDestroy(nativeTexture);
+	device.Api.TextureRelease(nativeTexture);
 }
 
 static async Task RunNestedRecordClearSmoke(ProGpuDrawingFactory factory)
@@ -1468,8 +1582,8 @@ static async Task RunRoundedGeometrySmoke(ProGpuDrawingFactory factory)
 	{
 		drawing.Clear(Color.FromArgb(0, 0, 0, 0));
 		drawing.DrawRoundedRectBorder(
-			new Rect(4, 4, 24, 24), new Vector4(4),
-			new Rect(8, 8, 16, 16), new Vector4(2),
+			new RoundRectangle { Rect = new Rect(4, 4, 24, 24), TopLeft = new Vector2(4), TopRight = new Vector2(4), BottomRight = new Vector2(4), BottomLeft = new Vector2(4) },
+			new RoundRectangle { Rect = new Rect(8, 8, 16, 16), TopLeft = new Vector2(2), TopRight = new Vector2(2), BottomRight = new Vector2(2), BottomLeft = new Vector2(2) },
 			Color.FromArgb(255, 220, 40, 30));
 		drawing.Save();
 		drawing.ClipRoundRect(
@@ -1499,8 +1613,8 @@ static async Task RunNestedRoundedBorderSmoke(ProGpuDrawingFactory factory)
 {
 	var recorder = factory.CreateRecording();
 	recorder.DrawRoundedRectBorder(
-		new Rect(4, 4, 24, 24), new Vector4(4),
-		new Rect(8, 8, 16, 16), new Vector4(2),
+		new RoundRectangle { Rect = new Rect(4, 4, 24, 24), TopLeft = new Vector2(4), TopRight = new Vector2(4), BottomRight = new Vector2(4), BottomLeft = new Vector2(4) },
+		new RoundRectangle { Rect = new Rect(8, 8, 16, 16), TopLeft = new Vector2(2), TopRight = new Vector2(2), BottomRight = new Vector2(2), BottomLeft = new Vector2(2) },
 		Color.FromArgb(255, 220, 40, 30));
 	using var record = recorder.Finish();
 	using var texture = factory.RenderOffscreen(64, 64, drawing =>
@@ -1660,7 +1774,7 @@ static unsafe void RunPrimaryTranslatedGeometryClipSmoke(ProGpuDrawingFactory fa
 		TextureFormat.Bgra8Unorm,
 		TextureUsage.RenderAttachment | TextureUsage.CopySrc,
 		"Uno primary clip regression");
-	using var target = new SmokeTarget((nint)targetTexture.ViewPtr, 64, 64);
+	using var target = new SmokeTarget(targetTexture.ViewPtr, 64, 64);
 
 	var childRecorder = factory.CreateRecording();
 	childRecorder.Save();
@@ -1752,7 +1866,7 @@ static unsafe void RunPrimaryClippedGlyphSmoke(ProGpuDrawingFactory factory, Pro
 		TextureFormat.Bgra8Unorm,
 		TextureUsage.RenderAttachment | TextureUsage.CopySrc,
 		"Uno primary clipped glyph regression");
-	using var target = new SmokeTarget((nint)targetTexture.ViewPtr, 128, 64);
+	using var target = new SmokeTarget(targetTexture.ViewPtr, 128, 64);
 	using (var drawing = factory.BeginPresent(target))
 	{
 		drawing.Clear(Color.FromArgb(0, 0, 0, 0));
@@ -1826,9 +1940,9 @@ static async Task RunCombinedGeometryFillSmoke(ProGpuDrawingFactory factory, Pro
 	}
 }
 
-sealed class SmokeTarget(nint view, int width, int height) : IWebGpuRenderTarget
+sealed unsafe class SmokeTarget(TextureView* view, int width, int height) : IWebGpuRenderTarget
 {
-	public nint ColorView { get; } = view;
+	public TextureView* ColorView { get; } = view;
 	public int Width { get; } = width;
 	public int Height { get; } = height;
 	public GraphicsColorFormat ColorFormat => GraphicsColorFormat.Bgra8888;

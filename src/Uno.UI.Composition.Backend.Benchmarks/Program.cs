@@ -19,7 +19,7 @@ using System.Text.Json;
 using System.Threading;
 using Uno.UI.Composition.Drawing;
 using Uno.UI.Composition.ProGpu;
-using N = Uno.WebGpu.Native;
+using Silk.NET.WebGPU;
 using Color = unouwp::Windows.UI.Color;
 using FontStretch = unouwp::Windows.UI.Text.FontStretch;
 using FontStyle = unouwp::Windows.UI.Text.FontStyle;
@@ -160,23 +160,22 @@ internal sealed class BenchmarkHarness : IDisposable
 			}
 
 			var context = MetalContext.Create(Width, Height);
-			var skiaFactory = new SkiaGraphicsProvider(GraphicsContextKind.Metal).CreateGraphics(context);
+			var skiaFactory = ((IGraphicsProvider<IMetalDeviceContext>)Uno.UI.Composition.Skia.SkiaBackend.CreateGraphicsProvider(GraphicsContextKind.Metal)).CreateGraphics(context);
 			return new BenchmarkHarness(options, context, null, skiaFactory, context.Target);
 		}
 
 		if (options.Backend == "skia")
 		{
 			var context = new SoftwareContext();
-			var skiaFactory = new SkiaGraphicsProvider(GraphicsContextKind.Software).CreateGraphics(context);
+			var skiaFactory = ((IGraphicsProvider<IGraphicsContext>)Uno.UI.Composition.Skia.SkiaBackend.CreateGraphicsProvider(GraphicsContextKind.Software)).CreateGraphics(context);
 			return new BenchmarkHarness(options, context, null, skiaFactory, new SoftwareTarget(Width, Height));
 		}
 
-		var initType = typeof(N.WGPU).Assembly.GetType("Uno.UI.Composition.WebGpu.WebGpuInitDevice", true)!;
-		var owner = (IDisposable)Activator.CreateInstance(initType, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, [N.WGPUTextureFormat.BGRA8Unorm], null)!;
-		var device = (IWebGpuDeviceContext)owner;
+		var device = GpuTestDevice.Create();
+		var owner = device;
 		IDrawingFactory factory = options.Backend == "progpu"
 			? new ProGpuGraphicsProvider(new ProGpuBackendOptions { FailOnUnsupportedOperation = true }).CreateGraphics(device)
-			: new Uno.UI.Composition.WebGpu.WebGpuGraphicsProvider().CreateGraphics(device);
+			: ((IGraphicsProvider<IWebGpuDeviceContext>)Uno.UI.Composition.WebGpu.WebGpuBackend.CreateGraphicsProvider()).CreateGraphics(device);
 		return new BenchmarkHarness(options, owner, device, factory, GpuTarget.Create(device, Width, Height));
 	}
 
@@ -267,35 +266,14 @@ internal sealed class BenchmarkHarness : IDisposable
 			throw new InvalidOperationException($"Backend '{_options.Backend}' did not expose its graphics device.");
 		}
 
-		var adapterField = _deviceOwner?.GetType().GetField("Adapter", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-		var adapter = adapterField?.GetValue(_deviceOwner) is IntPtr value ? value : IntPtr.Zero;
-		var info = new N.WGPUAdapterInfo();
-		if (adapter == IntPtr.Zero || N.WGPU.wgpuAdapterGetInfo(adapter, &info) != N.WGPUStatus.Success)
+		if (_device.Adapter == null)
 		{
 			return new BenchmarkGraphicsEnvironment("gpu", "WebGPU", null, null);
 		}
-
-		try
-		{
-			var api = info.BackendType == N.WGPUBackendType.Undefined
-				? "WebGPU"
-				: $"WebGPU ({info.BackendType})";
-			return new BenchmarkGraphicsEnvironment(
-				"gpu",
-				api,
-				DecodeString(info.Device) ?? DecodeString(info.Description),
-				info.AdapterType.ToString());
-		}
-		finally
-		{
-			N.WGPU.wgpuAdapterInfoFreeMembers(info);
-		}
+		var info = new AdapterProperties();
+		_device.Api.AdapterGetProperties(_device.Adapter, &info);
+		return new BenchmarkGraphicsEnvironment("gpu", $"WebGPU ({info.BackendType})", Marshal.PtrToStringUTF8((nint)info.Name), info.AdapterType.ToString());
 	}
-
-	private static unsafe string? DecodeString(N.WGPUStringView value)
-		=> value.Data == 0 || value.Length == 0
-			? null
-			: Encoding.UTF8.GetString(new ReadOnlySpan<byte>((void*)value.Data, checked((int)value.Length)));
 
 	private ProGpuRenderRecordScope Record(int mutation)
 	{
@@ -354,8 +332,7 @@ internal sealed class BenchmarkHarness : IDisposable
 					var left = x * 40 + 3;
 					var top = y * 30 + 2;
 					recorder.DrawRoundedRect(
-						new Rect(left, top, 32, 24),
-						new Vector4(5),
+						new RoundRectangle { Rect = new Rect(left, top, 32, 24), TopLeft = new Vector2(5), TopRight = new Vector2(5), BottomRight = new Vector2(5), BottomLeft = new Vector2(5) },
 						Color.FromArgb(190, (byte)(235 - x * 4), (byte)(45 + y * 7), 150));
 					recorder.DrawRect(
 						new Rect(left + 12, top + 7, 22, 14),
@@ -375,8 +352,7 @@ internal sealed class BenchmarkHarness : IDisposable
 					var left = x * 40 + 2;
 					var top = y * 30 + 2;
 					recorder.DrawRoundedRect(
-						new Rect(left, top, 28, 24),
-						new Vector4(5),
+						new RoundRectangle { Rect = new Rect(left, top, 28, 24), TopLeft = new Vector2(5), TopRight = new Vector2(5), BottomRight = new Vector2(5), BottomLeft = new Vector2(5) },
 						Color.FromArgb(255, (byte)(235 - x * 4), (byte)(35 + y * 7), 70));
 					recorder.DrawRect(
 						new Rect(left + 12, top + 6, 24, 16),
@@ -398,12 +374,10 @@ internal sealed class BenchmarkHarness : IDisposable
 				recorder.Clear(Color.FromArgb(0, 0, 0, 0));
 				recorder.SaveLayer(_blendFilters[i]);
 				recorder.DrawRoundedRect(
-					new Rect(left + 12, top + 14, 88, 142),
-					new Vector4(19),
+					new RoundRectangle { Rect = new Rect(left + 12, top + 14, 88, 142), TopLeft = new Vector2(19), TopRight = new Vector2(19), BottomRight = new Vector2(19), BottomLeft = new Vector2(19) },
 					Color.FromArgb(205, 235, 48, 72));
 				recorder.DrawRoundedRect(
-					new Rect(left + 42, top + 62, 82, 142),
-					new Vector4(25),
+					new RoundRectangle { Rect = new Rect(left + 42, top + 62, 82, 142), TopLeft = new Vector2(25), TopRight = new Vector2(25), BottomRight = new Vector2(25), BottomLeft = new Vector2(25) },
 					Color.FromArgb(165, 32, 210, 238));
 				recorder.Restore();
 				recorder.Restore();
@@ -423,8 +397,7 @@ internal sealed class BenchmarkHarness : IDisposable
 					var left = x * 40 + 2;
 					var top = y * 30 + 2;
 					recorder.DrawRoundedRect(
-						new Rect(left, top, 28, 24),
-						new Vector4(5),
+						new RoundRectangle { Rect = new Rect(left, top, 28, 24), TopLeft = new Vector2(5), TopRight = new Vector2(5), BottomRight = new Vector2(5), BottomLeft = new Vector2(5) },
 						Color.FromArgb(255, (byte)(235 - x * 4), (byte)(35 + y * 7), 70));
 					recorder.DrawRect(
 						new Rect(left + 12, top + 6, 24, 16),
@@ -459,8 +432,7 @@ internal sealed class BenchmarkHarness : IDisposable
 					var left = x * 40 + 8;
 					var top = y * 30 + 7;
 					recorder.DrawRoundedRect(
-						new Rect(left, top, 24, 16),
-						new Vector4(7),
+						new RoundRectangle { Rect = new Rect(left, top, 24, 16), TopLeft = new Vector2(7), TopRight = new Vector2(7), BottomRight = new Vector2(7), BottomLeft = new Vector2(7) },
 						Color.FromArgb(255, 255, 255, 255));
 				}
 			}
@@ -571,21 +543,18 @@ internal sealed class BenchmarkHarness : IDisposable
 					ClipOperation.Intersect);
 				recorder.DrawEffectBackdrop(_backdropBlur!, 0.82f);
 				recorder.DrawRoundedRect(
-					new Rect(left, top, 272, 184),
-					new Vector4(18),
+					new RoundRectangle { Rect = new Rect(left, top, 272, 184), TopLeft = new Vector2(18), TopRight = new Vector2(18), BottomRight = new Vector2(18), BottomLeft = new Vector2(18) },
 					Color.FromArgb(70, 245, 248, 255));
 				recorder.RestoreToCount(restore);
 
 				recorder.SaveLayer(_dropShadow!);
 				recorder.DrawRoundedRect(
-					new Rect(left + 72, top + 56, 128, 72),
-					new Vector4(14),
+					new RoundRectangle { Rect = new Rect(left + 72, top + 56, 128, 72), TopLeft = new Vector2(14), TopRight = new Vector2(14), BottomRight = new Vector2(14), BottomLeft = new Vector2(14) },
 					Color.FromArgb(230, 32, 72, 148));
 				recorder.Restore();
 				// Uno's fallback applies a shadow-only layer, then replays the source.
 				recorder.DrawRoundedRect(
-					new Rect(left + 72, top + 56, 128, 72),
-					new Vector4(14),
+					new RoundRectangle { Rect = new Rect(left + 72, top + 56, 128, 72), TopLeft = new Vector2(14), TopRight = new Vector2(14), BottomRight = new Vector2(14), BottomLeft = new Vector2(14) },
 					Color.FromArgb(230, 32, 72, 148));
 			}
 		}
@@ -633,7 +602,7 @@ internal sealed class BenchmarkHarness : IDisposable
 		{
 			gpu = GetPresentationTarget(gpu);
 			{
-				using var present = ((IDrawingFactory<IWebGpuRenderTarget>)_factory).BeginPresent(gpu);
+				using var present = ((IDrawingFactory<IWebGpuRenderTarget>)_factory).BeginPresent(gpu, default);
 				record.Record.Replay(present);
 			}
 			cpuFrame.Stop();
@@ -646,7 +615,7 @@ internal sealed class BenchmarkHarness : IDisposable
 		}
 		if (_target is IMetalRenderTarget metal)
 		{
-			using (var present = ((IDrawingFactory<IMetalRenderTarget>)_factory).BeginPresent(metal))
+			using (var present = ((IDrawingFactory<IMetalRenderTarget>)_factory).BeginPresent(metal, default))
 			{
 				record.Record.Replay(present);
 			}
@@ -658,7 +627,7 @@ internal sealed class BenchmarkHarness : IDisposable
 			return new FrameTiming(total.Elapsed.TotalMilliseconds, cpuFrame.Elapsed.TotalMilliseconds, completion.Elapsed.TotalMilliseconds, null);
 		}
 
-		using (var present = ((IDrawingFactory<ISoftwareRenderTarget>)_factory).BeginPresent((ISoftwareRenderTarget)_target))
+		using (var present = ((IDrawingFactory<ISoftwareRenderTarget>)_factory).BeginPresent((ISoftwareRenderTarget)_target, default))
 		{
 			record.Record.Replay(present);
 		}
@@ -736,18 +705,18 @@ internal sealed class BenchmarkHarness : IDisposable
 		if (_target is IWebGpuRenderTarget gpu)
 		{
 			gpu = GetPresentationTarget(gpu);
-			using var present = ((IDrawingFactory<IWebGpuRenderTarget>)_factory).BeginPresent(gpu);
+			using var present = ((IDrawingFactory<IWebGpuRenderTarget>)_factory).BeginPresent(gpu, default);
 			record.Record.Replay(present);
 			return;
 		}
 		if (_target is IMetalRenderTarget metal)
 		{
-			using var metalPresent = ((IDrawingFactory<IMetalRenderTarget>)_factory).BeginPresent(metal);
+			using var metalPresent = ((IDrawingFactory<IMetalRenderTarget>)_factory).BeginPresent(metal, default);
 			record.Record.Replay(metalPresent);
 			return;
 		}
 
-		using var softwarePresent = ((IDrawingFactory<ISoftwareRenderTarget>)_factory).BeginPresent((ISoftwareRenderTarget)_target);
+		using var softwarePresent = ((IDrawingFactory<ISoftwareRenderTarget>)_factory).BeginPresent((ISoftwareRenderTarget)_target, default);
 		record.Record.Replay(softwarePresent);
 	}
 
@@ -771,7 +740,7 @@ internal sealed class BenchmarkHarness : IDisposable
 		}
 		else if (_device is not null)
 		{
-			_ = N.WGPU.wgpuDevicePoll(_device.Device, 1, null);
+			GpuTestDevice.WaitForCompletion(_device);
 		}
 		else if (_deviceOwner is MetalContext metal)
 		{
@@ -992,7 +961,7 @@ internal sealed class BenchmarkHarness : IDisposable
 			"shadows" => "|shadows=128|anisotropic=true|additive=32|sourceReplay=true",
 			_ => string.Empty,
 		};
-		var bytes = Encoding.UTF8.GetBytes($"v3|clear=FF080C14|retainedRows=24|antialias=backend|imageSampling=backend|{_options.Scenario}|{Width}|{Height}|768|{(_options.Scenario == "text" ? 128 : 0)}|{(_options.Scenario == "paths" ? 1000 : 0)}|{(_options.Scenario == "images" ? 240 : 0)}{extension}");
+		var bytes = Encoding.UTF8.GetBytes($"v4|dashUnits=geometry|clear=FF080C14|retainedRows=24|antialias=backend|imageSampling=backend|{_options.Scenario}|{Width}|{Height}|768|{(_options.Scenario == "text" ? 128 : 0)}|{(_options.Scenario == "paths" ? 1000 : 0)}|{(_options.Scenario == "images" ? 240 : 0)}{extension}");
 		return Convert.ToHexString(SHA256.HashData(bytes));
 	}
 
@@ -1433,24 +1402,25 @@ internal sealed class MetalTarget(nint texture, int width, int height) : IMetalR
 
 internal sealed unsafe class GpuTarget : IWebGpuRenderTarget
 {
-	private nint _texture;
-	private nint _view;
-	private GpuTarget(nint texture, nint view, int width, int height) { _texture = texture; _view = view; Width = width; Height = height; }
+	private Texture* _texture;
+	private readonly WebGPU _api;
+	private TextureView* _view;
+	private GpuTarget(WebGPU api, Texture* texture, TextureView* view, int width, int height) { _api = api; _texture = texture; _view = view; Width = width; Height = height; }
 	internal static GpuTarget Create(IWebGpuDeviceContext device, int width, int height)
 	{
-		var descriptor = new N.WGPUTextureDescriptor
+		var descriptor = new TextureDescriptor
 		{
-			Size = new N.WGPUExtent3D { Width = (uint)width, Height = (uint)height, DepthOrArrayLayers = 1 },
-			Format = N.WGPUTextureFormat.BGRA8Unorm,
+			Size = new Extent3D { Width = (uint)width, Height = (uint)height, DepthOrArrayLayers = 1 },
+			Format = TextureFormat.Bgra8Unorm,
 			MipLevelCount = 1,
 			SampleCount = 1,
-			Dimension = N.WGPUTextureDimension._2D,
-			Usage = N.WGPUTextureUsage.RenderAttachment | N.WGPUTextureUsage.CopySrc | N.WGPUTextureUsage.TextureBinding,
+			Dimension = TextureDimension.Dimension2D,
+			Usage = TextureUsage.RenderAttachment | TextureUsage.CopySrc | TextureUsage.TextureBinding,
 		};
-		var texture = N.WGPU.wgpuDeviceCreateTexture(device.Device, &descriptor);
-		return new GpuTarget(texture, N.WGPU.wgpuTextureCreateView(texture, null), width, height);
+		var texture = device.Api.DeviceCreateTexture(device.Device, &descriptor);
+		return new GpuTarget(device.Api, texture, device.Api.TextureCreateView(texture, null), width, height);
 	}
-	public nint ColorView => _view;
+	public TextureView* ColorView => _view;
 	public int Width { get; }
 	public int Height { get; }
 	public GraphicsColorFormat ColorFormat => GraphicsColorFormat.Bgra8888;
@@ -1458,79 +1428,73 @@ internal sealed unsafe class GpuTarget : IWebGpuRenderTarget
 	{
 		var paddedRowBytes = ((Width * 4) + 255) & ~255;
 		var totalBytes = checked(paddedRowBytes * Height);
-		var bufferDescriptor = new N.WGPUBufferDescriptor
+		var bufferDescriptor = new BufferDescriptor
 		{
 			Size = (ulong)totalBytes,
-			Usage = N.WGPUBufferUsage.CopyDst | N.WGPUBufferUsage.MapRead,
+			Usage = BufferUsage.CopyDst | BufferUsage.MapRead,
 		};
-		var buffer = N.WGPU.wgpuDeviceCreateBuffer(device.Device, &bufferDescriptor);
-		if (buffer == 0)
+		var buffer = device.Api.DeviceCreateBuffer(device.Device, &bufferDescriptor);
+		if (buffer == null)
 		{
 			throw new InvalidOperationException("Unable to create the benchmark readback buffer.");
 		}
 
 		try
 		{
-			var encoder = N.WGPU.wgpuDeviceCreateCommandEncoder(device.Device, null);
-			if (encoder == 0)
+			var encoder = device.Api.DeviceCreateCommandEncoder(device.Device, null);
+			if (encoder == null)
 			{
 				throw new InvalidOperationException("Unable to create the benchmark readback encoder.");
 			}
 			try
 			{
-				var source = new N.WGPUTexelCopyTextureInfo
+				var source = new ImageCopyTexture
 				{
 					Texture = _texture,
-					Aspect = N.WGPUTextureAspect.All,
+					Aspect = TextureAspect.All,
 				};
-				var destination = new N.WGPUTexelCopyBufferInfo
+				var destination = new ImageCopyBuffer
 				{
 					Buffer = buffer,
-					Layout = new N.WGPUTexelCopyBufferLayout
+					Layout = new TextureDataLayout
 					{
 						BytesPerRow = (uint)paddedRowBytes,
 						RowsPerImage = (uint)Height,
 					},
 				};
-				var extent = new N.WGPUExtent3D
+				var extent = new Extent3D
 				{
 					Width = (uint)Width,
 					Height = (uint)Height,
 					DepthOrArrayLayers = 1,
 				};
-				N.WGPU.wgpuCommandEncoderCopyTextureToBuffer(encoder, &source, &destination, &extent);
-				var commandBuffer = N.WGPU.wgpuCommandEncoderFinish(encoder, null);
+				device.Api.CommandEncoderCopyTextureToBuffer(encoder, &source, &destination, &extent);
+				var commandBuffer = device.Api.CommandEncoderFinish(encoder, null);
 				try
 				{
-					N.WGPU.wgpuQueueSubmit(device.Queue, 1, (nint)(&commandBuffer));
+					device.Api.QueueSubmit(device.Queue, 1, &commandBuffer);
 				}
 				finally
 				{
-					N.WGPU.wgpuCommandBufferRelease(commandBuffer);
+					device.Api.CommandBufferRelease(commandBuffer);
 				}
 			}
 			finally
 			{
-				N.WGPU.wgpuCommandEncoderRelease(encoder);
+				device.Api.CommandEncoderRelease(encoder);
 			}
 
-			_ = N.WGPU.wgpuDevicePoll(device.Device, 1, null);
+			device.Api.InstanceProcessEvents(device.Instance);
 			var map = new MapState();
 			var mapHandle = GCHandle.Alloc(map);
 			try
 			{
-				var callback = new N.WGPUBufferMapCallbackInfo
-				{
-					Mode = N.WGPUCallbackMode.AllowProcessEvents,
-					Callback = (nint)(delegate* unmanaged[Cdecl]<N.WGPUMapAsyncStatus, N.WGPUStringView, nint, nint, void>)&OnMap,
-					Userdata1 = GCHandle.ToIntPtr(mapHandle),
-				};
-				_ = N.WGPU.wgpuBufferMapAsync(buffer, N.WGPUMapMode.Read, 0, (nuint)totalBytes, callback);
+				device.Api.BufferMapAsync(buffer, MapMode.Read, 0, (nuint)totalBytes, new PfnBufferMapCallback(&OnMap), (void*)GCHandle.ToIntPtr(mapHandle));
 				while (!Volatile.Read(ref map.Completed))
 				{
-					_ = N.WGPU.wgpuDevicePoll(device.Device, 1, null);
+					device.Api.InstanceProcessEvents(device.Instance);
 				}
-				if (map.Status != N.WGPUMapAsyncStatus.Success)
+				if (map.Status != BufferMapAsyncStatus.Success)
 				{
 					throw new InvalidOperationException($"Benchmark target readback failed ({map.Status}).");
 				}
@@ -1540,7 +1504,7 @@ internal sealed unsafe class GpuTarget : IWebGpuRenderTarget
 				mapHandle.Free();
 			}
 
-			var mapped = (byte*)N.WGPU.wgpuBufferGetConstMappedRange(buffer, 0, (nuint)totalBytes);
+			var mapped = (byte*)device.Api.BufferGetConstMappedRange(buffer, 0, (nuint)totalBytes);
 			if (mapped is null)
 			{
 				throw new InvalidOperationException("Benchmark target readback returned a null mapping.");
@@ -1550,40 +1514,40 @@ internal sealed unsafe class GpuTarget : IWebGpuRenderTarget
 			{
 				new ReadOnlySpan<byte>(mapped + row * paddedRowBytes, Width * 4).CopyTo(pixels.AsSpan(row * Width * 4, Width * 4));
 			}
-			N.WGPU.wgpuBufferUnmap(buffer);
+			device.Api.BufferUnmap(buffer);
 			return pixels;
 		}
 		finally
 		{
-			N.WGPU.wgpuBufferDestroy(buffer);
-			N.WGPU.wgpuBufferRelease(buffer);
+			device.Api.BufferDestroy(buffer);
+			device.Api.BufferRelease(buffer);
 		}
 	}
 
 	[UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
-	private static void OnMap(N.WGPUMapAsyncStatus status, N.WGPUStringView message, nint userdata1, nint userdata2)
+	private static void OnMap(BufferMapAsyncStatus status, void* userdata)
 	{
-		var state = (MapState)GCHandle.FromIntPtr(userdata1).Target!;
+		var state = (MapState)GCHandle.FromIntPtr((nint)userdata).Target!;
 		state.Status = status;
 		Volatile.Write(ref state.Completed, true);
 	}
 
 	public void Dispose()
 	{
-		if (_view != 0) { N.WGPU.wgpuTextureViewRelease(_view); _view = 0; }
-		if (_texture != 0) { N.WGPU.wgpuTextureDestroy(_texture); N.WGPU.wgpuTextureRelease(_texture); _texture = 0; }
+		if (_view != null) { _api.TextureViewRelease(_view); _view = null; }
+		if (_texture != null) { _api.TextureDestroy(_texture); _api.TextureRelease(_texture); _texture = null; }
 	}
 
 	private sealed class MapState
 	{
 		internal bool Completed;
-		internal N.WGPUMapAsyncStatus Status;
+		internal BufferMapAsyncStatus Status;
 	}
 }
 
-internal sealed class RenderTargetAlias(IWebGpuRenderTarget target) : IWebGpuRenderTarget
+internal sealed unsafe class RenderTargetAlias(IWebGpuRenderTarget target) : IWebGpuRenderTarget
 {
-	public nint ColorView => target.ColorView;
+	public TextureView* ColorView => target.ColorView;
 	public int Width => target.Width;
 	public int Height => target.Height;
 	public GraphicsColorFormat ColorFormat => target.ColorFormat;

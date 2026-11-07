@@ -1,4 +1,4 @@
-#nullable enable
+﻿#nullable enable
 
 using System;
 using System.Collections.Generic;
@@ -18,7 +18,9 @@ internal sealed partial class ManagedGeometry
 {
 	private const float SnapScale = 256f;
 
-	public IGeometry Combine(IGeometry other, GeometryCombineMode mode)
+	public IGeometry Combine(IGeometry other, GeometryCombineMode mode) => Combine(other, mode, 1f);
+
+	public IGeometry Combine(IGeometry other, GeometryCombineMode mode, float scale)
 	{
 		if (other is not ManagedGeometry b)
 		{
@@ -64,19 +66,19 @@ internal sealed partial class ManagedGeometry
 		{
 			// Intersecting an arbitrary geometry with a rectangle (e.g. a rounded-corner border clip, or content,
 			// clipped by a layout rect) is O(n) Sutherland–Hodgman clipping — no all-pairs edge intersection.
-			return aIsRect ? ClipToRect(b, al, at, ar, ab) : ClipToRect(this, bl, bt, br, bb);
+			return aIsRect ? ClipToRect(b, al, at, ar, ab, scale) : ClipToRect(this, bl, bt, br, bb, scale);
 		}
 
 		var a = this;
-		var polysA = a.FlattenClosedPolygons();
-		var polysB = b.FlattenClosedPolygons();
+		var polysA = a.FlattenClosedPolygons(scale);
+		var polysB = b.FlattenClosedPolygons(scale);
 
 		if (polysA.Count == 0)
 		{
 			// A is empty: Union/Xor with B is B; Intersect and Difference (A minus B, A empty) are both empty.
 			return mode is GeometryCombineMode.Intersect or GeometryCombineMode.Difference
 				? new ManagedGeometry(Array.Empty<ManagedContour>(), GeometryFillRule.NonZero)
-				: b.AsNonZeroCopy(polysB);
+				: b.AsSameRuleCopy(polysB);
 		}
 
 		if (polysB.Count == 0)
@@ -84,7 +86,7 @@ internal sealed partial class ManagedGeometry
 			// B is empty: Intersect is empty; Union/Xor/Difference (A minus nothing) are all A.
 			return mode is GeometryCombineMode.Intersect
 				? new ManagedGeometry(Array.Empty<ManagedContour>(), GeometryFillRule.NonZero)
-				: a.AsNonZeroCopy(polysA);
+				: a.AsSameRuleCopy(polysA);
 		}
 
 		var edges = new List<(Vector2 A, Vector2 B)>();
@@ -93,7 +95,7 @@ internal sealed partial class ManagedGeometry
 		foreach (var (p0, p1) in SplitAll(polysA, polysB))
 		{
 			var mid = (p0 + p1) * 0.5f;
-			var insideB = b.FillContains(mid);
+			var insideB = b.FillContains(mid, scale);
 			switch (mode)
 			{
 				case GeometryCombineMode.Union when !insideB:
@@ -112,7 +114,7 @@ internal sealed partial class ManagedGeometry
 		foreach (var (p0, p1) in SplitAll(polysB, polysA))
 		{
 			var mid = (p0 + p1) * 0.5f;
-			var insideA = a.FillContains(mid);
+			var insideA = a.FillContains(mid, scale);
 			switch (mode)
 			{
 				case GeometryCombineMode.Union when !insideA:
@@ -219,9 +221,9 @@ internal sealed partial class ManagedGeometry
 	/// Intersects a geometry with an axis-aligned rectangle via Sutherland–Hodgman clipping (O(n) per contour),
 	/// avoiding the general boolean's O(edgesA*edgesB) edge splitting. Each contour is clipped independently.
 	/// </summary>
-	private static ManagedGeometry ClipToRect(ManagedGeometry g, float left, float top, float right, float bottom)
+	private static ManagedGeometry ClipToRect(ManagedGeometry g, float left, float top, float right, float bottom, float scale)
 	{
-		var polys = g.FlattenClosedPolygons();
+		var polys = g.FlattenClosedPolygons(scale);
 		var contours = new List<ManagedContour>(polys.Count);
 		foreach (var poly in polys)
 		{
@@ -245,7 +247,7 @@ internal sealed partial class ManagedGeometry
 			}
 		}
 
-		return new ManagedGeometry(contours, GeometryFillRule.NonZero);
+		return new ManagedGeometry(contours, g.FillRule);
 	}
 
 	private enum RectEdge
@@ -325,7 +327,9 @@ internal sealed partial class ManagedGeometry
 		return output;
 	}
 
-	private ManagedGeometry AsNonZeroCopy(List<Vector2[]> polygons)
+	// Keeps the source's fill rule: this is a copy of one operand, not a boolean result, so re-ruling it as
+	// NonZero would fill the holes of an EvenOdd shape (every rounded border ring is one).
+	private ManagedGeometry AsSameRuleCopy(List<Vector2[]> polygons)
 	{
 		var contours = new List<ManagedContour>(polygons.Count);
 		foreach (var poly in polygons)
@@ -344,22 +348,22 @@ internal sealed partial class ManagedGeometry
 			contours.Add(new ManagedContour(poly[0], segments, closed: true));
 		}
 
-		return new ManagedGeometry(contours, GeometryFillRule.NonZero);
+		return new ManagedGeometry(contours, FillRule);
 	}
 
 	// Snapped-polygon flattening, cached: the geometry is immutable and Combine flattens both operands on
 	// every call (borders/clips combine repeatedly per render pass).
-	private List<Vector2[]>? _flattenedSnapped;
+	private FlattenedAt<List<Vector2[]>>? _flattenedSnapped;
 
-	private List<Vector2[]> FlattenClosedPolygons()
+	private List<Vector2[]> FlattenClosedPolygons(float scale)
 	{
-		if (_flattenedSnapped is { } cached)
+		if (_flattenedSnapped is { } cached && cached.Scale == scale)
 		{
-			return cached;
+			return cached.Value;
 		}
 
 		var result = new List<Vector2[]>();
-		foreach (var outline in FlattenedClosedOutlines)
+		foreach (var outline in GetFlattenedClosedOutlines(scale))
 		{
 			var pts = new List<Vector2>(outline.Length);
 			foreach (var p in outline)
@@ -377,7 +381,8 @@ internal sealed partial class ManagedGeometry
 			}
 		}
 
-		return _flattenedSnapped = result;
+		_flattenedSnapped = new FlattenedAt<List<Vector2[]>>(scale, result);
+		return result;
 	}
 
 	private static Vector2 Snap(Vector2 p)

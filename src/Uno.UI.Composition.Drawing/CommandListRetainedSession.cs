@@ -82,6 +82,12 @@ internal sealed class CommandListRecorder : ICommandRecorder
 	private int _depth = 1;
 	private List<IDrawingResource>? _retained;
 
+	// The backend this recording replays into. Passed in rather than read from an ambient holder: the visual
+	// being recorded knows its window, and a process-wide holder would name whichever window registered last.
+	private readonly IDrawingFactory _factory;
+
+	public CommandListRecorder(IDrawingFactory factory) => _factory = factory;
+
 	// Replay happens after the caller has dropped its reference (the draw is assumed to have copied, as a native
 	// display list would), so take one of our own for every resource a recorded closure captures.
 	private T Retain<T>(T resource) where T : IDrawingResource
@@ -110,7 +116,7 @@ internal sealed class CommandListRecorder : ICommandRecorder
 
 	// The backend-agnostic recorder has no device of its own; its recorded verbs replay into a real backend session,
 	// so it exposes the ambient (single negotiated) factory — the same backend that recording will replay into.
-	public IDrawingFactory Factory => DrawingFactory.Current;
+	public IDrawingFactory Factory => _factory;
 
 	public int Save()
 	{
@@ -230,17 +236,17 @@ internal sealed class CommandListRecorder : ICommandRecorder
 		_commands.Add(ctx => ctx.Target.DrawRect(r, s));
 	}
 
-	public void DrawRoundedRect(in Rect rect, Vector4 radii, Color color)
+	public void DrawRoundedRect(in RoundRectangle roundRect, Color color)
 	{
-		var r = rect;
-		_commands.Add(ctx => ctx.Target.DrawRoundedRect(r, radii, color));
+		var rr = roundRect;
+		_commands.Add(ctx => ctx.Target.DrawRoundedRect(rr, color));
 	}
 
-	public void DrawRoundedRectBorder(in Rect outer, Vector4 outerRadii, in Rect inner, Vector4 innerRadii, Color color)
+	public void DrawRoundedRectBorder(in RoundRectangle outer, in RoundRectangle inner, Color color)
 	{
 		var o = outer;
 		var i = inner;
-		_commands.Add(ctx => ctx.Target.DrawRoundedRectBorder(o, outerRadii, i, innerRadii, color));
+		_commands.Add(ctx => ctx.Target.DrawRoundedRectBorder(o, i, color));
 	}
 
 	public void DrawPath(IGeometry geometry, Color color)

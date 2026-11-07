@@ -6,7 +6,7 @@ using System.Diagnostics.CodeAnalysis;
 namespace Uno.UI.Composition.Drawing;
 
 /// <summary>
-/// A SkiaSharp-free image decoder: parses the common encoded formats (PNG, GIF incl. animation, BMP, baseline JPEG)
+/// A SkiaSharp-free image decoder: parses the common encoded formats (PNG, GIF incl. animation, BMP, JPEG, WebP)
 /// straight into BGRA-premultiplied pixel frames. Format parsing is entirely managed; the backend turns the pixels
 /// into drawable <see cref="IImage"/> handles. Driven by <see cref="ManagedImageDecoderBackend"/> — the
 /// <see cref="IImageEncoderDecoder"/> an app registers as <see cref="ImageEncoderDecoder.Current"/> for SkiaSharp-free decoding.
@@ -29,7 +29,7 @@ internal static partial class ManagedImageDecoder
 		}
 		catch
 		{
-			// Any malformed input falls back to the Skia codec.
+			// Malformed input is simply "not decoded" - there is no other codec behind this one.
 			decoded = null;
 			return false;
 		}
@@ -40,8 +40,17 @@ internal static partial class ManagedImageDecoder
 	// rather than being allowed to force a multi-gigabyte allocation (an OOM crash on 32-bit WASM).
 	private const long MaxPixels = 1L << 28;
 
-	internal static bool ExceedsPixelCap(int width, int height)
-		=> width <= 0 || height <= 0 || (long)width * height > MaxPixels;
+	// The same budget in bytes. What a header can force is an allocation, and formats differ in what they cost per
+	// pixel: a 16-bit RGBA PNG unfilters 8 bytes per pixel on top of its 4-byte output, a JPEG keeps 4 bytes of
+	// coefficients per pixel per component.
+	private const long MaxDecodedBytes = MaxPixels * 4;
+
+	internal static bool ExceedsByteCap(long bytes) => bytes >= MaxDecodedBytes;
+
+	/// <param name="bytesPerPixel">The decode's total per-pixel cost: the BGRA output plus any intermediate buffer
+	/// the format allocates from its header alone.</param>
+	internal static bool ExceedsPixelCap(int width, int height, int bytesPerPixel = 4)
+		=> width <= 0 || height <= 0 || ExceedsByteCap((long)width * height * bytesPerPixel);
 
 	private static bool TryDecodeCore(byte[] d, [NotNullWhen(true)] out DecodedImage? decoded)
 	{

@@ -4,11 +4,10 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
+using Silk.NET.WebGPU;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
-using Uno.WebGpu.Native;
-using static Uno.WebGpu.Native.WGPU;
 using Uno.UI.Composition.Drawing;
 using Uno.Foundation.Logging;
 using Windows.Graphics.Effects.Interop;
@@ -68,7 +67,7 @@ internal static class Geo
 	}
 }
 
-internal struct ClipData
+internal unsafe struct ClipData
 {
 	public Vector4 Aabb;    // device L,T,R,B scissor
 							// Every analytic clip in force, all ANDed per-fragment (clipCov). null/empty = none. Copy-on-write: each push
@@ -78,8 +77,8 @@ internal struct ClipData
 	// nesting has no limit. Copy-on-write like Entries.
 	public PathClip[] Paths;
 	// The op's own shape as a coverage texture (an atlas page or a mask of its own), sampled by the op's vertex uv:
-	// the innermost clip. 0 = the geometry carries the shape. Set by the present session, never by the recorder.
-	public nint Coverage;
+	// the innermost clip. Null = the geometry carries the shape. Set by the present session, never by the recorder.
+	public TextureView* Coverage;
 	// The coverage texture is drawn scaled or rotated rather than texel for pixel, so it is sampled filtered.
 	public bool CoverageFiltered;
 	public static ClipData None => new() { Aabb = new Vector4(-1e9f, -1e9f, 1e9f, 1e9f), ScissorInert = true };
@@ -177,7 +176,7 @@ internal sealed unsafe class ImageCmd : WebGpuCommand
 	public ImageCmd() : base(CmdKind.Image) { }
 
 	public Vector2 P0, P1, P2, P3;
-	public IntPtr View;   // the pre-uploaded WebGpuTexture view (no per-frame upload)
+	public TextureView* View;   // the pre-uploaded WebGpuTexture view (no per-frame upload)
 	public int W, H;
 	public float Opacity;
 	public float U0, V0, U1 = 1f, V1 = 1f;   // source UV sub-rect (whole texture by default)
@@ -185,6 +184,7 @@ internal sealed unsafe class ImageCmd : WebGpuCommand
 	public int TintMode;        // 0 = none, 1 = SrcIn blend-mode tint
 	public Vector4 Tint;        // straight-alpha tint color (0..1) for TintMode 1
 	public float[] ColorMatrix; // null, or 20-float (4x5) effect colour matrix applied in the image shader
+	public bool SourceOpaque;   // the texture has no transparency, so a plain full-alpha draw of it hides what it covers
 }
 
 internal sealed class GradientCmd : WebGpuCommand

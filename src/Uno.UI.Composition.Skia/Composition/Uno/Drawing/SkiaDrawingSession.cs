@@ -3,6 +3,7 @@
 using System;
 using System.Collections.Generic;
 using System.Numerics;
+using System.Runtime.InteropServices;
 using Microsoft.UI.Composition;
 using SkiaSharp;
 using Windows.Foundation;
@@ -19,6 +20,10 @@ internal class SkiaDrawingSession : IDrawingSession
 	// fully reconfigures it from the verb's arguments, so no state leaks between draws.
 	[ThreadStatic]
 	private static SKPaint? _sparePaint;
+
+	// Build() resets the builder, so one per drawing thread is reused for every glyph run.
+	[ThreadStatic]
+	private static SKTextBlobBuilder? _textBlobBuilder;
 
 	// Recording happens on the render/UI thread and can nest (a subtree recording contains per-visual
 	// content recordings), so recorders are pooled per thread and rented/returned around each recording.
@@ -86,7 +91,9 @@ internal class SkiaDrawingSession : IDrawingSession
 		opacityPaint?.Dispose();
 	}
 
-	public Matrix4x4 TotalMatrix => _canvas.TotalMatrix.ToMatrix4x4();
+	// Read back the full 4x4 SetMatrix stored: the 3x3 TotalMatrix drops the Z row and column, so a
+	// flattening transform (M33 = 0, as AnimatedVisuals produce) would come back as M33 = 1.
+	public Matrix4x4 TotalMatrix => _canvas.TotalMatrix44;
 
 	public void SetMatrix(in Matrix4x4 matrix)
 	{
@@ -99,7 +106,8 @@ internal class SkiaDrawingSession : IDrawingSession
 		}
 	}
 
-	public void Concat(in Matrix4x4 matrix) => _canvas.Concat(matrix.ToSKMatrix());
+	// The full 4x4 like SetMatrix: going through an SKMatrix would drop the Z row and column.
+	public void Concat(in Matrix4x4 matrix) => _canvas.Concat((SKMatrix44)matrix);
 
 	public void Translate(float dx, float dy) => _canvas.Translate(dx, dy);
 
@@ -143,42 +151,60 @@ internal class SkiaDrawingSession : IDrawingSession
 	public void DrawRect(in Rect rect, IShader shader)
 		=> _canvas.DrawRect(rect.ToSKRect(), ShaderPaint(shader));
 
-	public void DrawRoundedRect(in Rect rect, Vector4 radii, Color color)
-	{
-		// radii = (TopLeft, TopRight, BottomRight, BottomLeft); SKRoundRect.SetRectRadii uses the same corner order.
-		var rr = new SKRoundRect();
-		rr.SetRectRadii(rect.ToSKRect(), new[]
-		{
-			new SKPoint(radii.X, radii.X), new SKPoint(radii.Y, radii.Y),
-			new SKPoint(radii.Z, radii.Z), new SKPoint(radii.W, radii.W),
-		});
-		_canvas.DrawRoundRect(rr, FillPaint(color));
-	}
+	public void DrawRoundedRect(in RoundRectangle roundRect, Color color)
+		=> _canvas.DrawRoundRect(ToSK(roundRect), FillPaint(color));
 
-	public void DrawRoundedRectBorder(in Rect outer, Vector4 outerRadii, in Rect inner, Vector4 innerRadii, Color color)
+	public void DrawRoundedRectBorder(in RoundRectangle outer, in RoundRectangle inner, Color color)
 	{
 		// Annulus = outer round rect with the inner round rect clipped OUT (Difference), then filled.
 		_canvas.Save();
-		_canvas.ClipRoundRect(RoundRect(inner, innerRadii), SKClipOperation.Difference, true);
-		_canvas.DrawRoundRect(RoundRect(outer, outerRadii), FillPaint(color));
+		_canvas.ClipRoundRect(ToSKInner(inner), SKClipOperation.Difference, true);
+		_canvas.DrawRoundRect(ToSK(outer), FillPaint(color));
 		_canvas.Restore();
-	}
-
-	private static SKRoundRect RoundRect(in Rect r, Vector4 radii)
-	{
-		var rr = new SKRoundRect();
-		rr.SetRectRadii(r.ToSKRect(), new[]
-		{
-			new SKPoint(radii.X, radii.X), new SKPoint(radii.Y, radii.Y),
-			new SKPoint(radii.Z, radii.Z), new SKPoint(radii.W, radii.W),
-		});
-		return rr;
 	}
 
 	public void DrawPath(IGeometry geometry, Color color)
 	{
 		using var lease = SkiaGeometryInterop.Lease(geometry);
 		_canvas.DrawPath(lease.Path, FillPaint(color));
+	}
+
+	public void DrawGlyphRun(IFont font, ReadOnlySpan<ushort> glyphs, ReadOnlySpan<Vector2> positions, float baselineY, Color color)
+	{
+		if (font is not SkiaFont skiaFont)
+		{
+			GlyphRunRenderer.Draw(this, font, glyphs, positions, baselineY, color);
+			return;
+		}
+
+		DrawTextBlob(skiaFont, glyphs, positions, baselineY, FillPaint(color));
+	}
+
+	public void StrokeGlyphRun(IFont font, ReadOnlySpan<ushort> glyphs, ReadOnlySpan<Vector2> positions, float baselineY, Color color, float strokeWidth)
+	{
+		if (font is not SkiaFont skiaFont)
+		{
+			GlyphRunRenderer.Stroke(this, font, glyphs, positions, baselineY, color, strokeWidth);
+			return;
+		}
+
+		DrawTextBlob(skiaFont, glyphs, positions, baselineY, StrokePaint(color, strokeWidth));
+	}
+
+	private void DrawTextBlob(SkiaFont font, ReadOnlySpan<ushort> glyphs, ReadOnlySpan<Vector2> positions, float baselineY, SKPaint paint)
+	{
+		if (glyphs.IsEmpty)
+		{
+			return;
+		}
+
+		var builder = _textBlobBuilder ??= new SKTextBlobBuilder();
+		builder.AddPositionedRun(glyphs, font.NativeFont, MemoryMarshal.Cast<Vector2, SKPoint>(positions));
+		using var blob = builder.Build();
+		if (blob is not null)
+		{
+			_canvas.DrawText(blob, 0, baselineY, paint);
+		}
 	}
 
 	public void DrawPaths(ReadOnlySpan<PathInstance> instances, Color color)
@@ -198,9 +224,34 @@ internal class SkiaDrawingSession : IDrawingSession
 			return;
 		}
 
-		// One canvas draw for the whole run. The cost here is per DrawPath — paint setup, clip test, coverage
+		// A merged path carries a single fill rule, so a run mixing rules has to be drawn instance by instance.
+		var fillRule = instances[0].Geometry.FillRule;
+		var uniform = true;
+		for (var i = 1; i < instances.Length && uniform; i++)
+		{
+			uniform = instances[i].Geometry.FillRule == fillRule;
+		}
+
+		if (!uniform)
+		{
+			foreach (var instance in instances)
+			{
+				_canvas.Save();
+				_canvas.Translate(instance.Offset.X, instance.Offset.Y);
+				DrawPath(instance.Geometry, color);
+				_canvas.Restore();
+			}
+
+			return;
+		}
+
+		// One merged canvas draw for the whole run. The cost here is per DrawPath — paint setup, clip test, coverage
 		// walk — so N placed instances as N draws is far worse than merging them into a single path first.
-		var builder = new SKPathBuilder();
+		using var builder = new SKPathBuilder
+		{
+			FillType = fillRule == GeometryFillRule.EvenOdd ? SKPathFillType.EvenOdd : SKPathFillType.Winding,
+		};
+
 		foreach (var instance in instances)
 		{
 			using var lease = SkiaGeometryInterop.Lease(instance.Geometry);
@@ -220,14 +271,24 @@ internal class SkiaDrawingSession : IDrawingSession
 		paint.Color = color.ToSKColor();
 		paint.IsAntialias = true;
 		paint.BlendMode = additive ? SKBlendMode.Plus : SKBlendMode.SrcOver;
-		paint.MaskFilter = sigmaX > 0f ? BlurFilter(sigmaX) : null;
 
-		if (sigmaX.Equals(sigmaY) || sigmaX.Equals(0f))
+		if (sigmaX.Equals(sigmaY) || (sigmaX <= 0f && sigmaY <= 0f))
 		{
+			paint.MaskFilter = sigmaX > 0f ? BlurFilter(sigmaX) : null;
 			_canvas.DrawPath(skPath, paint);
+		}
+		else if (sigmaX <= 0f || sigmaY <= 0f)
+		{
+			// The CTM trick below derives one axis' sigma from the other's by a scale, which cannot express a zero
+			// on either axis (it would collapse the path), so use an image filter, whose sigmas are independent.
+			using var blur = SKImageFilter.CreateBlur(MathF.Max(sigmaX, 0f), MathF.Max(sigmaY, 0f));
+			paint.ImageFilter = blur;
+			_canvas.DrawPath(skPath, paint);
+			paint.ImageFilter = null;
 		}
 		else
 		{
+			paint.MaskFilter = BlurFilter(sigmaX);
 			// Anisotropic blur via respectCTM: the mask blur (isotropic, sigma = sigmaX) is scaled by the CTM
 			// per axis. Scaling the canvas Y by sigmaY/sigmaX makes the device Y-blur = sigmaY, and pre-scaling
 			// the path Y by the inverse cancels the visual stretch so the shape lands at its original position.
@@ -388,9 +449,19 @@ internal class SkiaDrawingSession : IDrawingSession
 	private static SKClipOperation ToSK(ClipOperation op)
 		=> op == ClipOperation.Difference ? SKClipOperation.Difference : SKClipOperation.Intersect;
 
-	private static SKRoundRect ToSK(in RoundRectangle rr)
+	// Reused per drawing thread like _sparePaint: SetRectRadii fully reconfigures the instance, and the canvas
+	// copies the shape out of it before the next draw. Two, so a border can hold its outer and inner at once.
+	[ThreadStatic]
+	private static SKRoundRect? _spareRoundRect;
+	[ThreadStatic]
+	private static SKRoundRect? _spareInnerRoundRect;
+
+	private static SKRoundRect ToSK(in RoundRectangle rr) => SetRadii(_spareRoundRect ??= new SKRoundRect(), rr);
+
+	private static SKRoundRect ToSKInner(in RoundRectangle rr) => SetRadii(_spareInnerRoundRect ??= new SKRoundRect(), rr);
+
+	private static SKRoundRect SetRadii(SKRoundRect target, in RoundRectangle rr)
 	{
-		var skRoundRect = new SKRoundRect();
 		Span<SKPoint> radii = stackalloc SKPoint[]
 		{
 			new SKPoint(rr.TopLeft.X, rr.TopLeft.Y),
@@ -398,8 +469,8 @@ internal class SkiaDrawingSession : IDrawingSession
 			new SKPoint(rr.BottomRight.X, rr.BottomRight.Y),
 			new SKPoint(rr.BottomLeft.X, rr.BottomLeft.Y),
 		};
-		skRoundRect.SetRectRadii(rr.Rect.ToSKRect(), radii);
-		return skRoundRect;
+		target.SetRectRadii(rr.Rect.ToSKRect(), radii);
+		return target;
 	}
 
 	internal static SKBlendMode ToSKBlendMode(BlendMode mode) => mode switch

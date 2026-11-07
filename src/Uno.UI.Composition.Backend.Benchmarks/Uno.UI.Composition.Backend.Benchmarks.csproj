@@ -11,9 +11,10 @@
 	<Import Project="../Uno.UI.Composition.WebGpu/wgpu-native.targets" />
 
 	<ItemGroup>
+		<Compile Include="../Uno.UI.Composition.ProGpu.RuntimeTests/GpuTestDevice.cs" Link="GpuTestDevice.cs" />
 		<ProjectReference Include="..\Uno.UI.Composition.ProGpu\Uno.UI.Composition.ProGpu.csproj" AdditionalProperties="ProGPUUseWinRTContracts=false" />
 		<ProjectReference Include="..\Uno.UI.Composition.WebGpu\Uno.UI.Composition.WebGpu.csproj" />
-		<ProjectReference Include="..\Uno.UI.Composition.Skia\Uno.UI.Composition.SkiaBackend.csproj" />
+		<ProjectReference Include="..\Uno.UI.Composition.Skia\Uno.UI.Composition.Skia.csproj" />
 		<ProjectReference Include="..\Uno.WinRT\Uno.WinRT.Reference.csproj" Aliases="unouwp" />
 		<ProjectReference Include="..\Uno.Foundation\Uno.Foundation.Reference.csproj" Aliases="unofoundation" />
 	</ItemGroup>

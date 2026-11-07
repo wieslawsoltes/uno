@@ -260,7 +260,9 @@ public sealed class ProGpuGeometry : DrawingResource, IGeometry, unouwp::Windows
 		return true;
 	}
 
-	public IGeometry GetFilledGeometry(float trimStart, float trimEnd)
+	public IGeometry GetFilledGeometry(float trimStart, float trimEnd) => GetFilledGeometry(trimStart, trimEnd, 1f);
+
+	public IGeometry GetFilledGeometry(float trimStart, float trimEnd, float scale)
 	{
 		// Uno and the Skia backend use the default pair (0, 0) to mean that no
 		// trim effect is present. A literal empty trim range is only meaningful
@@ -271,10 +273,12 @@ public sealed class ProGpuGeometry : DrawingResource, IGeometry, unouwp::Windows
 			return new ProGpuGeometry(Path.CreateTransformed(Matrix4x4.Identity), _roundRect);
 		}
 
-		return new ProGpuGeometry(ProGpuGeometryAlgorithms.Trim(Path, trimStart, trimEnd));
+		return new ProGpuGeometry(ProGpuGeometryAlgorithms.Trim(Path, trimStart, trimEnd, scale));
 	}
 
-	public IGeometry GetStrokeFillGeometry(in StrokeStyle style)
+	public IGeometry GetStrokeFillGeometry(in StrokeStyle style) => GetStrokeFillGeometry(style, 1f);
+
+	public IGeometry GetStrokeFillGeometry(in StrokeStyle style, float scale)
 	{
 		if (_roundRect is { } roundRect &&
 			IsEllipse(roundRect) &&
@@ -289,10 +293,10 @@ public sealed class ProGpuGeometry : DrawingResource, IGeometry, unouwp::Windows
 
 		if (CanDeferNativeStroke(style))
 		{
-			return new ProGpuStrokeGeometry(this, style);
+			return new ProGpuStrokeGeometry(this, style, scale);
 		}
 
-		return new ProGpuGeometry(ProGpuGeometryAlgorithms.Widen(Path, style));
+		return new ProGpuGeometry(ProGpuGeometryAlgorithms.Widen(Path, style, scale));
 	}
 
 	private bool CanDeferNativeStroke(in StrokeStyle style)
@@ -377,10 +381,12 @@ public sealed class ProGpuGeometry : DrawingResource, IGeometry, unouwp::Windows
 	private static Vector2 InflateRadius(Vector2 radius, float amount) =>
 		new(MathF.Max(0, radius.X + amount), MathF.Max(0, radius.Y + amount));
 
-	public void StreamFlattened(IFlattenedPathSink sink)
+	public void StreamFlattened(IFlattenedPathSink sink) => StreamFlattened(sink, 1f);
+
+	public void StreamFlattened(IFlattenedPathSink sink, float scale)
 	{
 		ArgumentNullException.ThrowIfNull(sink);
-		ProGpuGeometryAlgorithms.StreamFlattened(Path, sink);
+		ProGpuGeometryAlgorithms.StreamFlattened(Path, sink, scale);
 	}
 
 	public void StreamSegments(IGeometrySink sink)
@@ -440,15 +446,17 @@ public sealed class ProGpuGeometry : DrawingResource, IGeometry, unouwp::Windows
 internal sealed class ProGpuStrokeGeometry : DrawingResource, IGeometry
 {
 	private readonly StrokeStyle _style;
+	private readonly float _scale;
 	private readonly double[]? _nativeDashes;
 	private ProGpuGeometry? _fallback;
 
-	internal ProGpuStrokeGeometry(ProGpuGeometry source, in StrokeStyle style)
+	internal ProGpuStrokeGeometry(ProGpuGeometry source, in StrokeStyle style, float scale)
 	{
 		// PathGeometry is an immutable managed value. Keep an independent geometry
 		// handle over the same value so disposing the caller's source cannot transfer
 		// ownership of this stroke result.
 		Source = new ProGpuGeometry(source.Path, source.TryGetRoundRect());
+		_scale = scale;
 		_style = style with
 		{
 			DashArray = style.DashArray is { } dashes ? (float[])dashes.Clone() : null,
@@ -458,7 +466,7 @@ internal sealed class ProGpuStrokeGeometry : DrawingResource, IGeometry
 			_nativeDashes = new double[authored.Length];
 			for (var i = 0; i < authored.Length; i++)
 			{
-				_nativeDashes[i] = Math.Abs(authored[i]);
+				_nativeDashes[i] = Math.Abs(authored[i]) / _style.Thickness;
 			}
 		}
 	}
@@ -511,7 +519,7 @@ internal sealed class ProGpuStrokeGeometry : DrawingResource, IGeometry
 			ProGpuGeometryAlgorithms.ToProGpu(_style.EndCap),
 			ProGpuGeometryAlgorithms.ToProGpu(_style.DashCap),
 			_nativeDashes,
-			_style.DashOffset);
+			_style.DashOffset / _style.Thickness);
 	}
 
 	protected override void Free()
@@ -530,7 +538,7 @@ internal sealed class ProGpuStrokeGeometry : DrawingResource, IGeometry
 				return fallback;
 			}
 
-			var created = new ProGpuGeometry(ProGpuGeometryAlgorithms.Widen(Source.Path, _style));
+			var created = new ProGpuGeometry(ProGpuGeometryAlgorithms.Widen(Source.Path, _style, _scale));
 			fallback = Interlocked.CompareExchange(ref _fallback, created, null);
 			if (fallback is not null)
 			{

@@ -15,8 +15,6 @@ namespace Uno.UI.Composition.ProGpu;
 
 internal static class ProGpuGeometryAlgorithms
 {
-	private const int QuadraticSteps = 16;
-	private const int CubicSteps = 24;
 	private const float Epsilon = 0.0001f;
 
 	internal static PGeometry CreateRoundedRectangle(in RoundRectangle value)
@@ -28,10 +26,18 @@ internal static class ProGpuGeometryAlgorithms
 		var bottom = (float)rect.Bottom;
 		var width = Math.Max(0, right - left);
 		var height = Math.Max(0, bottom - top);
-		var tl = ClampRadius(value.TopLeft, width, height);
-		var tr = ClampRadius(value.TopRight, width, height);
-		var br = ClampRadius(value.BottomRight, width, height);
-		var bl = ClampRadius(value.BottomLeft, width, height);
+		var tl = Vector2.Max(value.TopLeft, Vector2.Zero);
+		var tr = Vector2.Max(value.TopRight, Vector2.Zero);
+		var br = Vector2.Max(value.BottomRight, Vector2.Zero);
+		var bl = Vector2.Max(value.BottomLeft, Vector2.Zero);
+
+		var factor = MathF.Min(1, MathF.Min(
+			MathF.Min(RadiusScale(width, tl.X + tr.X), RadiusScale(width, bl.X + br.X)),
+			MathF.Min(RadiusScale(height, tl.Y + bl.Y), RadiusScale(height, tr.Y + br.Y))));
+		tl *= factor;
+		tr *= factor;
+		br *= factor;
+		bl *= factor;
 
 		var path = new PGeometry();
 		if (width <= Epsilon || height <= Epsilon)
@@ -88,9 +94,9 @@ internal static class ProGpuGeometryAlgorithms
 		}
 	}
 
-	internal static void StreamFlattened(PGeometry source, IFlattenedPathSink sink)
+	internal static void StreamFlattened(PGeometry source, IFlattenedPathSink sink, float scale = 1f)
 	{
-		foreach (var contour in Flatten(source))
+		foreach (var contour in Flatten(source, scale))
 		{
 			if (contour.Points.Count == 0)
 			{
@@ -105,7 +111,7 @@ internal static class ProGpuGeometryAlgorithms
 		}
 	}
 
-	internal static PGeometry Trim(PGeometry source, float start, float end)
+	internal static PGeometry Trim(PGeometry source, float start, float end, float scale = 1f)
 	{
 		start = Math.Clamp(start, 0, 1);
 		end = Math.Clamp(end, 0, 1);
@@ -115,7 +121,7 @@ internal static class ProGpuGeometryAlgorithms
 		}
 
 		var result = new PGeometry { FillRule = source.FillRule };
-		foreach (var contour in Flatten(source))
+		foreach (var contour in Flatten(source, scale))
 		{
 			var trimmed = SlicePolyline(contour.Points, contour.Closed, start, end);
 			if (trimmed.Count < 2)
@@ -132,7 +138,7 @@ internal static class ProGpuGeometryAlgorithms
 		return result;
 	}
 
-	internal static PGeometry Widen(PGeometry source, in StrokeStyle style)
+	internal static PGeometry Widen(PGeometry source, in StrokeStyle style, float scale = 1f)
 	{
 		var result = new PGeometry { FillRule = ProGPU.Vector.FillRule.Nonzero };
 		if (!float.IsFinite(style.Thickness) || style.Thickness <= 0)
@@ -143,9 +149,9 @@ internal static class ProGpuGeometryAlgorithms
 		// Uno mirrors Skia's convention: the default pair (0, 0) means that no
 		// trim path effect was authored. Only a non-default member activates trim.
 		var sourcePath = style.TrimStart != default || style.TrimEnd != default
-			? Trim(source, style.TrimStart, style.TrimEnd)
+			? Trim(source, style.TrimStart, style.TrimEnd, scale)
 			: source;
-		foreach (var contour in Flatten(sourcePath))
+		foreach (var contour in Flatten(sourcePath, scale))
 		{
 			var pieces = style.DashArray is { Length: > 0 }
 				? Dash(contour.Points, contour.Closed, style)
@@ -238,11 +244,11 @@ internal static class ProGpuGeometryAlgorithms
 		var pattern = new float[authored.Length % 2 == 0 ? authored.Length : authored.Length * 2];
 		for (var i = 0; i < pattern.Length; i++)
 		{
-			pattern[i] = Math.Max(Epsilon, Math.Abs(authored[i % authored.Length] * style.Thickness));
+			pattern[i] = Math.Max(Epsilon, Math.Abs(authored[i % authored.Length]));
 		}
 		var period = 0f;
 		foreach (var value in pattern) period += value;
-		var offset = ((style.DashOffset * style.Thickness % period) + period) % period;
+		var offset = ((style.DashOffset % period) + period) % period;
 		var patternIndex = 0;
 		while (offset >= pattern[patternIndex])
 		{
@@ -324,7 +330,7 @@ internal static class ProGpuGeometryAlgorithms
 		return result;
 	}
 
-	private static List<Contour> Flatten(PGeometry source)
+	private static List<Contour> Flatten(PGeometry source, float scale)
 	{
 		var result = new List<Contour>();
 		var path = Resolve(source);
@@ -341,25 +347,29 @@ internal static class ProGpuGeometryAlgorithms
 						current = line.Point;
 						break;
 					case PQuadratic quadratic:
-						for (var i = 1; i <= QuadraticSteps; i++)
+						var quadraticSteps = Subdivisions(Vector2.Distance(current - 2f * quadratic.ControlPoint + quadratic.Point, Vector2.Zero) * 2f, scale);
+						for (var i = 1; i <= quadraticSteps; i++)
 						{
-							var t = (float)i / QuadraticSteps;
+							var t = (float)i / quadraticSteps;
 							var u = 1 - t;
 							AddDistinct(points, u * u * current + 2 * u * t * quadratic.ControlPoint + t * t * quadratic.Point);
 						}
 						current = quadratic.Point;
 						break;
 					case PCubic cubic:
-						for (var i = 1; i <= CubicSteps; i++)
+						var cubicSteps = Subdivisions(6f * MathF.Max(
+							(current - 2f * cubic.ControlPoint1 + cubic.ControlPoint2).Length(),
+							(cubic.ControlPoint1 - 2f * cubic.ControlPoint2 + cubic.Point).Length()), scale);
+						for (var i = 1; i <= cubicSteps; i++)
 						{
-							var t = (float)i / CubicSteps;
+							var t = (float)i / cubicSteps;
 							var u = 1 - t;
 							AddDistinct(points, u * u * u * current + 3 * u * u * t * cubic.ControlPoint1 + 3 * u * t * t * cubic.ControlPoint2 + t * t * t * cubic.Point);
 						}
 						current = cubic.Point;
 						break;
 					case PArc arc:
-						foreach (var point in ProGPU.Vector.ArcSegmentGeometry.FlattenArc(current, arc)) AddDistinct(points, point);
+						AppendArc(points, current, arc, scale);
 						current = arc.Point;
 						break;
 				}
@@ -371,6 +381,31 @@ internal static class ProGpuGeometryAlgorithms
 			result.Add(new Contour(points, figure.IsClosed));
 		}
 		return result;
+	}
+
+	private static int Subdivisions(float secondDerivativeBound, float scale)
+	{
+		// The chord error is bounded by max(|p''|) / (8 * n²), at 1/8 device pixel.
+		var magnification = float.IsFinite(scale) ? MathF.Max(1, scale) : 1f;
+		return (int)Math.Clamp(Math.Ceiling(Math.Sqrt(secondDerivativeBound * (double)magnification)), 1, 65536);
+	}
+
+	private static void AppendArc(List<Vector2> points, Vector2 start, PArc arc, float scale)
+	{
+		if (!ProGPU.Vector.ArcSegmentGeometry.TryGetArcCenter(start, arc.Point, arc.Size, arc.RotationAngle,
+			arc.IsLargeArc, arc.SweepDirection, out var center, out var angle, out var sweep, out var rx, out var ry))
+		{
+			AddDistinct(points, arc.Point);
+			return;
+		}
+		var steps = Subdivisions(MathF.Max(rx, ry) * sweep * sweep, scale);
+		var rotation = Matrix3x2.CreateRotation(arc.RotationAngle * MathF.PI / 180f);
+		for (var i = 1; i < steps; i++)
+		{
+			var theta = angle + sweep * i / steps;
+			AddDistinct(points, center + Vector2.Transform(new Vector2(rx * MathF.Cos(theta), ry * MathF.Sin(theta)), rotation));
+		}
+		AddDistinct(points, arc.Point);
 	}
 
 	private static PGeometry Resolve(PGeometry path)
@@ -394,8 +429,7 @@ internal static class ProGpuGeometryAlgorithms
 		}
 	}
 
-	private static Vector2 ClampRadius(Vector2 radius, float width, float height) =>
-		new(Math.Clamp(Math.Abs(radius.X), 0, width * 0.5f), Math.Clamp(Math.Abs(radius.Y), 0, height * 0.5f));
+	private static float RadiusScale(float extent, float sum) => sum > 0 ? extent / sum : 1f;
 
 	private static void AddDistinct(List<Vector2> points, Vector2 point)
 	{

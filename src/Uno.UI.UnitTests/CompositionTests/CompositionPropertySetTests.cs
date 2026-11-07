@@ -8,7 +8,7 @@ using Uno.UI.Composition;
 
 namespace Uno.UI.Tests.CompositionTests;
 
-[TestClass]
+[UITestClass]
 public class CompositionPropertySetTests
 {
 	[TestMethod]
@@ -108,6 +108,9 @@ public class CompositionPropertySetTests
 	{
 		public double RasterizationScale => 1;
 
+		// No recording happens through this double; the process default is the right fallback.
+		public Uno.UI.Composition.Drawing.IDrawingFactory Renderer => null;
+
 		public event EventHandler RasterizationScaleChanged
 		{
 			add { }
@@ -125,6 +128,14 @@ public class CompositionPropertySetTests
 		public void RequestNewFrame()
 		{
 		}
+
+		public event EventHandler<long> FrameStarting
+		{
+			add { }
+			remove { }
+		}
+
+		public long FrameIntervalInTicks => TimeSpan.TicksPerSecond / 60;
 
 		public void TryRedirectForManipulation(PointerPoint pointerPoint, InteractionTracker tracker)
 		{

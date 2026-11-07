@@ -18,6 +18,8 @@ namespace Microsoft.UI.Composition
 		private static SKPathBuilder? _strokeSpareBuilderTls;
 		private static SKPathBuilder _strokeSpareBuilder => _strokeSpareBuilderTls ??= new();
 
+		private const float DashMeasureResolution = 16f;
+
 		[ThreadStatic]
 		private static SKPoint[]? _spareMiterPointsTls;
 		private static SKPoint[] _spareMiterPoints => _spareMiterPointsTls ??= new SKPoint[4];
@@ -29,18 +31,27 @@ namespace Microsoft.UI.Composition
 			paint.IsAntialias = true;
 			paint.IsStroke = false;
 			paint.Color = SKColors.White;
+			SKPathEffect? trim = null;
 			if (trimStart != default || trimEnd != default)
 			{
-				paint.PathEffect = SKPathEffect.CreateTrim(trimStart, trimEnd);
+				trim = SKPathEffect.CreateTrim(trimStart, trimEnd);
+				paint.PathEffect = trim;
 			}
 
 			var builder = _strokeSpareBuilder;
 			builder.Reset();
 			paint.GetFillPath(_geometry, builder);
+			// The spare paint outlives this call, so drop its native reference before releasing the effect.
+			paint.PathEffect = null;
+			trim?.Dispose();
 			return new SkiaGeometrySource2D(builder.Detach());
 		}
 
-		IGeometry IGeometry.GetStrokeFillGeometry(in StrokeStyle style)
+		IGeometry IGeometry.GetStrokeFillGeometry(in StrokeStyle style) => GetStrokeFillGeometry(style, 1f);
+
+		IGeometry IGeometry.GetStrokeFillGeometry(in StrokeStyle style, float scale) => GetStrokeFillGeometry(style, scale);
+
+		private IGeometry GetStrokeFillGeometry(in StrokeStyle style, float scale)
 		{
 			var paint = _strokeSparePaint;
 			paint.Reset();
@@ -54,16 +65,18 @@ namespace Microsoft.UI.Composition
 			var needsCustomCaps = style.StartCap != style.EndCap || style.StartCap == StrokeCap.Triangle;
 
 			float[]? dashValues = null;
+			SKPathEffect? dashEffect = null;
 			if (style.DashArray is { Length: > 0 } dashArray)
 			{
 				paint.StrokeCap = ToSKStrokeCap(style.DashCap);
-				dashValues = new float[dashArray.Length];
-				for (var i = 0; i < dashArray.Length; i++)
+				// Skia needs an even count; an odd list repeats, as in SVG.
+				dashValues = new float[dashArray.Length % 2 == 0 ? dashArray.Length : dashArray.Length * 2];
+				for (var i = 0; i < dashValues.Length; i++)
 				{
-					dashValues[i] = dashArray[i] * style.Thickness;
+					dashValues[i] = MathF.Max(0f, dashArray[i % dashArray.Length]);
 				}
 
-				var dashEffect = SKPathEffect.CreateDash(dashValues, style.DashOffset * style.Thickness);
+				dashEffect = SKPathEffect.CreateDash(dashValues, style.DashOffset);
 				if (dashEffect is not null)
 				{
 					paint.PathEffect = dashEffect;
@@ -78,15 +91,34 @@ namespace Microsoft.UI.Composition
 				paint.StrokeCap = ToSKStrokeCap(style.EndCap);
 			}
 
+			SKPathEffect? trim = null;
+			SKPathEffect? composed = null;
 			if (style.TrimStart != default || style.TrimEnd != default)
 			{
-				var trim = SKPathEffect.CreateTrim(style.TrimStart, style.TrimEnd);
-				paint.PathEffect = paint.PathEffect is { } existing ? SKPathEffect.CreateSum(existing, trim) : trim;
+				trim = SKPathEffect.CreateTrim(style.TrimStart, style.TrimEnd);
+				if (dashEffect is not null)
+				{
+					// Trim first, then dash the trimmed path (as the managed stroker does).
+					composed = SKPathEffect.CreateCompose(dashEffect, trim);
+					paint.PathEffect = composed;
+				}
+				else
+				{
+					paint.PathEffect = trim;
+				}
 			}
 
+			// Dashes are laid out by arc length, which Skia measures on a flattened curve: at the default resolution small
+			// arcs come out short enough to shift the pattern visibly after each corner. Measure at device resolution and finer.
+			var resScale = dashValues is not null ? MathF.Max(1f, scale) * DashMeasureResolution : 1f;
 			var builder = _strokeSpareBuilder;
 			builder.Reset();
-			paint.GetFillPath(_geometry, builder);
+			paint.GetFillPath(_geometry, builder, resScale);
+			// The spare paint outlives this call, so drop its native reference before releasing the effects.
+			paint.PathEffect = null;
+			composed?.Dispose();
+			trim?.Dispose();
+			dashEffect?.Dispose();
 
 			if (needsCustomCaps && style.DashArray is not { Length: > 0 })
 			{
@@ -99,12 +131,12 @@ namespace Microsoft.UI.Composition
 					|| style.EndCap != StrokeCap.Butt))
 			{
 				FixDashEndpointCaps(builder, _geometry, style.Thickness, style.DashCap, style.StartCap, style.EndCap,
-					dashValues, style.DashOffset * style.Thickness);
+					dashValues, style.DashOffset);
 			}
 
 			if (dashValues is not null && style.DashCap == StrokeCap.Triangle)
 			{
-				AddInternalTriangleDashCaps(builder, _geometry, style.Thickness, dashValues, style.DashOffset * style.Thickness);
+				AddInternalTriangleDashCaps(builder, _geometry, style.Thickness, dashValues, style.DashOffset);
 			}
 
 			if (style.LineJoin == StrokeJoin.Miter)
@@ -408,7 +440,7 @@ namespace Microsoft.UI.Composition
 			var p3 = new SKPoint(position.X - normal.X * size + direction.X * size, position.Y - normal.Y * size + direction.Y * size);
 			var p4 = new SKPoint(position.X - normal.X * size, position.Y - normal.Y * size);
 
-			var builder = new SKPathBuilder();
+			using var builder = new SKPathBuilder();
 			builder.AddPoly(new[] { p1, p2, p3, p4 }, true);
 			return builder.Detach();
 		}
@@ -540,7 +572,7 @@ namespace Microsoft.UI.Composition
 
 			if (capType == StrokeCap.Round)
 			{
-				var builder = new SKPathBuilder();
+				using var builder = new SKPathBuilder();
 				// Build a semicircle oriented in the cap direction
 				var startAngle = (float)(Math.Atan2(normal.Y, normal.X) * 180 / Math.PI);
 				var rect = new SKRect(
@@ -554,7 +586,7 @@ namespace Microsoft.UI.Composition
 			}
 			else if (capType == StrokeCap.Square)
 			{
-				var builder = new SKPathBuilder();
+				using var builder = new SKPathBuilder();
 				// Rectangle extending halfWidth beyond endpoint in direction
 				var p1 = new SKPoint(position.X + normal.X * halfWidth, position.Y + normal.Y * halfWidth);
 				var p2 = new SKPoint(p1.X + direction.X * halfWidth, p1.Y + direction.Y * halfWidth);
@@ -565,7 +597,7 @@ namespace Microsoft.UI.Composition
 			}
 			else if (capType == StrokeCap.Triangle)
 			{
-				var builder = new SKPathBuilder();
+				using var builder = new SKPathBuilder();
 				// Isoceles triangle: base perpendicular to direction at endpoint, apex at halfWidth in direction
 				var base1 = new SKPoint(position.X + normal.X * halfWidth, position.Y + normal.Y * halfWidth);
 				var apex = new SKPoint(position.X + direction.X * halfWidth, position.Y + direction.Y * halfWidth);

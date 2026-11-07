@@ -66,7 +66,7 @@ public partial class CompositionTarget
 	//             | Repeat... |-|                                       |                                                                                                                 |                        |                                 |
 	//             |-----------| |                                       |                                                                                                                 |                        |                                 |
 	//                           |                                       |                                                                                                                 |                        |                                 |
-	private readonly object _renderingStateGate = new();
+	private readonly Lock _renderingStateGate = new();
 
 	private bool _renderRequested; // only set or read under _renderingStateGate
 	private bool _renderedAheadOfTime; // only set or read under _renderingStateGate
@@ -186,6 +186,9 @@ public partial class CompositionTarget
 
 		Interlocked.Exchange(ref _shouldEnqueueRenderOnNextNativePlatformFrameRequested, true);
 
+		// Once per native frame, before a record this callback may make.
+		SampleFrameTimestamp();
+
 		lock (_renderingStateGate)
 		{
 			LogRenderState();
@@ -206,16 +209,17 @@ public partial class CompositionTarget
 			}
 			else if (RenderRequested)
 			{
-				lock (_renderingStateGate)
-				{
-					RenderRequested = false;
-				}
+				RenderRequested = false;
 				this.LogTrace()?.Trace($"CompositionTarget#{GetHashCode()}: {nameof(Draw)} fired from {nameof(EnqueueRenderCallback)}");
 				Render();
 			}
 			AssertRenderStateMachine();
 			LogRenderState();
 		}
+
+		// One native frame, one tick: ticking from every dispatcher pump would free-run the drivers between two
+		// vsyncs, sampling clock jitter into the motion and running a layout pass each time.
+		ArmFrameTick();
 	}
 
 	/// <summary>
@@ -237,9 +241,17 @@ public partial class CompositionTarget
 			NativeDispatcher.Main.EnqueueRender(this, EnqueueRenderCallback);
 		}
 
-		var nativeElementClipPath = Draw(swapChain, rootTransform, overlay);
-		swapChain.Present();
-		return nativeElementClipPath;
+		// Present in a finally: a swapchain that takes a device lock in AcquireRenderTarget releases it in
+		// Present, so a throwing frame would otherwise hold it forever and deadlock the next teardown.
+		try
+		{
+			return Draw(swapChain, rootTransform, overlay);
+		}
+		finally
+		{
+			swapChain.Present();
+			RaiseFramePresented();
+		}
 	}
 
 	internal void OnRenderFrameOpportunity()

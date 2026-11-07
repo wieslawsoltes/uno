@@ -1,4 +1,4 @@
-#nullable enable
+﻿#nullable enable
 
 using System;
 using SkiaSharp;
@@ -18,7 +18,40 @@ internal sealed class SkiaEffectFuser
 	// deferred source", not "failed to build"). A parent op keeps a null child in that case and clears the flag once consumed.
 	private bool _isSource;
 
-	internal SKImageFilter? Fuse(EffectNode node, SKRect bounds)
+	/// <summary>Why the last <see cref="FuseGraph"/> produced no filter; null when it produced one.</summary>
+	internal string? FailureReason { get; private set; }
+
+	/// <summary>
+	/// Fuses <paramref name="node"/> into a single filter DAG. Null means the graph can't be realized (see
+	/// <see cref="FailureReason"/>).
+	/// <para>The interior wrappers a fuse allocates are deliberately NOT disposed, and must not be held in a
+	/// collection either: doing so corrupted the heap under WebAssembly (every WASM runtime-test shard died
+	/// with "memory access out of bounds"). Their native objects are refcounted by their parents regardless.</para>
+	/// </summary>
+	internal SKImageFilter? FuseGraph(EffectNode node, SKRect bounds)
+	{
+		// Per-fuse state: a reused instance must not inherit the previous graph's source flag or failure.
+		_isSource = false;
+		FailureReason = null;
+
+		var root = Fuse(node, bounds);
+		if (root is null)
+		{
+			FailureReason ??= _isSource
+				? "the graph is a bare backdrop source with no operation applied"
+				: $"'{node.GetType().Name}' produced no filter";
+		}
+
+		return root;
+	}
+
+	private SKImageFilter? Fail(string reason)
+	{
+		FailureReason ??= reason;
+		return null;
+	}
+
+	private SKImageFilter? Fuse(EffectNode node, SKRect bounds)
 	{
 		switch (node)
 		{
@@ -32,20 +65,27 @@ internal sealed class SkiaEffectFuser
 					var img = ((SkiaTexture)texture.Texture).Image;
 					var src = new SKRect(0, 0, img.Width, img.Height);
 
+					// The filter DAG works in the effect's logical space (the canvas transform is applied when the
+					// filter runs), while the texture was rasterized at device resolution — so its destination is its
+					// pixel size divided by that scale, which lands it back at 1:1 device pixels.
+					var scaleX = texture.ScaleX > 0f ? texture.ScaleX : 1f;
+					var scaleY = texture.ScaleY > 0f ? texture.ScaleY : 1f;
+					var logical = new SKRect(0, 0, img.Width / scaleX, img.Height / scaleY);
+
 					if (texture.ExtendX == EdgeExtend.None && texture.ExtendY == EdgeExtend.None)
 					{
 						// Plain finite image: place it back at bounds (it was rasterized in bounds-space at the origin).
-						var dst = new SKRect(bounds.Left, bounds.Top, bounds.Left + img.Width, bounds.Top + img.Height);
+						var dst = new SKRect(bounds.Left, bounds.Top, bounds.Left + logical.Width, bounds.Top + logical.Height);
 						return SKImageFilter.CreateImage(img, src, dst, new SKSamplingOptions(SKFilterMode.Linear));
 					}
 
 					// BorderEffect: extend the source's own rectangle to infinity per the edge mode; downstream sampling
 					// over `bounds` then sees the tiled/mirrored/clamped fill. Mirrors the legacy Border realization.
-					var imageFilter = SKImageFilter.CreateImage(img, src, src, new SKSamplingOptions(SKFilterMode.Linear));
+					var imageFilter = SKImageFilter.CreateImage(img, src, logical, new SKSamplingOptions(SKFilterMode.Linear));
 					var mode = PickExtend(texture.ExtendX, texture.ExtendY);
 					if (mode == SKShaderTileMode.Repeat)
 					{
-						return SKImageFilter.CreateTile(src, bounds, imageFilter);
+						return SKImageFilter.CreateTile(logical, bounds, imageFilter);
 					}
 
 					ReadOnlySpan<float> identityKernel = [0, 0, 0, 0, 1, 0, 0, 0, 0];
@@ -153,7 +193,7 @@ internal sealed class SkiaEffectFuser
 					var runtimeEffect = SKRuntimeEffect.CreateShader(shader, out var errors);
 					if (errors is not null)
 					{
-						return null;
+						return Fail($"an effect shader failed to compile: {errors}");
 					}
 
 					var uniforms = new SKRuntimeEffectUniforms(runtimeEffect) { { "contrastValue", contrast.Contrast } };
@@ -217,7 +257,7 @@ internal sealed class SkiaEffectFuser
 					var runtimeEffect = SKRuntimeEffect.CreateShader(shader, out var errors);
 					if (errors is not null)
 					{
-						return null;
+						return Fail($"an effect shader failed to compile: {errors}");
 					}
 
 					var uniforms = new SKRuntimeEffectUniforms(runtimeEffect)
@@ -295,7 +335,7 @@ internal sealed class SkiaEffectFuser
 					var runtimeEffect = SKRuntimeEffect.CreateShader(shader, out var errors);
 					if (errors is not null)
 					{
-						return null;
+						return Fail($"an effect shader failed to compile: {errors}");
 					}
 
 					var uniforms = new SKRuntimeEffectUniforms(runtimeEffect)
@@ -341,6 +381,7 @@ internal sealed class SkiaEffectFuser
 					}
 
 					_isSource = false;
+
 					return blur.ClampEdge
 						? SKImageFilter.CreateBlur(blur.Sigma, blur.Sigma, SKShaderTileMode.Clamp, source, bounds)
 						: SKImageFilter.CreateBlur(blur.Sigma, blur.Sigma, source, bounds);
@@ -368,7 +409,7 @@ internal sealed class SkiaEffectFuser
 				{
 					if (composite.Sources.Count == 0)
 					{
-						return null;
+						return Fail("the composite effect has no sources");
 					}
 
 					var current = Fuse(composite.Sources[0], bounds);
@@ -479,7 +520,7 @@ internal sealed class SkiaEffectFuser
 					var crossFadeEffect = SKRuntimeEffect.CreateShader(shader, out var crossFadeErrors);
 					if (crossFadeErrors is not null)
 					{
-						return null;
+						return Fail($"the cross-fade shader failed to compile: {crossFadeErrors}");
 					}
 
 					var crossFadeUniforms = new SKRuntimeEffectUniforms(crossFadeEffect) { { "crossfade", weight } };
@@ -522,7 +563,7 @@ internal sealed class SkiaEffectFuser
 					var noiseEffect = SKRuntimeEffect.CreateShader(shader, out var noiseErrors);
 					if (noiseErrors is not null)
 					{
-						return null;
+						return Fail($"the noise shader failed to compile: {noiseErrors}");
 					}
 
 					var noiseUniforms = new SKRuntimeEffectUniforms(noiseEffect)
@@ -545,7 +586,7 @@ internal sealed class SkiaEffectFuser
 					var light = new SKPoint3(lighting.Light.X, lighting.Light.Y, lighting.Light.Z);
 					var target = new SKPoint3(lighting.Target.X, lighting.Target.Y, lighting.Target.Z);
 					var color = lighting.LightColor.ToSKColor();
-					return lighting.Kind switch
+					var lit = lighting.Kind switch
 					{
 						LightingKind.DistantDiffuse => SKImageFilter.CreateDistantLitDiffuse(light, color, 1f, lighting.Amount, source, bounds),
 						LightingKind.DistantSpecular => SKImageFilter.CreateDistantLitSpecular(light, color, 1f, lighting.Amount, lighting.SpecularExponent, source, bounds),
@@ -555,13 +596,15 @@ internal sealed class SkiaEffectFuser
 						LightingKind.PointSpecular => SKImageFilter.CreatePointLitSpecular(light, color, 1f, lighting.Amount, lighting.SpecularExponent, source, bounds),
 						_ => null,
 					};
+
+					return lit is null ? Fail($"unsupported lighting kind '{lighting.Kind}'") : lit;
 				}
 
 			case UnsupportedEffectNode unsupported:
-				return unsupported.Source is null ? null : Fuse(unsupported.Source, bounds);
+				return unsupported.Source is null ? Fail($"unsupported effect '{unsupported.EffectName}'") : Fuse(unsupported.Source, bounds);
 
 			default:
-				return null;
+				return Fail($"no Skia realization for '{node.GetType().Name}'");
 		}
 	}
 

@@ -37,13 +37,28 @@ public partial class Visual
 			_hasLastRenderBounds = false;
 		}
 
+		// A subtree replayed from its cached picture under a moved ancestor (a scrolled page) is not walked, so its
+		// descendants' last-rendered bounds are where they were before the move. These rects follow every replay.
+		if (_hasChildrenContentDamageRect)
+		{
+			target.AddDamage(_childrenContentDamageRect);
+			_hasChildrenContentDamageRect = false;
+		}
+
+		if (_hasShadowFallbackDamageRect)
+		{
+			target.AddDamage(_shadowFallbackDamageRect);
+			_hasShadowFallbackDamageRect = false;
+		}
+
 		foreach (var child in GetChildrenInRenderOrder())
 		{
 			child.ContributeRemovalDamage(target);
 		}
 	}
 
-	internal void ContributeDamageOnPaint(bool contentChanged, DamageRegion? damage, bool clipChanged)
+
+	internal void ContributeDamageOnPaint(bool contentChanged, DamageRegion? damage, bool clipChanged, Rect clipRect)
 	{
 		if (damage is null)
 		{
@@ -55,11 +70,10 @@ public partial class Visual
 
 		var shadowSilhouetteChanged = ShadowState is not null && _subtreeChangedThisFrame;
 
-		// The clip in effect for this visual's own content, in root coordinates. Rect-only: damage only ever
-		// consumes clip BOUNDS, and during a scroll every visible visual reaches this point every frame — a
-		// geometry-based total-clip walk (allocations + polygon booleans) per moved visual is pure overhead.
-		// Non-rect clips contribute their bounds (or nothing when unbounded), which only widens damage — safe.
-		var clipRect = GetTotalClipBoundsRect();
+		// The clip in effect for this visual's own content, in root coordinates, threaded down the walk by the
+		// caller. It used to be recomputed here by walking every ancestor, which is O(depth) per visual per frame
+		// — on a deep tree during a scroll that was tens of thousands of transforms a frame for a value the
+		// parent already knew.
 
 		// The accumulated clip can grow or shrink while this visual's own content and transform stay identical
 		// (an ancestor re-clipping to a new size), revealing or hiding part of it, and nothing else would report
@@ -94,25 +108,26 @@ public partial class Visual
 		}
 	}
 
-	/// <summary>Root-space rect bounds of the clips in effect for this visual's own content: its own and its
-	/// ancestors' rect-shaped clips intersected (see <see cref="GetLocalCullClipBounds"/>); non-rect clips
-	/// contribute nothing, which only widens the result.</summary>
-	private Rect GetTotalClipBoundsRect()
+	/// <summary>
+	/// Narrows the clip bounds inherited from the parent by this visual's own rect-shaped clip, in root
+	/// coordinates. Threading this down the render walk keeps it O(1) per visual; recomputing it bottom-up
+	/// costs O(depth) per visual per frame for a value the parent already holds.
+	/// </summary>
+	private Rect NarrowClipBounds(Rect inherited)
 	{
-		var rect = InfiniteClipRect;
-		for (var visual = this; visual is not null; visual = visual.Parent as Visual)
+		if (GetLocalCullClipBounds() is not { } localClip)
 		{
-			if (visual.GetLocalCullClipBounds() is { } localClip)
-			{
-				rect = Intersect(rect, localClip.Transform(visual.TotalMatrix.ToMatrix3x2()));
-				if (IsRectEmpty(rect))
-				{
-					return default;
-				}
-			}
+			return inherited;
 		}
 
-		return rect;
+		// A clip whose projection is unbounded cannot narrow anything; skipping it only widens the result.
+		if (!localClip.TryTransformBounds(TotalMatrix, out var clipInRoot))
+		{
+			return inherited;
+		}
+
+		var narrowed = Intersect(inherited, clipInRoot);
+		return IsRectEmpty(narrowed) ? default : narrowed;
 	}
 
 	private bool TryGetPaintDamageRegion(Rect clipRect, out Rect bounds)
@@ -145,7 +160,13 @@ public partial class Visual
 				local = Inflate(local, samplingMargin, samplingMargin);
 			}
 
-			var clipped = Intersect(OutsetForAntialiasing(local.Transform(TotalMatrix.ToMatrix3x2())), clipRect);
+			if (!local.TryTransformBounds(TotalMatrix, out var localInRoot))
+			{
+				bounds = clipRect;
+				return true;
+			}
+
+			var clipped = Intersect(OutsetForAntialiasing(localInRoot), clipRect);
 			if (IsRectEmpty(clipped))
 			{
 				return false;
@@ -209,6 +230,12 @@ public partial class Visual
 	{
 		localBounds = default;
 
+		// The silhouette is mapped back through a 2D inverse below, which a projective caster has none of.
+		if (!TotalMatrix.IsPlanarAffine())
+		{
+			return false;
+		}
+
 		var casterMatrix = TotalMatrix.ToMatrix3x2();
 		var silhouetteInRoot = ownLocalBounds.Transform(casterMatrix);
 		if (!TryAccumulateDescendantContentBoundsInRoot(ref silhouetteInRoot))
@@ -251,7 +278,10 @@ public partial class Visual
 
 		if (!IsRectEmpty(own))
 		{
-			boundsInRoot = own.Transform(TotalMatrix.ToMatrix3x2());
+			if (!own.TryTransformBounds(TotalMatrix, out boundsInRoot))
+			{
+				return false;
+			}
 		}
 
 		// A shadow's silhouette already covers the descendants, see TryGetShadowSilhouetteBounds.
@@ -274,7 +304,11 @@ public partial class Visual
 
 			if (!IsRectEmpty(childLocal))
 			{
-				var rect = childLocal.Transform(child.TotalMatrix.ToMatrix3x2());
+				if (!childLocal.TryTransformBounds(child.TotalMatrix, out var rect))
+				{
+					return false;
+				}
+
 				acc = IsRectEmpty(acc) ? rect : Union(acc, rect);
 			}
 

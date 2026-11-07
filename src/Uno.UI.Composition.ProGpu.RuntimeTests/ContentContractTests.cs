@@ -48,7 +48,7 @@ internal static class ContentContractTests
 		}
 		Require(ImageEncoderDecoder.Current is ProGpuImageEncoderDecoder, "UseProGpuDrawingBackend must register the ProGPU image codec.");
 		Require(SvgRenderer.Current is ProGpuSvgRenderer, "UseProGpuDrawingBackend must register the ProGPU SVG renderer.");
-		Require(LottieRenderer.Current is ManagedLottieRenderer, "UseProGpuDrawingBackend must replace the previous Lottie choice with the neutral managed renderer.");
+		Require(LottieRenderer.Current?.GetType().Name == "ManagedLottieRenderer", "UseProGpuDrawingBackend must replace the previous Lottie choice with the neutral managed renderer.");
 	}
 
 	private sealed class UnusableLottieRenderer : ILottieRenderer

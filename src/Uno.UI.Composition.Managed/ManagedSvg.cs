@@ -28,13 +28,14 @@ internal sealed class ManagedSvg : ISvgDocument
 	private readonly Dictionary<string, XElement> _byId = new();
 	// The registered factories, injected at parse — the renderer never reaches a global holder (no IVT into Drawing).
 	private readonly IGeometryFactory _geometry;
-	private readonly IDrawingFactory _drawing;
 
-	private ManagedSvg(XElement root, IGeometryFactory geometry, IDrawingFactory drawing)
+	private const int MaxUseDepth = 8;
+	private int _useDepth;
+
+	private ManagedSvg(XElement root, IGeometryFactory geometry)
 	{
 		_root = root;
 		_geometry = geometry;
-		_drawing = drawing;
 		foreach (var el in root.DescendantsAndSelf())
 		{
 			var id = (string?)el.Attribute("id");
@@ -54,7 +55,7 @@ internal sealed class ManagedSvg : ISvgDocument
 	// The managed engine renders straight into the session each frame and retains no backend resource; nothing to release.
 	public void Dispose() { }
 
-	public static bool TryParse(byte[] svg, IGeometryFactory geometry, IDrawingFactory drawing, out ManagedSvg document)
+	public static bool TryParse(byte[] svg, IGeometryFactory geometry, out ManagedSvg document)
 	{
 		document = null!;
 		try
@@ -66,7 +67,7 @@ internal sealed class ManagedSvg : ISvgDocument
 				return false;
 			}
 
-			document = new ManagedSvg(xdoc.Root, geometry, drawing);
+			document = new ManagedSvg(xdoc.Root, geometry);
 			return document.SourceSize is { Width: > 0, Height: > 0 };
 		}
 		catch
@@ -88,6 +89,9 @@ internal sealed class ManagedSvg : ISvgDocument
 		var ty = ((float)targetSize.Height - (float)_viewBox.Height * scale) / 2f - (float)_viewBox.Y * scale;
 
 		var count = session.Save();
+		// The SVG viewport clips its content (overflow:hidden on the root); without it a shape reaching outside
+		// paints over whatever else shares the session.
+		session.ClipRect(new Rect(0, 0, targetSize.Width, targetSize.Height));
 		session.Concat(ToMatrix4x4(new Matrix3x2(scale, 0, 0, scale, tx, ty)));
 		// The root <svg>'s own presentation attributes (color, fill, …) are inherited by its descendants.
 		RenderChildren(session, _root, SvgStyle.Root.InheritFrom(_root));
@@ -111,6 +115,10 @@ internal sealed class ManagedSvg : ISvgDocument
 		}
 
 		var style = inherited.InheritFrom(el);
+		if (style.Hidden)
+		{
+			return;
+		}
 
 		var transform = ParseTransform((string?)el.Attribute("transform"));
 		var saved = session.SaveCount;
@@ -167,20 +175,52 @@ internal sealed class ManagedSvg : ISvgDocument
 			return;
 		}
 
-		var x = Len(el, "x");
-		var y = Len(el, "y");
-		var saved = session.SaveCount;
-		if (x != 0 || y != 0)
+		// A <use> may resolve to its own ancestor; without a depth cap that recursion is a process-killing
+		// StackOverflowException rather than a catchable failure.
+		if (_useDepth >= MaxUseDepth)
 		{
-			session.Save();
-			session.Translate(x, y);
+			return;
 		}
 
-		RenderElement(session, target, style);
-		if (x != 0 || y != 0)
+		_useDepth++;
+		try
 		{
-			session.RestoreToCount(saved);
+			RenderUseTarget(session, el, style, target);
 		}
+		finally
+		{
+			_useDepth--;
+		}
+	}
+
+	private void RenderUseTarget(IDrawingSession session, XElement el, SvgStyle style, XElement target)
+	{
+		var saved = session.SaveCount;
+		session.Save();
+		session.Translate(Len(el, "x"), Len(el, "y"));
+
+		// A <use> of a <symbol> instantiates the symbol's children (the symbol itself never renders), scaling its
+		// viewBox into the width/height on the <use> — the standard sprite-sheet idiom.
+		if (target.Name.LocalName is "symbol" or "svg")
+		{
+			var w = Len(el, "width");
+			var h = Len(el, "height");
+			var viewBox = ParseNumbers((string?)target.Attribute("viewBox"));
+			if (w > 0 && h > 0 && viewBox.Length == 4 && viewBox[2] > 0 && viewBox[3] > 0)
+			{
+				var fit = Math.Min(w / viewBox[2], h / viewBox[3]);
+				session.Scale(fit, fit);
+				session.Translate(-viewBox[0], -viewBox[1]);
+			}
+
+			RenderChildren(session, target, style.InheritFrom(target));
+		}
+		else
+		{
+			RenderElement(session, target, style);
+		}
+
+		session.RestoreToCount(saved);
 	}
 
 	private void DrawGeometry(IDrawingSession session, IGeometry? geometry, SvgStyle style, XElement el)
@@ -210,7 +250,7 @@ internal sealed class ManagedSvg : ISvgDocument
 	// resolves, else with a solid color. Gradient fills clip to the region and paint its bounds with the shader.
 	private void FillRegion(IDrawingSession session, IGeometry clip, IGeometry gradientBounds, string? gradientRef, Color solid, float alpha)
 	{
-		if (gradientRef is { } reference && ResolveGradient(reference, gradientBounds, alpha) is { } shader)
+		if (gradientRef is { } reference && ResolveGradient(session.Factory, reference, gradientBounds, alpha) is { } shader)
 		{
 			using (shader)
 			{
@@ -227,17 +267,20 @@ internal sealed class ManagedSvg : ISvgDocument
 		}
 	}
 
-	// Strokes <paramref name="geometry"/>. The plain default stroke (butt cap / miter join, solid color, no dash) uses
-	// the fast StrokePath verb; any of a non-default cap/join, a dash pattern, or a gradient paint needs the WinUI
-	// stroke-fill region so the neutral fill verbs can carry it (StrokePath carries only color + width).
+	// Strokes <paramref name="geometry"/>. The plain default stroke (butt cap / miter join / default limit, solid
+	// color, no dash) uses the fast StrokePath verb where the backend advertises NativeStroking; anything else needs
+	// the WinUI stroke-fill region so the neutral fill verbs can carry it.
 	private void StrokeGeometry(IDrawingSession session, IGeometry geometry, SvgStyle style)
 	{
+		// StrokePath carries only color + width + join, so a non-default miter limit has to be widened too.
+		const float DefaultMiterLimit = 4f;
 		var needsStrokeFill = style.StrokeRef is not null
 			|| style.LineCap != StrokeCap.Butt
 			|| style.LineJoin != StrokeJoin.Miter
+			|| style.MiterLimit != DefaultMiterLimit
 			|| style.DashArray is { Length: > 0 };
 
-		if (!needsStrokeFill)
+		if (!needsStrokeFill && DrawingCapabilities.NativeStroking)
 		{
 			session.StrokePath(geometry, style.ResolvedStroke, style.StrokeWidth);
 			return;
@@ -251,32 +294,17 @@ internal sealed class ManagedSvg : ISvgDocument
 			DashCap = style.LineCap,
 			LineJoin = style.LineJoin,
 			MiterLimit = style.MiterLimit,
-			// StrokeStyle dash intervals are multiples of Thickness; SVG authors them in user units.
-			DashArray = ScaleToThickness(style.DashArray, style.StrokeWidth),
-			DashOffset = style.StrokeWidth > 0 ? style.DashOffset / style.StrokeWidth : 0f,
+			DashArray = style.DashArray,
+			DashOffset = style.DashOffset,
 		};
 
-		using var strokeFill = geometry.GetStrokeFillGeometry(strokeStyle);
+		using var strokeFill = geometry.GetStrokeFillGeometry(strokeStyle, GeometryFlatteningScale.From(session.TotalMatrix));
 		FillRegion(session, strokeFill, geometry, style.StrokeRef, style.ResolvedStroke, style.StrokeAlpha);
 	}
 
-	private static float[]? ScaleToThickness(float[]? dashes, float thickness)
-	{
-		if (dashes is not { Length: > 0 } || thickness <= 0)
-		{
-			return null;
-		}
-
-		var scaled = new float[dashes.Length];
-		for (var i = 0; i < dashes.Length; i++)
-		{
-			scaled[i] = dashes[i] / thickness;
-		}
-
-		return scaled;
-	}
-
-	private IShader? ResolveGradient(string reference, IGeometry geometry, float alpha)
+	// The factory comes from the drawing session rather than a field: a gradient shader is device-bound, and
+	// the device is only known when the document is actually being drawn, not when it was parsed.
+	private IShader? ResolveGradient(IDrawingFactory drawing, string reference, IGeometry geometry, float alpha)
 	{
 		if (!reference.StartsWith('#') || !_byId.TryGetValue(reference[1..], out var grad))
 		{
@@ -305,18 +333,29 @@ internal sealed class ManagedSvg : ISvgDocument
 
 		if (grad.Name.LocalName == "radialGradient")
 		{
-			var cx = MapX(Frac("cx", 0.5f));
-			var cy = MapY(Frac("cy", 0.5f));
-			var r = Frac("r", 0.5f) * (objectBoundingBox ? (float)Math.Max(bounds.Width, bounds.Height) : 1f);
-			return _drawing.CreateRadialGradientShader(
-				new Vector2(cx, cy), new Vector2(cx, cy), r, r, colors, positions, tileMode, localMatrix);
+			var cxFrac = Frac("cx", 0.5f);
+			var cyFrac = Frac("cy", 0.5f);
+			var rFrac = Frac("r", 0.5f);
+			// objectBoundingBox maps the unit square onto the bbox, so a circle there is an ellipse in user space —
+			// which is exactly what the per-axis radii of the shader express.
+			var radiusX = objectBoundingBox ? rFrac * (float)bounds.Width : rFrac;
+			var radiusY = objectBoundingBox ? rFrac * (float)bounds.Height : rFrac;
+			return drawing.CreateRadialGradientShader(
+				new Vector2(MapX(cxFrac), MapY(cyFrac)),
+				new Vector2(MapX(Frac("fx", cxFrac)), MapY(Frac("fy", cyFrac))),
+				radiusX,
+				radiusY,
+				colors,
+				positions,
+				tileMode,
+				localMatrix);
 		}
 
 		var x1 = MapX(Frac("x1", 0f));
 		var y1 = MapY(Frac("y1", 0f));
 		var x2 = MapX(Frac("x2", 1f));
 		var y2 = MapY(Frac("y2", 0f));
-		return _drawing.CreateLinearGradientShader(
+		return drawing.CreateLinearGradientShader(
 			new Vector2(x1, y1), new Vector2(x2, y2), colors, positions, tileMode, localMatrix);
 	}
 
@@ -486,8 +525,8 @@ internal sealed class ManagedSvg : ISvgDocument
 			if (n.Length == 4 && n[2] > 0 && n[3] > 0)
 			{
 				viewBox = new Rect(n[0], n[1], n[2], n[3]);
-				var w = ParseFloat((string?)root.Attribute("width"), n[2]);
-				var h = ParseFloat((string?)root.Attribute("height"), n[3]);
+				var w = IntrinsicLength((string?)root.Attribute("width"), n[2]);
+				var h = IntrinsicLength((string?)root.Attribute("height"), n[3]);
 				return new Size(w > 0 ? w : n[2], h > 0 ? h : n[3]);
 			}
 		}
@@ -497,6 +536,12 @@ internal sealed class ManagedSvg : ISvgDocument
 		viewBox = new Rect(0, 0, width, height);
 		return new Size(width, height);
 	}
+
+	/// <summary>The root's intrinsic width/height. A percentage sizes the svg against a viewport it has no knowledge
+	/// of — and <see cref="ParseFloat"/> would strip the '%' and read "100%" as 100 user units — so the viewBox
+	/// extent stands in.</summary>
+	private static float IntrinsicLength(string? s, float viewBoxExtent)
+		=> s is null || s.Trim().EndsWith('%') ? viewBoxExtent : ParseFloat(s, viewBoxExtent);
 
 	private static Matrix4x4 ToMatrix4x4(Matrix3x2 m) =>
 		new(m.M11, m.M12, 0, 0, m.M21, m.M22, 0, 0, 0, 0, 1, 0, m.M31, m.M32, 0, 1);
@@ -969,15 +1014,23 @@ internal sealed class ManagedSvg : ISvgDocument
 	/// <summary>The inheritable presentation state (fill/stroke/color/opacity/fill-rule/stroke geometry).</summary>
 	private readonly struct SvgStyle
 	{
+		/// <summary>The paint color as authored — what a child inherits. Opacity is applied once, into
+		/// <see cref="ResolvedFill"/>, so it cannot compound down the tree.</summary>
+		public Color FillColor { get; private init; }
 		public Color ResolvedFill { get; private init; }
 		public bool FillNone { get; private init; }
 		public string? FillRef { get; private init; }
 		public float FillAlpha { get; private init; }
 		public GeometryFillRule FillRule { get; private init; }
+		public Color StrokeColor { get; private init; }
 		public Color ResolvedStroke { get; private init; }
 		public bool StrokeNone { get; private init; }
 		public string? StrokeRef { get; private init; }
 		public float StrokeAlpha { get; private init; }
+		/// <summary>The accumulated <c>opacity</c> of every ancestor group, multiplied into this element's paints.</summary>
+		public float GroupAlpha { get; private init; }
+		/// <summary>Set by <c>display:none</c> / <c>visibility:hidden</c> — the element and its subtree do not paint.</summary>
+		public bool Hidden { get; private init; }
 		public float StrokeWidth { get; private init; }
 		public StrokeCap LineCap { get; private init; }
 		public StrokeJoin LineJoin { get; private init; }
@@ -990,13 +1043,16 @@ internal sealed class ManagedSvg : ISvgDocument
 
 		public static SvgStyle Root => new()
 		{
+			FillColor = Color.FromArgb(255, 0, 0, 0),
 			ResolvedFill = Color.FromArgb(255, 0, 0, 0),
 			FillNone = false,
 			FillAlpha = 1f,
 			FillRule = GeometryFillRule.NonZero,
+			StrokeColor = Color.FromArgb(255, 0, 0, 0),
 			ResolvedStroke = Color.FromArgb(255, 0, 0, 0),
 			StrokeNone = true,
 			StrokeAlpha = 1f,
+			GroupAlpha = 1f,
 			StrokeWidth = 1f,
 			LineCap = StrokeCap.Butt,
 			LineJoin = StrokeJoin.Miter,
@@ -1009,9 +1065,11 @@ internal sealed class ManagedSvg : ISvgDocument
 			var style = ParseStyle((string?)el.Attribute("style"));
 			string? Get(string name) => style.GetValueOrDefault(name) ?? (string?)el.Attribute(name);
 
-			var opacity = Get("opacity") is { } o ? ParseFloat(o, 1f) : 1f;
-			var fillOpacity = (Get("fill-opacity") is { } fo ? ParseFloat(fo, 1f) : 1f) * opacity;
-			var strokeOpacity = (Get("stroke-opacity") is { } so ? ParseFloat(so, 1f) : 1f) * opacity;
+			// `opacity` on a group dims everything it contains; approximate the group layer by carrying the product
+			// down and folding it into each descendant's paint alpha.
+			var groupAlpha = GroupAlpha * (Get("opacity") is { } o ? ParseFloat(o, 1f) : 1f);
+			var fillOpacity = (Get("fill-opacity") is { } fo ? ParseFloat(fo, 1f) : 1f) * groupAlpha;
+			var strokeOpacity = (Get("stroke-opacity") is { } so ? ParseFloat(so, 1f) : 1f) * groupAlpha;
 
 			// `color` feeds currentColor and is itself inheritable.
 			var currentColor = CurrentColor;
@@ -1022,18 +1080,18 @@ internal sealed class ManagedSvg : ISvgDocument
 
 			var fillNone = FillNone;
 			var fillRef = FillRef;
-			var fill = ResolvedFill;
+			var fill = FillColor;
 			if (Get("fill") is { } fillText && !IsInherit(fillText))
 			{
-				(fillNone, fillRef, fill) = ResolvePaint(fillText, fillOpacity, ResolvedFill, currentColor);
+				(fillNone, fillRef, fill) = ResolvePaint(fillText, FillColor, currentColor);
 			}
 
 			var strokeNone = StrokeNone;
 			var strokeRef = StrokeRef;
-			var stroke = ResolvedStroke;
+			var stroke = StrokeColor;
 			if (Get("stroke") is { } strokeText && !IsInherit(strokeText))
 			{
-				(strokeNone, strokeRef, stroke) = ResolvePaint(strokeText, strokeOpacity, ResolvedStroke, currentColor);
+				(strokeNone, strokeRef, stroke) = ResolvePaint(strokeText, StrokeColor, currentColor);
 			}
 
 			var fillRule = Get("fill-rule") is { } fr
@@ -1078,15 +1136,19 @@ internal sealed class ManagedSvg : ISvgDocument
 
 			return new SvgStyle
 			{
+				FillColor = fill,
 				ResolvedFill = ApplyAlpha(fill, fillOpacity),
 				FillNone = fillNone,
 				FillRef = fillRef,
 				FillAlpha = fillOpacity,
 				FillRule = fillRule,
+				StrokeColor = stroke,
 				ResolvedStroke = ApplyAlpha(stroke, strokeOpacity),
 				StrokeNone = strokeNone,
 				StrokeRef = strokeRef,
 				StrokeAlpha = strokeOpacity,
+				GroupAlpha = groupAlpha,
+				Hidden = Get("display")?.Trim() is "none" || Get("visibility")?.Trim() is "hidden" or "collapse",
 				StrokeWidth = Get("stroke-width") is { } sw ? ParseFloat(sw, StrokeWidth) : StrokeWidth,
 				LineCap = lineCap,
 				LineJoin = lineJoin,
@@ -1097,7 +1159,8 @@ internal sealed class ManagedSvg : ISvgDocument
 			};
 		}
 
-		private static (bool none, string? reference, Color color) ResolvePaint(string text, float alpha, Color current, Color currentColor)
+		// Returns the paint color as authored; opacity is applied once by the caller.
+		private static (bool none, string? reference, Color color) ResolvePaint(string text, Color current, Color currentColor)
 		{
 			text = text.Trim();
 			if (text == "none")
@@ -1118,11 +1181,11 @@ internal sealed class ManagedSvg : ISvgDocument
 				var rest = close >= 0 && close + 1 < text.Length ? text[(close + 1)..].Trim() : string.Empty;
 				var fallback = rest.Length == 0
 					? current
-					: IsCurrentColor(rest) ? currentColor : ParseColor(rest, alpha) ?? current;
+					: IsCurrentColor(rest) ? currentColor : ParseColor(rest, 1f) ?? current;
 				return (false, reference, fallback);
 			}
 
-			return (false, null, ParseColor(text, alpha) ?? current);
+			return (false, null, ParseColor(text, 1f) ?? current);
 		}
 
 		private static bool IsInherit(string text) => string.Equals(text.Trim(), "inherit", StringComparison.Ordinal);

@@ -7,8 +7,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
-using Uno.WebGpu.Native;
-using static Uno.WebGpu.Native.WGPU;
+using Silk.NET.WebGPU;
 using Uno.UI.Composition.Drawing;
 using Windows.Graphics.Effects.Interop;
 using Windows.Foundation;
@@ -65,13 +64,14 @@ struct PassU { basis: vec4<f32> };
 // space rather than folded into each op: that is what lets a move rewrite this one block instead of every op's.
 // xoff.zw = the pass basis: those clips are ABSOLUTE device pixels, while the fragment position they are tested at
 // is relative to the target - a layer sheet slot does not share the window's origin (ClipU folds the same shift
-// into finv).
+// into finv). rect.y = device pixels per target pixel, above 1 for a shadow layer rendered smaller than it covers
+// (0 reads as 1).
 struct SiteU { xform: vec4<f32>, xoff: vec4<f32>, ctrl: vec4<f32>, rect: vec4<f32>, inner: vec4<f32>, entries: array<ClipEntry, 4> };
 @group(3) @binding(0) var<uniform> site: SiteU;
 // The site's clips at fp, the fragment's position in the target, lifted to the device space they were recorded in.
 fn siteCov(fp: vec2<f32>) -> f32 {
   if (site.ctrl.x < 0.5 && site.ctrl.y < 0.5) { return 1.0; }
-  let dp = fp + site.xoff.zw;
+  let dp = fp * max(site.rect.y, 1.0) + site.xoff.zw;
   if (all(dp >= site.inner.xy) && all(dp <= site.inner.zw)) { return 1.0; }
   var cov = 1.0;
   if (site.ctrl.y > 0.5) {
@@ -86,8 +86,10 @@ fn siteCov(fp: vec2<f32>) -> f32 {
   if (n > 3u) { cov = cov * entryCov(site.entries[3], dp); }
   return cov;
 }
+// z is the replay site's draw order, 0 (oldest) to 1 (newest), so the occlusion prepass can reject a fragment a
+// later opaque site already covered. Zero when no depth attachment is bound, which every compare then passes.
 fn project(p: vec2<f32>) -> vec4<f32> {
-  return vec4<f32>((p.x - proj.basis.x) / proj.basis.z * 2.0 - 1.0, 1.0 - (p.y - proj.basis.y) / proj.basis.w * 2.0, 0.0, 1.0);
+  return vec4<f32>((p.x - proj.basis.x) / proj.basis.z * 2.0 - 1.0, 1.0 - (p.y - proj.basis.y) / proj.basis.w * 2.0, site.rect.x, 1.0);
 }
 // Places a vertex: the op's pixel-space transform (xform = [m00 m01 m10 m11], xoff.xy = translation; identity for
 // geometry built where it lands), then the pass projection. Re-stamped as one uniform write when a cached visual
@@ -155,8 +157,11 @@ fn clipCovMapped(fc: vec2<f32>) -> f32 {
   // so the per-op device SCISSOR is cull-only and the emit collapses SetScissorRect calls (see AabbInClipU).
   var cov = 1.0;
   if (clip.ctrl.y > 0.5) {
-    let dmin = fc - vec2<f32>(clip.ctrl.z, clip.ctrl.w);
-    let dmax = vec2<f32>(clip.size.z, clip.size.w) - fc;
+    // fc is in the recording's units: size.xy (units per device pixel across the x and y edges) turns the distances
+    // into pixels, so the edge ramp stays one device pixel wide at any scale.
+    let k = select(clip.size.xy, vec2<f32>(1.0, 1.0), clip.size.xy <= vec2<f32>(0.0, 0.0));
+    let dmin = (fc - vec2<f32>(clip.ctrl.z, clip.ctrl.w)) / k;
+    let dmax = (vec2<f32>(clip.size.z, clip.size.w) - fc) / k;
     cov = clamp(0.5 + min(min(dmin.x, dmin.y), min(dmax.x, dmax.y)), 0.0, 1.0);
   }
   let n = u32(clip.ctrl.x);   // ctrl.x is the live count
@@ -241,6 +246,16 @@ struct VOut { @builtin(position) p: vec4<f32>, @location(0) c: vec4<f32>, @locat
 @fragment fn fs(i: VOut) -> @location(0) vec4<f32> { return vec4<f32>(i.c.rgb, i.c.a * clipCov(i.rp, i.uv, i.p.xy)); }";
 	// Draws a texture over the whole target (a fullscreen triangle, exact texel fetch): the effect evaluator's final
 	// draw. Optional colour matrix (params.x); params.z = a sub-rect at m1.xy of size m0.zw.
+	// Fills the scissor with one colour, replacing what is there. A render pass clears its WHOLE attachment, so a
+	// partial repaint cannot clear through the load op and clears by drawing this instead.
+	private const string ClearRectWgsl = @"
+@group(0) @binding(0) var<uniform> col: vec4<f32>;
+@vertex fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
+  var pts = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
+  return vec4<f32>(pts[vi], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4<f32> { return col; }";
+
 	private const string CompositeWgsl = @"
 struct CU { params: vec4<f32>, m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, m3: vec4<f32>, off: vec4<f32> };
 @group(0) @binding(0) var src: texture_2d<f32>;
@@ -609,13 +624,27 @@ fn sdRR(p: vec2<f32>, hf: vec2<f32>, radii: vec4<f32>) -> f32 {
   let d = sdRR(i.p, i.hf, i.radii);
   var cov = clamp(0.5 - d / sxy, 0.0, 1.0);
   // sxy above stays outside the `if`: WGSL forbids derivatives in non-uniform control flow, and Dawn (browser
-  // WebGPU) enforces that strictly even though wgpu-native (desktop) tolerated it. The inner rect only gets
-  // APPLIED when one is present.
-  let di = sdRR(i.p - i.icenter, i.ihalf, i.iradii);
-  if (i.ihalf.x >= 0.0) { cov = cov * clamp(0.5 + di / sxy, 0.0, 1.0); }
+  // WebGPU) enforces that strictly even though wgpu-native (desktop) tolerated it. The inner SDF has no
+  // derivative of its own, so it belongs inside -- most rounded rects are a plain fill with no ring to cut.
+  if (i.ihalf.x >= 0.0) {
+    let di = sdRR(i.p - i.icenter, i.ihalf, i.iradii);
+    cov = cov * clamp(0.5 + di / sxy, 0.0, 1.0);
+  }
   cov = cov * clipCov(i.rp, vec2<f32>(0.0), i.pos.xy);
   return vec4<f32>(i.col.rgb, i.col.a * cov);
 }";
+	// The occlusion prepass: one quad per opaque cover, writing only depth. The depth test and write are fixed
+	// function, so the whole pass costs a vertex per corner and a depth compare per pixel.
+	private const string DepthPrepassWgsl = @"
+struct PassU { basis: vec4<f32> };
+@group(0) @binding(0) var<uniform> proj: PassU;
+@vertex fn vs(@location(0) p: vec3<f32>) -> @builtin(position) vec4<f32> {
+  return vec4<f32>((p.x - proj.basis.x) / proj.basis.z * 2.0 - 1.0, 1.0 - (p.y - proj.basis.y) / proj.basis.w * 2.0, p.z, 1.0);
+}
+// A pipeline's colour targets must match the pass's, so the prepass declares one and writes nothing to it
+// (WriteMask None). The fragment stage exists only to satisfy that; depth is written by fixed function.
+@fragment fn fs() -> @location(0) vec4<f32> { return vec4<f32>(0.0); }";
+
 	private const string ImageWgsl = @"
 struct VOut { @builtin(position) p: vec4<f32>, @location(0) uv: vec2<f32>, @location(1) rp: vec2<f32> };
 // edge = the quad's own uv rect (u0,v0,u1,v1); ctrl2.x > 0.5 = antialias the quad's edges analytically.

@@ -55,5 +55,13 @@ partial class CompositionClip
 			session.ClipPath(clipPath);
 			clipPath.Release();
 		}
+		else
+		{
+			// A clip that yields no shape at all (a geometric clip with no geometry) clips everything out, which is
+			// what master did: its render path went through GetPrePaintingClipping, which returned an EMPTY path
+			// for this state and clipped the visual and its subtree away. GetPrePaintingClipping still reads it
+			// that way here, so painting unclipped would contradict this visual's own shadow and automation bounds.
+			session.ClipRect(default);
+		}
 	}
 }

@@ -1,4 +1,4 @@
-#nullable enable
+﻿#nullable enable
 
 using System;
 using System.Collections.Generic;
@@ -19,6 +19,7 @@ using System.Numerics;
 using Windows.Graphics.Display;
 using Microsoft.UI.Composition;
 using Uno.UI.Composition.Drawing;
+using Uno.UI.Helpers.Boxes;
 
 namespace Microsoft.UI.Xaml.Media.Imaging
 {
@@ -65,7 +66,7 @@ namespace Microsoft.UI.Xaml.Media.Imaging
 		[global::Uno.NotImplemented("IS_UNIT_TESTS", "__WASM__", "__NETSTD_REFERENCE__")]
 #endif
 		public static DependencyProperty PixelWidthProperty { get; } = DependencyProperty.Register(
-			"PixelWidth", typeof(int), typeof(RenderTargetBitmap), new FrameworkPropertyMetadata(default(int)));
+			"PixelWidth", typeof(int), typeof(RenderTargetBitmap), new FrameworkPropertyMetadata(IntBoxes.Zero));
 
 #if !HAS_RENDER_TARGET_BITMAP
 		[global::Uno.NotImplemented("IS_UNIT_TESTS", "__WASM__", "__NETSTD_REFERENCE__")]
@@ -73,7 +74,7 @@ namespace Microsoft.UI.Xaml.Media.Imaging
 		public int PixelWidth
 		{
 			get => (int)GetValue(PixelWidthProperty);
-			private set => SetValue(PixelWidthProperty, value);
+			private set => SetValue(PixelWidthProperty, Boxer.Box(value));
 		}
 		#endregion
 
@@ -83,7 +84,7 @@ namespace Microsoft.UI.Xaml.Media.Imaging
 		[global::Uno.NotImplemented("IS_UNIT_TESTS", "__WASM__", "__NETSTD_REFERENCE__")]
 #endif
 		public static DependencyProperty PixelHeightProperty { get; } = DependencyProperty.Register(
-			"PixelHeight", typeof(int), typeof(RenderTargetBitmap), new FrameworkPropertyMetadata(default(int)));
+			"PixelHeight", typeof(int), typeof(RenderTargetBitmap), new FrameworkPropertyMetadata(IntBoxes.Zero));
 
 #if !HAS_RENDER_TARGET_BITMAP
 		[global::Uno.NotImplemented("IS_UNIT_TESTS", "__WASM__", "__NETSTD_REFERENCE__")]
@@ -91,7 +92,7 @@ namespace Microsoft.UI.Xaml.Media.Imaging
 		public int PixelHeight
 		{
 			get => (int)GetValue(PixelHeightProperty);
-			private set => SetValue(PixelHeightProperty, value);
+			private set => SetValue(PixelHeightProperty, Boxer.Box(value));
 		}
 		#endregion
 
@@ -113,6 +114,8 @@ namespace Microsoft.UI.Xaml.Media.Imaging
 			UnmanagedArrayOfBytes copy = new UnmanagedArrayOfBytes(_buffer.Length);
 			Unsafe.CopyBlock(copy.Pointer.ToPointer(), _buffer.Pointer.ToPointer(), (uint)_buffer.Length);
 
+			// Not bound to ct: a superseded open must still hand its surface to Open, which releases it, and a run that never
+			// started would leave the open waiting.
 			TaskCompletionSource<ImageData> tcs = new TaskCompletionSource<ImageData>();
 			_ = Task.Run(() =>
 			{
@@ -124,13 +127,13 @@ namespace Microsoft.UI.Xaml.Media.Imaging
 				{
 					tcs.TrySetResult(ImageData.FromError(e));
 				}
-			}, ct);
+			}, CancellationToken.None);
 
 			asyncImage = tcs.Task.ContinueWith(task =>
 			{
 				InvalidateImageSource();
 				return task.Result;
-			}, ct, TaskContinuationOptions.None, TaskScheduler.FromCurrentSynchronizationContext());
+			}, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.FromCurrentSynchronizationContext());
 
 			return true;
 		}
@@ -322,7 +325,10 @@ namespace Microsoft.UI.Xaml.Media.Imaging
 		{
 			// Capture the factory once — the texture and its snapshot must come from the same backend even if the
 			// active backend were swapped across the await.
-			var factory = DrawingFactory.Current;
+			// The visual being captured names the backend; resolved (and the texture built) before the await, so the
+			// snapshot reads back through the very factory that produced it.
+			var factory = visual.CompositionTarget?.Renderer
+				?? throw new InvalidOperationException("Cannot render a visual that is not attached to a window's composition target.");
 			using var texture = RenderToTexture(factory, visual, render);
 			using var image = await factory.SnapshotAsync(texture);
 			CopyPixelsTo(image, render.Buffer.Pointer, render.ByteCount);

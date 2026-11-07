@@ -15,7 +15,7 @@ using ProGPU.Scene;
 using ProGPU.Vector;
 using Silk.NET.WebGPU;
 using Uno.UI.Composition.Drawing;
-using N = Uno.WebGpu.Native;
+using System.Runtime.InteropServices;
 using UColor = unouwp::Windows.UI.Color;
 using URect = unofoundation::Windows.Foundation.Rect;
 using PRect = ProGPU.Scene.Rect;
@@ -45,7 +45,7 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 	private readonly Vector4 _defaultClearColor;
 	private GpuTexture? _hostBackdropTarget;
 	private IWebGpuRenderTarget? _presentedTarget;
-	private nint _presentedColorView;
+	private TextureView* _presentedColorView;
 	private int _presentedWidth;
 	private int _presentedHeight;
 	private Vector4 _presentedClearColor;
@@ -61,7 +61,7 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 		{
 			throw new PlatformNotSupportedException("The native ProGPU provider requires native WebGPU handles. Browser GPUDevice and GPUTextureView objects require a direct browser provider.");
 		}
-		if (device.Device == 0 || device.Queue == 0)
+		if (device.Device == null || device.Queue == null)
 		{
 			throw new ArgumentException("A live native WebGPU device and queue are required.", nameof(device));
 		}
@@ -70,49 +70,34 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 			throw new ArgumentOutOfRangeException(nameof(options), "ProGPU primary sample count must be 1 or 4.");
 		}
 		_options = options;
-		_format = ToSilkFormat(device.ColorFormat);
+		_format = device.ColorFormat;
 		_context.MaximumDeferredQueueSubmissions =
 			options.MaximumDeferredQueueSubmissions;
 		_context.InitializeExternalNativeDevice(
-			new UnoModernWebGpuApi(),
-			new UnoBorrowedWebGpuLifetime(device.Device, device.Queue),
+			new UnoHostWebGpuApi(device.Api, device.Api),
+			new UnoBorrowedWebGpuLifetime(device),
 			(Device*)device.Device,
 			(Queue*)device.Queue,
 			_format);
-		ProGpuDiagnostics.PublishGraphicsIdentity(GetGraphicsIdentity(device.Adapter));
+		ProGpuDiagnostics.PublishGraphicsIdentity(GetGraphicsIdentity(device));
 		_compositor = new Compositor(_context, _format, options.Compositor);
 		_defaultClearColor = _compositor.ClearColor;
 		_ = ProGpuDiagnostics.NextDeviceGeneration();
 	}
 
-	private static ProGpuGraphicsIdentity GetGraphicsIdentity(nint adapter)
+	private static ProGpuGraphicsIdentity GetGraphicsIdentity(IWebGpuDeviceContext device)
 	{
-		var info = new N.WGPUAdapterInfo();
-		if (adapter == 0 || N.WGPU.wgpuAdapterGetInfo(adapter, &info) != N.WGPUStatus.Success)
+		if (device.Adapter == null)
 		{
 			return new ProGpuGraphicsIdentity("WebGPU", null, null);
 		}
-
-		try
-		{
-			var api = info.BackendType == N.WGPUBackendType.Undefined
-				? "WebGPU"
-				: $"WebGPU ({info.BackendType})";
-			return new ProGpuGraphicsIdentity(
-				api,
-				DecodeString(info.Device) ?? DecodeString(info.Description),
-				info.AdapterType.ToString());
-		}
-		finally
-		{
-			N.WGPU.wgpuAdapterInfoFreeMembers(info);
-		}
+		var properties = new AdapterProperties();
+		device.Api.AdapterGetProperties(device.Adapter, &properties);
+		return new ProGpuGraphicsIdentity(
+			$"WebGPU ({properties.BackendType})",
+			Marshal.PtrToStringUTF8((nint)properties.Name),
+			properties.AdapterType.ToString());
 	}
-
-	private static string? DecodeString(N.WGPUStringView value) =>
-		value.Data == 0 || value.Length == 0
-			? null
-			: Encoding.UTF8.GetString(new ReadOnlySpan<byte>((void*)value.Data, checked((int)value.Length)));
 
 	internal WgpuContext Context => _context;
 	internal ProGpuBackendOptions Options => _options;
@@ -123,11 +108,11 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 		return new ProGpuCommandRecorder(this);
 	}
 
-	public IPresentSession BeginPresent(IWebGpuRenderTarget target)
+	public IPresentSession BeginPresent(IWebGpuRenderTarget target, ReadOnlySpan<URect> damage = default)
 	{
 		ThrowIfDisposed();
 		ArgumentNullException.ThrowIfNull(target);
-		if (target.ColorView == 0) throw new ArgumentException("A live WebGPU color view is required.", nameof(target));
+		if (target.ColorView == null) throw new ArgumentException("A live WebGPU color view is required.", nameof(target));
 		return new ProGpuPresentSession(this, target, Interlocked.Increment(ref _frameNumber));
 	}
 
@@ -137,100 +122,109 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 	/// </summary>
 	public void WaitForGpuCompletion()
 	{
-		ThrowIfDisposed();
-		_context.WaitIdle();
+		lock (_context.RenderLock)
+		{
+			ThrowIfDisposed();
+			_context.WaitIdle();
+		}
 	}
 
 	internal void Present(IWebGpuRenderTarget target, GpuPicture picture, Vector4? leadingClearColor, bool hasHostBackdrop, long frame, double recordMilliseconds)
 	{
-		var submit = Stopwatch.StartNew();
-		var sceneDumpPath = ProGpuDiagnostics.TryDumpScene(picture, frame);
-		var content = picture;
-		var transform = Matrix4x4.Identity;
-		var clearColor = leadingClearColor ?? _defaultClearColor;
-		if (TryGetPresentationContent(picture, out var retainedContent, out var retainedTransform, out var explicitClear))
+		ProGpuFrameMetrics frameMetrics;
+		lock (_context.RenderLock)
 		{
-			content = retainedContent;
-			transform = retainedTransform;
-			clearColor = explicitClear ?? clearColor;
+			ThrowIfDisposed();
+			var submit = Stopwatch.StartNew();
+			var sceneDumpPath = ProGpuDiagnostics.TryDumpScene(picture, frame);
+			var content = picture;
+			var transform = Matrix4x4.Identity;
+			var clearColor = leadingClearColor ?? _defaultClearColor;
+			if (TryGetPresentationContent(picture, out var retainedContent, out var retainedTransform, out var explicitClear))
+			{
+				content = retainedContent;
+				transform = retainedTransform;
+				clearColor = explicitClear ?? clearColor;
+			}
+			_compositor.ClearColor = clearColor;
+			var contentChanged = _presentVisual.Update(content, transform);
+			var pixelWidth = Math.Max(1, target.Width);
+			var pixelHeight = Math.Max(1, target.Height);
+			var targetContentReused =
+				!contentChanged &&
+				!hasHostBackdrop &&
+				sceneDumpPath is null &&
+				ReferenceEquals(_presentedTarget, target) &&
+				_presentedColorView == target.ColorView &&
+				_presentedWidth == pixelWidth &&
+				_presentedHeight == pixelHeight &&
+				_presentedClearColor == clearColor &&
+				_presentedTextureContentVersion == _context.TextureContentVersion;
+			if (!targetContentReused && hasHostBackdrop)
+			{
+				_presentedTarget = null;
+				EnsureHostBackdropTarget(pixelWidth, pixelHeight);
+				_compositor.RenderOffscreen(
+					_presentVisual,
+					(uint)pixelWidth,
+					(uint)pixelHeight,
+					_hostBackdropTarget!,
+					0f,
+					1f,
+					clearColor);
+				GpuTextureBlitter.Blit(
+					_hostBackdropTarget!,
+					(TextureView*)target.ColorView,
+					_format);
+			}
+			else if (!targetContentReused)
+			{
+				_compositor.RenderScene(
+					_presentVisual,
+					(uint)pixelWidth,
+					(uint)pixelHeight,
+					(TextureView*)target.ColorView);
+				_presentedTarget = target;
+				_presentedColorView = target.ColorView;
+				_presentedWidth = pixelWidth;
+				_presentedHeight = pixelHeight;
+				_presentedClearColor = clearColor;
+				_presentedTextureContentVersion = _context.TextureContentVersion;
+			}
+			if (sceneDumpPath is not null)
+			{
+				ProGpuDiagnostics.AppendCompositorMetrics(sceneDumpPath, _compositor.Metrics);
+			}
+			submit.Stop();
+			var metrics = targetContentReused ? default : _compositor.Metrics;
+			frameMetrics = new ProGpuFrameMetrics(frame, recordMilliseconds, submit.Elapsed.TotalMilliseconds, picture.CommandCount, metrics.IncrementalSceneUploadBytes, checked((int)ProGpuDiagnostics.UnsupportedOperationCount))
+			{
+				CompositorFrameMilliseconds = metrics.FrameTimeMs,
+				SceneCompileMilliseconds = metrics.VisualTreeCompileTimeMs,
+				GpuUploadMilliseconds = metrics.GpuUploadTimeMs,
+				RenderPassMilliseconds = metrics.RenderPassTimeMs,
+				DrawCallCount = metrics.DrawCallsCount,
+				VectorVertexCount = metrics.VectorVerticesCount,
+				VectorIndexCount = metrics.VectorIndicesCount,
+				TextVertexCount = metrics.TextVerticesCount,
+				SceneUploadBatchCount = metrics.SceneUploadBatchCount,
+				SceneUploadCopyCount = metrics.SceneUploadCopyCount,
+				MaskRenderPassCount = metrics.MaskRenderPassCount,
+				MaskRenderDrawCallCount = metrics.MaskRenderDrawCallCount,
+				MaskTexturePeakDemand = metrics.MaskTexturePeakDemand,
+				RetainedCompositionPictureCount = metrics.RetainedCompositionPictureCount,
+				RetainedCompositionPictureHits = metrics.RetainedCompositionPictureHits,
+				RetainedCompositionPictureMisses = metrics.RetainedCompositionPictureMisses,
+				RetainedCompositionPictureCompilations = metrics.RetainedCompositionPictureCompilations,
+				SceneCacheHit = metrics.SceneCacheHit,
+				RenderBundleCacheHit = metrics.RenderBundleCacheHit,
+				RenderBundleRecorded = metrics.RenderBundleRecorded,
+				RenderBundleDrawCallCount = metrics.RenderBundleDrawCallCount,
+				SceneCacheMissReason = metrics.SceneCacheMissReason,
+				TargetContentReused = targetContentReused,
+			};
 		}
-		_compositor.ClearColor = clearColor;
-		var contentChanged = _presentVisual.Update(content, transform);
-		var pixelWidth = Math.Max(1, target.Width);
-		var pixelHeight = Math.Max(1, target.Height);
-		var targetContentReused =
-			!contentChanged &&
-			!hasHostBackdrop &&
-			sceneDumpPath is null &&
-			ReferenceEquals(_presentedTarget, target) &&
-			_presentedColorView == target.ColorView &&
-			_presentedWidth == pixelWidth &&
-			_presentedHeight == pixelHeight &&
-			_presentedClearColor == clearColor &&
-			_presentedTextureContentVersion == _context.TextureContentVersion;
-		if (!targetContentReused && hasHostBackdrop)
-		{
-			_presentedTarget = null;
-			EnsureHostBackdropTarget(pixelWidth, pixelHeight);
-			_compositor.RenderOffscreen(
-				_presentVisual,
-				(uint)pixelWidth,
-				(uint)pixelHeight,
-				_hostBackdropTarget!,
-				0f,
-				1f,
-				clearColor);
-			GpuTextureBlitter.Blit(
-				_hostBackdropTarget!,
-				(TextureView*)target.ColorView,
-				_format);
-		}
-		else if (!targetContentReused)
-		{
-			_compositor.RenderScene(
-				_presentVisual,
-				(uint)pixelWidth,
-				(uint)pixelHeight,
-				(TextureView*)target.ColorView);
-			_presentedTarget = target;
-			_presentedColorView = target.ColorView;
-			_presentedWidth = pixelWidth;
-			_presentedHeight = pixelHeight;
-			_presentedClearColor = clearColor;
-			_presentedTextureContentVersion = _context.TextureContentVersion;
-		}
-		if (sceneDumpPath is not null)
-		{
-			ProGpuDiagnostics.AppendCompositorMetrics(sceneDumpPath, _compositor.Metrics);
-		}
-		submit.Stop();
-		var metrics = targetContentReused ? default : _compositor.Metrics;
-		ProGpuDiagnostics.Publish(new ProGpuFrameMetrics(frame, recordMilliseconds, submit.Elapsed.TotalMilliseconds, picture.CommandCount, metrics.IncrementalSceneUploadBytes, checked((int)ProGpuDiagnostics.UnsupportedOperationCount))
-		{
-			CompositorFrameMilliseconds = metrics.FrameTimeMs,
-			SceneCompileMilliseconds = metrics.VisualTreeCompileTimeMs,
-			GpuUploadMilliseconds = metrics.GpuUploadTimeMs,
-			RenderPassMilliseconds = metrics.RenderPassTimeMs,
-			DrawCallCount = metrics.DrawCallsCount,
-			VectorVertexCount = metrics.VectorVerticesCount,
-			VectorIndexCount = metrics.VectorIndicesCount,
-			TextVertexCount = metrics.TextVerticesCount,
-			SceneUploadBatchCount = metrics.SceneUploadBatchCount,
-			SceneUploadCopyCount = metrics.SceneUploadCopyCount,
-			MaskRenderPassCount = metrics.MaskRenderPassCount,
-			MaskRenderDrawCallCount = metrics.MaskRenderDrawCallCount,
-			MaskTexturePeakDemand = metrics.MaskTexturePeakDemand,
-			RetainedCompositionPictureCount = metrics.RetainedCompositionPictureCount,
-			RetainedCompositionPictureHits = metrics.RetainedCompositionPictureHits,
-			RetainedCompositionPictureMisses = metrics.RetainedCompositionPictureMisses,
-			RetainedCompositionPictureCompilations = metrics.RetainedCompositionPictureCompilations,
-			SceneCacheHit = metrics.SceneCacheHit,
-			RenderBundleCacheHit = metrics.RenderBundleCacheHit,
-			RenderBundleRecorded = metrics.RenderBundleRecorded,
-			RenderBundleDrawCallCount = metrics.RenderBundleDrawCallCount,
-			SceneCacheMissReason = metrics.SceneCacheMissReason,
-			TargetContentReused = targetContentReused,
-		});
+		ProGpuDiagnostics.Publish(frameMetrics);
 	}
 
 	private static bool TryGetPresentationContent(
@@ -296,17 +290,22 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 		using var recorder = new ProGpuCommandRecorder(this);
 		render(recorder);
 		using var record = (ProGpuRenderRecord)recorder.Finish();
-		var texture = NewTexture(pixelWidth, pixelHeight);
-		_compositor.RenderOffscreen(
-			new PictureVisual(record.Picture),
-			(uint)pixelWidth,
-			(uint)pixelHeight,
-			texture,
-			0,
-			1f,
-			record.LeadingClearColor ?? Vector4.Zero);
-		texture.NotifyExternalContentChanged();
-		return new ProGpuTexture(texture);
+		// The native host presents on its render thread while UI code can request captures.
+		lock (_context.RenderLock)
+		{
+			ThrowIfDisposed();
+			var texture = NewTexture(pixelWidth, pixelHeight);
+			_compositor.RenderOffscreen(
+				new PictureVisual(record.Picture),
+				(uint)pixelWidth,
+				(uint)pixelHeight,
+				texture,
+				0,
+				1f,
+				record.LeadingClearColor ?? Vector4.Zero);
+			texture.NotifyExternalContentChanged();
+			return new ProGpuTexture(texture);
+		}
 	}
 
 	public Task<IImage> SnapshotAsync(ITexture texture)
@@ -319,21 +318,25 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 		var lease = new ProGpuDrawingResourceLease(texture);
 		return Task.Run<IImage>(() =>
 		{
-			using var retained = lease;
-			var pixels = new byte[checked(native.PixelWidth * native.PixelHeight * 4)];
-			using var readback = new GpuTextureReadbackBuffer(_context);
-			fixed (byte* destination = pixels)
+			lock (_context.RenderLock)
 			{
-				if (!readback.TryReadTextureRows(native.Texture, (uint)native.PixelWidth, (uint)native.PixelHeight, destination, (uint)native.PixelWidth * 4))
+				using var retained = lease;
+				ThrowIfDisposed();
+				var pixels = new byte[checked(native.PixelWidth * native.PixelHeight * 4)];
+				using var readback = new GpuTextureReadbackBuffer(_context);
+				fixed (byte* destination = pixels)
 				{
-					throw new InvalidOperationException($"ProGPU texture readback failed ({readback.LastMapStatus}).");
+					if (!readback.TryReadTextureRows(native.Texture, (uint)native.PixelWidth, (uint)native.PixelHeight, destination, (uint)native.PixelWidth * 4))
+					{
+						throw new InvalidOperationException($"ProGPU texture readback failed ({readback.LastMapStatus}).");
+					}
 				}
+				if (_format is TextureFormat.Rgba8Unorm or TextureFormat.Rgba8UnormSrgb)
+				{
+					for (var i = 0; i < pixels.Length; i += 4) (pixels[i], pixels[i + 2]) = (pixels[i + 2], pixels[i]);
+				}
+				return new ProGpuImageEncoderDecoder().CreateImage(native.PixelWidth, native.PixelHeight, pixels);
 			}
-			if (_format is TextureFormat.Rgba8Unorm or TextureFormat.Rgba8UnormSrgb)
-			{
-				for (var i = 0; i < pixels.Length; i += 4) (pixels[i], pixels[i + 2]) = (pixels[i + 2], pixels[i]);
-			}
-			return new ProGpuImageEncoderDecoder().CreateImage(native.PixelWidth, native.PixelHeight, pixels);
 		});
 	}
 
@@ -355,9 +358,13 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 		{
 			for (var i = 0; i < rgba.Length; i += 4) (rgba[i], rgba[i + 2]) = (rgba[i + 2], rgba[i]);
 		}
-		var texture = NewTexture(pixelWidth, pixelHeight);
-		texture.WritePixels<byte>(rgba);
-		return new ProGpuTexture(texture);
+		lock (_context.RenderLock)
+		{
+			ThrowIfDisposed();
+			var texture = NewTexture(pixelWidth, pixelHeight);
+			texture.WritePixels<byte>(rgba);
+			return new ProGpuTexture(texture);
+		}
 	}
 
 	public IShader CreateLinearGradientShader(Vector2 start, Vector2 end, UColor[] colors, float[] colorPositions, GradientTileMode tileMode, Matrix3x2 localMatrix)
@@ -395,9 +402,9 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 	public IEffectFilter? CreateEffectFilter(EffectNode tree, URect bounds)
 	{
 		ArgumentNullException.ThrowIfNull(tree);
-		if (tree is BlendEffectNode { Foreground: SourceInput, Background: ColorInput or TextureInput } blend)
+		if (tree is BlendEffectNode { Foreground: SourceInput or ColorInput or TextureInput, Background: ColorInput or TextureInput } blend)
 		{
-			return new ProGpuEffectFilter(new ProGpuBlendEffect(blend.Background, blend.Mode, new PRect((float)bounds.X, (float)bounds.Y, (float)bounds.Width, (float)bounds.Height)));
+			return new ProGpuEffectFilter(new ProGpuBlendEffect(blend.Background, blend.Mode, new PRect((float)bounds.X, (float)bounds.Y, (float)bounds.Width, (float)bounds.Height), blend.Foreground is SourceInput ? null : blend.Foreground));
 		}
 		if (TryCompileBackdrop(tree, out var backdrop))
 		{
@@ -454,22 +461,19 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 
 	public void Dispose()
 	{
-		if (_disposed) return;
-		_disposed = true;
-		_presentedTarget = null;
-		_hostBackdropTarget?.Dispose();
-		_hostBackdropTarget = null;
-		_compositor.Dispose();
-		_context.Dispose();
+		lock (_context.RenderLock)
+		{
+			if (_disposed) return;
+			_disposed = true;
+			_presentedTarget = null;
+			_hostBackdropTarget?.Dispose();
+			_hostBackdropTarget = null;
+			_compositor.Dispose();
+			_context.Dispose();
+		}
 	}
 
 	private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(_disposed, this);
-	private static TextureFormat ToSilkFormat(uint format)
-	{
-		var modern = (N.WGPUTextureFormat)format;
-		if (Enum.TryParse<TextureFormat>(modern.ToString(), true, out var mapped) && mapped != TextureFormat.Undefined) return mapped;
-		return TextureFormat.Rgba8Unorm;
-	}
 	private static GradientStop[] Stops(UColor[] colors, float[] positions)
 	{
 		ArgumentNullException.ThrowIfNull(colors);
@@ -566,6 +570,10 @@ internal sealed class ProGpuEffectFilter : DrawingResource, IEffectFilter
 		{
 			texture.Texture.AddRef();
 		}
+		if (value is ProGpuBlendEffect { Foreground: TextureInput foreground })
+		{
+			foreground.Texture.AddRef();
+		}
 	}
 
 	internal object Value { get; }
@@ -575,11 +583,15 @@ internal sealed class ProGpuEffectFilter : DrawingResource, IEffectFilter
 		{
 			texture.Texture.Release();
 		}
+		if (Value is ProGpuBlendEffect { Foreground: TextureInput foreground })
+		{
+			foreground.Texture.Release();
+		}
 	}
 }
 
 internal sealed record ProGpuBackdropEffect(BackdropMaterialBrush Material);
-internal sealed record ProGpuBlendEffect(EffectNode Background, BlendMode Mode, PRect Bounds);
+internal sealed record ProGpuBlendEffect(EffectNode Background, BlendMode Mode, PRect Bounds, EffectNode? Foreground = null);
 
 internal sealed class ProGpuTexture(GpuTexture texture) : DrawingResource, ITexture
 {
@@ -601,12 +613,13 @@ internal sealed class ProGpuDrawingResourceLease : IDisposable
 	public void Dispose() => Interlocked.Exchange(ref _resource, null)?.Release();
 }
 
-internal sealed class ProGpuRenderRecord(GpuPicture picture, Vector4? leadingClearColor, bool hasHostBackdrop) : IRenderRecord
+internal sealed class ProGpuRenderRecord(GpuPicture picture, Vector4? leadingClearColor, bool hasHostBackdrop, PRect? contentBounds) : IRenderRecord
 {
 	private int _disposed;
 	internal GpuPicture Picture { get; } = picture;
 	internal Vector4? LeadingClearColor { get; } = leadingClearColor;
 	internal bool HasHostBackdrop { get; } = hasHostBackdrop;
+	internal PRect? ContentBounds { get; } = contentBounds;
 	public void Replay(IDrawingSession into)
 	{
 		if (_disposed != 0) throw new ObjectDisposedException(nameof(ProGpuRenderRecord));
@@ -621,6 +634,7 @@ internal sealed class ProGpuRenderRecord(GpuPicture picture, Vector4? leadingCle
 		}
 		// Nested replay owns a cheap clone of the immutable command storage, so disposing
 		// this record cannot leave the destination pointing at disposed picture leases.
+		session.IncludeRecordedBounds(ContentBounds);
 		var retained = Picture.Clone();
 		session.Context.RetainResource(retained);
 		var transform = session.TotalMatrix;
@@ -651,17 +665,27 @@ internal class ProGpuDrawingSession : IDrawingSession
 	private bool _hasHostBackdrop;
 	private PRect? _effectContentBounds;
 	private int _effectLayerDepth;
+	private readonly bool _trackContentBounds;
 	private bool _finished;
 	private Dictionary<DrawingContext, HashSet<IDrawingResource>>? _retainedResources;
 
-	protected ProGpuDrawingSession(ProGpuDrawingFactory factory)
+	protected ProGpuDrawingSession(ProGpuDrawingFactory factory, bool trackContentBounds = false)
 	{
 		Factory = factory;
+		_trackContentBounds = trackContentBounds;
 		Context = _recorder.BeginRecording(new PRect(0, 0, 1, 1));
 	}
 
 	internal DrawingContext Context { get; private set; }
 	internal Vector4? LeadingClearColor => _leadingClearColor;
+	internal PRect? ContentBounds => _effectContentBounds;
+	internal void IncludeRecordedBounds(PRect? bounds)
+	{
+		if (bounds is { } content)
+		{
+			IncludeEffectBounds(content);
+		}
+	}
 	internal bool HasHostBackdrop => _hasHostBackdrop;
 	internal void MarkHostBackdrop() => _hasHostBackdrop = true;
 	public Matrix4x4 TotalMatrix => _matrix;
@@ -764,11 +788,28 @@ internal class ProGpuDrawingSession : IDrawingSession
 		var context = recorder.BeginRecording(new PRect(0, 0, 1, 1));
 		var bounds = TransformBounds(blend.Bounds, transform);
 		context.PushClip(blend.Bounds, transform);
-		if (blend.Background is ColorInput color)
+		DrawBlendInput(context, blend.Background, blend.Bounds, transform);
+		if (blend.Foreground is { } foreground)
 		{
-			context.DrawRectangle(Solid(color.Color), null, blend.Bounds, transform);
+			var foregroundRecorder = new GpuPictureRecorder();
+			var foregroundContext = foregroundRecorder.BeginRecording(new PRect(0, 0, 1, 1));
+			DrawBlendInput(foregroundContext, foreground, blend.Bounds, transform);
+			source.Dispose();
+			source = foregroundRecorder.EndRecording();
 		}
-		else if (blend.Background is TextureInput texture)
+		context.RetainResource(source);
+		context.DrawVisual(new EffectPictureVisual(source, new BlendModeEffect(ToBlend(blend.Mode)), bounds));
+		context.PopClip();
+		return recorder.EndRecording();
+	}
+
+	private void DrawBlendInput(DrawingContext context, EffectNode input, PRect bounds, Matrix4x4 transform)
+	{
+		if (input is ColorInput color)
+		{
+			context.DrawRectangle(Solid(color.Color), null, bounds, transform);
+		}
+		else if (input is TextureInput texture)
 		{
 			var parent = Context;
 			var parentMatrix = _matrix;
@@ -776,7 +817,7 @@ internal class ProGpuDrawingSession : IDrawingSession
 			_matrix = transform;
 			try
 			{
-				DrawImageTiled(texture.Texture, new URect(blend.Bounds.X, blend.Bounds.Y, blend.Bounds.Width, blend.Bounds.Height), texture.ExtendX, texture.ExtendY);
+				DrawImageTiled(texture.Texture, new URect(bounds.X, bounds.Y, bounds.Width, bounds.Height), texture.ExtendX, texture.ExtendY, 1f, texture.ScaleX, texture.ScaleY);
 			}
 			finally
 			{
@@ -784,10 +825,6 @@ internal class ProGpuDrawingSession : IDrawingSession
 				_matrix = parentMatrix;
 			}
 		}
-		context.RetainResource(source);
-		context.DrawVisual(new EffectPictureVisual(source, new BlendModeEffect(ToBlend(blend.Mode)), bounds));
-		context.PopClip();
-		return recorder.EndRecording();
 	}
 
 	public void ClipRect(in URect rect, ClipOperation operation = ClipOperation.Intersect)
@@ -982,44 +1019,41 @@ internal class ProGpuDrawingSession : IDrawingSession
 		IncludeEffectBounds(Rect(rect));
 		Context.DrawRectangle(Shader(shader), null, Rect(rect), _matrix);
 	}
-	public void DrawRoundedRect(in URect rect, Vector4 radii, UColor color)
+	public void DrawRoundedRect(in RoundRectangle roundRect, UColor color)
 	{
-		IncludeEffectBounds(Rect(rect));
-		if (radii.X == radii.Y && radii.X == radii.Z && radii.X == radii.W) Context.DrawRoundedRectangle(Solid(color), null, Rect(rect), radii.X, radii.X, _matrix);
+		IncludeEffectBounds(Rect(roundRect.Rect));
+		if (roundRect.TopLeft == roundRect.TopRight && roundRect.TopLeft == roundRect.BottomRight && roundRect.TopLeft == roundRect.BottomLeft)
+		{
+			Context.DrawRoundedRectangle(Solid(color), null, Rect(roundRect.Rect), roundRect.TopLeft.X, roundRect.TopLeft.Y, _matrix);
+		}
 		else
 		{
-			using var geometry = RoundedGeometry(rect, radii);
+			using var geometry = RoundedGeometry(roundRect);
 			Context.DrawPath(Solid(color), null, ProGpuGeometryFactory.Import(geometry).Path, _matrix);
 		}
 	}
-	public void DrawRoundedRectBorder(in URect outer, Vector4 outerRadii, in URect inner, Vector4 innerRadii, UColor color)
+	public void DrawRoundedRectBorder(in RoundRectangle outer, in RoundRectangle inner, UColor color)
 	{
-		var left = (float)(inner.X - outer.X);
-		var top = (float)(inner.Y - outer.Y);
-		var right = (float)(outer.Right - inner.Right);
-		var bottom = (float)(outer.Bottom - inner.Bottom);
-		if (left > 0f && NearlyEqual(left, top) && NearlyEqual(left, right) && NearlyEqual(left, bottom) &&
-			AllEqual(outerRadii) && AllEqual(innerRadii))
+		var width = (float)(inner.Rect.Left - outer.Rect.Left);
+		var radius = outer.TopLeft.X;
+		if (width > 0 && (radius == 0 || radius >= width) && UniformCircularCorners(outer) && UniformCircularCorners(inner) &&
+			NearlyEqual(width, (float)(inner.Rect.Top - outer.Rect.Top)) &&
+			NearlyEqual(width, (float)(outer.Rect.Right - inner.Rect.Right)) &&
+			NearlyEqual(width, (float)(outer.Rect.Bottom - inner.Rect.Bottom)) &&
+			NearlyEqual(inner.TopLeft.X, MathF.Max(0, radius - width)))
 		{
-			IncludeEffectBounds(Rect(outer));
-			var half = left * 0.5f;
-			var strokeBounds = new PRect(
-				(float)outer.X + half,
-				(float)outer.Y + half,
-				(float)outer.Width - left,
-				(float)outer.Height - left);
-			var radius = MathF.Max(0f, outerRadii.X - half);
-			Context.DrawRoundedRectangle(null, new Pen(Solid(color), left), strokeBounds, radius, radius, _matrix);
+			IncludeEffectBounds(Rect(outer.Rect));
+			var half = width * 0.5f;
+			var bounds = Rect(outer.Rect);
+			Context.DrawRoundedRectangle(null, new Pen(Solid(color), width),
+				new PRect(bounds.X + half, bounds.Y + half, bounds.Width - width, bounds.Height - width),
+				MathF.Max(0, radius - half), MathF.Max(0, radius - half), _matrix);
 			return;
 		}
-
-		using var outerGeometry = RoundedGeometry(outer, outerRadii);
-		using var innerGeometry = RoundedGeometry(inner, innerRadii);
+		using var outerGeometry = RoundedGeometry(outer);
+		using var innerGeometry = RoundedGeometry(inner);
 		using var border = outerGeometry.Combine(innerGeometry, GeometryCombineMode.Difference);
-		var restoreCount = Save();
-		ClipPath(border);
-		DrawRoundedRect(outer, outerRadii, color);
-		RestoreToCount(restoreCount);
+		DrawPath(border, color);
 	}
 	public void DrawPath(IGeometry geometry, UColor color)
 	{
@@ -1083,26 +1117,42 @@ internal class ProGpuDrawingSession : IDrawingSession
 	}
 	public void DrawShadow(IGeometry silhouette, UColor color, float sigmaX, float sigmaY, bool additive)
 	{
-		// A retained shadow visual is the native ProGPU effect path; the geometry is recorded once into it.
+		var x = new Vector2(_matrix.M11, _matrix.M12) * sigmaX;
+		var y = new Vector2(_matrix.M21, _matrix.M22) * sigmaY;
+		var xx = x.X * x.X + y.X * y.X;
+		var yy = x.Y * x.Y + y.Y * y.Y;
+		var xy = x.X * x.Y + y.X * y.Y;
+		var rotation = Matrix4x4.Identity;
+		var captureTransform = _matrix;
+		if (MathF.Abs(xy) > 0.0001f)
+		{
+			// Diagonalize the transformed blur covariance, then rotate its output back.
+			var angle = 0.5f * MathF.Atan2(2f * xy, xx - yy);
+			rotation = Matrix4x4.CreateRotationZ(angle);
+			captureTransform *= Matrix4x4.CreateRotationZ(-angle);
+			var discriminant = MathF.Sqrt((xx - yy) * (xx - yy) + 4f * xy * xy);
+			var trace = xx + yy;
+			xx = (trace + discriminant) * 0.5f;
+			yy = MathF.Max(0, (trace - discriminant) * 0.5f);
+		}
 		var recorder = new GpuPictureRecorder();
 		var child = recorder.BeginRecording(new PRect(0, 0, 1, 1));
-		// The child is an opacity mask. Applying the requested shadow color here and
-		// again in DropShadowEffect would square translucent color and alpha values.
-		child.DrawPath(new SolidColorBrush(Vector4.One), null, ProGpuGeometryFactory.Import(silhouette).Path, _matrix);
+		// The child is a coverage mask; the effect applies the color exactly once.
+		child.DrawPath(new SolidColorBrush(Vector4.One), null, ProGpuGeometryFactory.Import(silhouette).Path, captureTransform);
 		var picture = recorder.EndRecording();
 		Context.RetainResource(picture);
-		var effect = new DropShadowEffect(sigmaX, sigmaY) { Color = ProGpuDrawingFactory.Color(color), DrawSource = false };
-		var bounds = TransformBounds(Rect(silhouette.Bounds), _matrix);
+		var effect = new DropShadowEffect(MathF.Sqrt(xx), MathF.Sqrt(yy)) { Color = ProGpuDrawingFactory.Color(color), DrawSource = false };
+		var bounds = TransformBounds(Rect(silhouette.Bounds), captureTransform);
 		if (additive)
 		{
 			Context.PushBlendMode(GpuBlendMode.Plus);
 		}
-		Context.DrawVisual(new EffectPictureVisual(picture, effect, bounds));
+		Context.DrawVisual(new EffectPictureVisual(picture, effect, bounds), rotation);
 		if (additive)
 		{
 			Context.PopBlendMode();
 		}
-		IncludeEffectBounds(bounds, effect, alreadyTransformed: true);
+		IncludeEffectBounds(TransformBounds(EffectOutputBounds(bounds, effect), rotation), alreadyTransformed: true);
 	}
 	public void StrokePath(IGeometry geometry, UColor color, float strokeWidth, StrokeJoin join = StrokeJoin.Miter)
 	{
@@ -1150,6 +1200,9 @@ internal class ProGpuDrawingSession : IDrawingSession
 	}
 
 	public void DrawImageTiled(ITexture texture, in URect destination, EdgeExtend extendX, EdgeExtend extendY, float opacity = 1f)
+		=> DrawImageTiled(texture, destination, extendX, extendY, opacity, 1f, 1f);
+
+	private void DrawImageTiled(ITexture texture, in URect destination, EdgeExtend extendX, EdgeExtend extendY, float opacity, float scaleX, float scaleY)
 	{
 		if (texture is not ProGpuTexture native || !ReferenceEquals(native.Texture.Context, ((ProGpuDrawingFactory)Factory).Context))
 		{
@@ -1178,7 +1231,7 @@ internal class ProGpuDrawingSession : IDrawingSession
 				Rect = bounds,
 				ShaderKey = "uno-progpu-tiled-image-v1",
 				ShaderSource = ProGpuTiledImageShader.Source,
-				Constants = [bounds.Width, bounds.Height, (float)extendX, (float)extendY],
+				Constants = [bounds.Width * scaleX, bounds.Height * scaleY, (float)extendX, (float)extendY],
 				SamplingMode = TextureSamplingMode.Linear,
 			},
 			transform: _matrix);
@@ -1189,6 +1242,14 @@ internal class ProGpuDrawingSession : IDrawingSession
 	}
 	public void DrawEffectBackdrop(IEffectFilter filter, float opacity)
 	{
+		if (filter is ProGpuEffectFilter { Value: ProGpuBlendEffect { Foreground: not null } })
+		{
+			Context.PushOpacity(Math.Clamp(opacity, 0, 1));
+			SaveLayer(filter);
+			Restore();
+			Context.PopOpacity();
+			return;
+		}
 		if (filter is ProGpuEffectFilter { Value: ProGpuBlendEffect })
 		{
 			// An isolated layer cannot supply the live parent backdrop to its source.
@@ -1282,7 +1343,7 @@ internal class ProGpuDrawingSession : IDrawingSession
 	}
 	private void IncludeEffectBounds(PRect bounds, EffectBase? effect = null, bool alreadyTransformed = false)
 	{
-		if (_effectLayerDepth == 0 || bounds.IsEmpty)
+		if ((!_trackContentBounds && _effectLayerDepth == 0) || bounds.IsEmpty)
 		{
 			return;
 		}
@@ -1387,8 +1448,9 @@ internal class ProGpuDrawingSession : IDrawingSession
 	private static bool Contains(URect outer, URect inner) =>
 		inner.Left >= outer.Left && inner.Top >= outer.Top &&
 		inner.Right <= outer.Right && inner.Bottom <= outer.Bottom;
-	private static bool AllEqual(Vector4 value) =>
-		NearlyEqual(value.X, value.Y) && NearlyEqual(value.X, value.Z) && NearlyEqual(value.X, value.W);
+	private static bool UniformCircularCorners(in RoundRectangle value) =>
+		value.TopLeft.X == value.TopLeft.Y && value.TopLeft == value.TopRight &&
+		value.TopLeft == value.BottomRight && value.TopLeft == value.BottomLeft;
 	private static bool NearlyEqual(float left, float right) => MathF.Abs(left - right) <= 0.001f;
 	private static ImageEffectColorMatrix Matrix(float[] value) => new(
 		new Vector4(value[0], value[1], value[2], value[3]),
@@ -1402,11 +1464,10 @@ internal class ProGpuDrawingSession : IDrawingSession
 		Vector4.Zero,
 		new Vector4(0, 0, 0, color.W),
 		new Vector4(color.X, color.Y, color.Z, 0));
-	private static IGeometry RoundedGeometry(RoundRectangle value) => RoundedGeometry(value.Rect, new Vector4(value.TopLeft.X, value.TopRight.X, value.BottomRight.X, value.BottomLeft.X));
-	private static IGeometry RoundedGeometry(URect rect, Vector4 radii)
+	private static IGeometry RoundedGeometry(RoundRectangle value)
 	{
 		var builder = new ProGpuPrimitiveGeometryBuilder();
-		builder.AddRoundedRectangle(rect, new Vector2(radii.X), new Vector2(radii.Y), new Vector2(radii.Z), new Vector2(radii.W));
+		builder.AddRoundedRectangle(value.Rect, value.TopLeft, value.TopRight, value.BottomRight, value.BottomLeft);
 		return builder.Build();
 	}
 	private static IGeometry DifferenceRect(URect rect) { var builder = new ProGpuPrimitiveGeometryBuilder(); builder.AddRectangle(rect); return builder.Build(); }
@@ -1430,7 +1491,10 @@ internal class ProGpuDrawingSession : IDrawingSession
 		{
 			_picture = picture;
 			Effect = effect;
-			EffectContentBounds = contentBounds;
+			// Keep the capture grid aligned with the parent so identity layers do not resample it.
+			var left = MathF.Floor(contentBounds.X);
+			var top = MathF.Floor(contentBounds.Y);
+			EffectContentBounds = new PRect(left, top, MathF.Ceiling(contentBounds.Right) - left, MathF.Ceiling(contentBounds.Bottom) - top);
 		}
 		public override void OnRender(DrawingContext context) => context.DrawPicture(_picture);
 	}
@@ -1439,12 +1503,12 @@ internal class ProGpuDrawingSession : IDrawingSession
 internal sealed class ProGpuCommandRecorder : ProGpuDrawingSession, ICommandRecorder, IDisposable
 {
 	private bool _finished;
-	internal ProGpuCommandRecorder(ProGpuDrawingFactory factory) : base(factory) { }
+	internal ProGpuCommandRecorder(ProGpuDrawingFactory factory) : base(factory, trackContentBounds: true) { }
 	public IRenderRecord Finish()
 	{
 		if (_finished) throw new InvalidOperationException("Recording already finished.");
 		_finished = true;
-		return new ProGpuRenderRecord(FinishPicture(), LeadingClearColor, HasHostBackdrop);
+		return new ProGpuRenderRecord(FinishPicture(), LeadingClearColor, HasHostBackdrop, ContentBounds);
 	}
 	public void Dispose() { if (!_finished) ((ProGpuRenderRecord)Finish()).Dispose(); }
 }

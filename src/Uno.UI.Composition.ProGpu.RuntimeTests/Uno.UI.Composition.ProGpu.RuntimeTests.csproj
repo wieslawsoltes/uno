@@ -11,6 +11,7 @@
 	<Import Project="../Uno.UI.Composition.WebGpu/wgpu-native.targets" />
 
 	<ItemGroup>
+		<EmbeddedResource Include="../../external/ProGPU/src/ProGPU.Fonts.Inter/Fonts/Inter-Regular.ttf" LogicalName="Inter-Regular.ttf" />
 		<ProjectReference Include="..\Uno.UI.Composition.ProGpu\Uno.UI.Composition.ProGpu.csproj" AdditionalProperties="ProGPUUseWinRTContracts=false" />
 		<ProjectReference Include="..\Uno.WinRT\Uno.WinRT.Reference.csproj" Aliases="unouwp" />
 		<ProjectReference Include="..\Uno.Foundation\Uno.Foundation.Reference.csproj" Aliases="unofoundation" />

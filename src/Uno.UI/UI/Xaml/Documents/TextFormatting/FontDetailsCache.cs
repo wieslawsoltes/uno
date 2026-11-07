@@ -1,4 +1,4 @@
-#nullable enable
+﻿#nullable enable
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -33,10 +33,10 @@ internal static class FontDetailsCache
 	private static readonly Dictionary<FontEntry, Task<IFont?>> _fontCache = new();
 	private static readonly object _fontCacheGate = new();
 
-	// Bytes of loaded URI fonts, keyed by the manifest-resolved uri (which is the source uri when there is no
+	// Loaded URI font files, keyed by the manifest-resolved uri (which is the source uri when there is no
 	// manifest). An IFont bakes the size, so a new size of an already-loaded file must resolve synchronously —
 	// otherwise it briefly renders the default font (flicker) and the memoized sync FontDetails stays wrong.
-	private static readonly Dictionary<string, byte[]> _fontDataByUri = new();
+	private static readonly Dictionary<string, IFontFile> _fontFileByUri = new();
 	// Manifest resolution per (source uri, weight, style, stretch): lets a warm font skip the async
 	// .manifest probe so the whole resolution completes synchronously.
 	private static readonly Dictionary<(string SourceUri, int Weight, FontStyle Style, FontStretch Stretch), Uri> _manifestUriCache = new();
@@ -87,7 +87,7 @@ internal static class FontDetailsCache
 		return resolved;
 	}
 
-	private static async Task<byte[]?> LoadFontBytesAsync(Uri uri)
+	private static async Task<IFontFile?> LoadFontFileAsync(Uri uri)
 	{
 		if (typeof(FontDetailsCache).Log().IsEnabled(LogLevel.Debug))
 		{
@@ -97,9 +97,8 @@ internal static class FontDetailsCache
 		try
 		{
 			using var stream = await AppDataUriEvaluator.ToStream(uri, CancellationToken.None);
-			using var buffer = new MemoryStream();
-			await stream.CopyToAsync(buffer, CancellationToken.None);
-			return buffer.ToArray();
+			// LoadFontFile reads synchronously; keep that file I/O off the UI thread, as the async copy did.
+			return await Task.Run(() => FontProvider.LoadFontFile(stream));
 		}
 		catch (Exception e)
 		{
@@ -133,30 +132,39 @@ internal static class FontDetailsCache
 			// its IFont without ever falling back to the default font.
 			var resolvedUri = await ResolveManifestUriAsync(uri, weight, style, stretch);
 
-			byte[]? cachedData;
+			IFontFile? fontFile;
 			lock (_fontDataGate)
 			{
-				_fontDataByUri.TryGetValue(resolvedUri.OriginalString, out cachedData);
+				_fontFileByUri.TryGetValue(resolvedUri.OriginalString, out fontFile);
 			}
 
-			if (cachedData is null)
+			if (fontFile is null)
 			{
-				cachedData = await LoadFontBytesAsync(resolvedUri);
-				if (cachedData is null)
+				fontFile = await LoadFontFileAsync(resolvedUri);
+				if (fontFile is null)
 				{
 					return null;
 				}
 
 				lock (_fontDataGate)
 				{
-					_fontDataByUri[resolvedUri.OriginalString] = cachedData;
+					// Concurrent first loads of one file (e.g. several preloaded styles) must share one copy.
+					if (_fontFileByUri.TryGetValue(resolvedUri.OriginalString, out var raced))
+					{
+						fontFile.Dispose();
+						fontFile = raced;
+					}
+					else
+					{
+						_fontFileByUri[resolvedUri.OriginalString] = fontFile;
+					}
 				}
 			}
 
-			return manager.CreateFont(cachedData, familyNameHint, weight, stretch, style, fontSize);
+			return fontFile.CreateFont(familyNameHint, weight, stretch, style, fontSize);
 		}
 
-		return manager.MatchFamily(name, weight, stretch, style, fontSize);
+		return await manager.MatchFamilyAsync(name, weight, stretch, style, fontSize);
 	}
 
 	private static readonly Func<string?, float, FontWeight, FontStretch, FontStyle, (FontDetails details, Task<FontDetails> loadedTask)> _getFont = FuncMemoizeExtensions.AsLockedMemoized((

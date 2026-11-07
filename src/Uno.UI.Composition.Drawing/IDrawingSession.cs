@@ -18,7 +18,10 @@ public readonly record struct PathInstance(IGeometry Geometry, Vector2 Offset);
 
 public interface IDrawingSession
 {
-	/// <summary>The current total transform, from the drawing origin to the current coordinate space.</summary>
+	/// <summary>
+	/// The current total transform, from the drawing origin to the current coordinate space. It is the full 4x4:
+	/// right after <see cref="SetMatrix"/> it returns that matrix unchanged, Z row and column included.
+	/// </summary>
 	Matrix4x4 TotalMatrix { get; }
 
 	/// <summary>
@@ -83,16 +86,16 @@ public interface IDrawingSession
 	void DrawRect(in Rect rect, IShader shader);
 
 	/// <summary>
-	/// Fills a rounded rectangle with a solid <paramref name="color"/>; <paramref name="radii"/> are the per-corner
-	/// radii in (TopLeft, TopRight, BottomRight, BottomLeft) order.
+	/// Fills a rounded rectangle with a solid <paramref name="color"/>. Corner radii are (x, y) pairs: a corner
+	/// whose axes differ is elliptical, which CornerRadius clamping routinely produces.
 	/// </summary>
-	void DrawRoundedRect(in Rect rect, Vector4 radii, Color color);
+	void DrawRoundedRect(in RoundRectangle roundRect, Color color);
 
 	/// <summary>
 	/// Fills the annulus between an outer and inner rounded rectangle with a solid <paramref name="color"/> — a
-	/// rounded border in one shape. Per-corner radii in (TopLeft, TopRight, BottomRight, BottomLeft) order.
+	/// rounded border in one shape.
 	/// </summary>
-	void DrawRoundedRectBorder(in Rect outer, Vector4 outerRadii, in Rect inner, Vector4 innerRadii, Color color);
+	void DrawRoundedRectBorder(in RoundRectangle outer, in RoundRectangle inner, Color color);
 
 	/// <summary>Fills <paramref name="geometry"/> with a solid <paramref name="color"/> (bake any opacity into its alpha).</summary>
 	void DrawPath(IGeometry geometry, Color color);
@@ -132,9 +135,27 @@ public interface IDrawingSession
 	}
 
 	/// <summary>
+	/// Draws a shaped glyph run. The default fills the run's outlines through <see cref="GlyphRunRenderer"/>, which
+	/// works with any <see cref="IFont"/>; a backend overrides it to use its own text pipeline (glyph cache, scaler
+	/// hinting) for its own fonts, and calls <see cref="GlyphRunRenderer.Draw"/> for the rest.
+	/// </summary>
+	void DrawGlyphRun(IFont font, ReadOnlySpan<ushort> glyphs, ReadOnlySpan<Vector2> positions, float baselineY, Color color)
+		=> GlyphRunRenderer.Draw(this, font, glyphs, positions, baselineY, color);
+
+	/// <summary>
+	/// Draws a shaped glyph run with its outlines stroked at <paramref name="strokeWidth"/> rather than filled (outline
+	/// text). Overridden the same way as <see cref="DrawGlyphRun"/>, calling <see cref="GlyphRunRenderer.Stroke"/> for
+	/// the fonts the backend cannot draw natively.
+	/// </summary>
+	void StrokeGlyphRun(IFont font, ReadOnlySpan<ushort> glyphs, ReadOnlySpan<Vector2> positions, float baselineY, Color color, float strokeWidth)
+		=> GlyphRunRenderer.Stroke(this, font, glyphs, positions, baselineY, color, strokeWidth);
+
+	/// <summary>
 	/// Draws <paramref name="silhouette"/> as a soft shadow: coverage blurred by (<paramref name="sigmaX"/>,
-	/// <paramref name="sigmaY"/>) device pixels and filled with <paramref name="color"/>; <paramref name="additive"/>
-	/// sums overlapping contributions.
+	/// <paramref name="sigmaY"/>) and filled with <paramref name="color"/>; <paramref name="additive"/>
+	/// sums overlapping contributions. The sigmas are in the session's CURRENT coordinate space, not device
+	/// pixels -- the session transform scales them, the way a mask filter does -- so the same value blurs twice
+	/// as wide at a 2x rasterization scale.
 	/// </summary>
 	void DrawShadow(IGeometry silhouette, Color color, float sigmaX, float sigmaY, bool additive);
 

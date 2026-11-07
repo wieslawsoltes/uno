@@ -28,7 +28,7 @@ public static class ProGpuBackend
 		builder.FontProvider(fonts);
 		builder.ImageEncoderDecoder(images);
 		builder.SvgRenderer(new ProGpuSvgRenderer(fonts));
-		builder.LottieRenderer(new ManagedLottieRenderer());
+		builder.LottieRenderer(Uno.UI.Composition.Managed.ManagedBackend.CreateLottieRenderer());
 		return builder;
 	}
 }
