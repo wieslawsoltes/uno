@@ -113,6 +113,22 @@ internal static class ContentContractTests
 		var a = (GlyphImage)first[0];
 		var b = (GlyphImage)second[0];
 		Require(a.PixelWidth == 1 && a.PixelHeight == 1 && a.Pixels.Length == 4 && a.Pixels[3] != 0, "The sbix fixture must decode its nontransparent 1x1 PNG.");
+		// Red opaque, green half-alpha, blue transparent, white quarter-alpha.
+		var multicolor = Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFUlEQVR4nGP4z8DwHwgbGMD0//8OAD8YB7ojf2LmAAAAAElFTkSuQmCC");
+		var reduced = CreateFont(CreateFixtureFont(bitmap: true, bitmapPng: multicolor), 10);
+		var reducedElements = new List<GlyphRunElement>();
+		reduced.BuildGlyphRun(geometry, [1], [Vector2.Zero], 0, reducedElements);
+		Require(reducedElements.Count == 1 && reducedElements[0] is GlyphImage { PixelWidth: 1, PixelHeight: 1 }, "A 2x2 strike at half size must reduce to 1x1.");
+		var reducedPixels = ((GlyphImage)reducedElements[0]).Pixels;
+		Require(Math.Abs(reducedPixels[0] - 16) <= 1 && Math.Abs(reducedPixels[1] - 48) <= 1 && Math.Abs(reducedPixels[2] - 80) <= 1 && Math.Abs(reducedPixels[3] - 112) <= 1, "Bitmap reduction must interpolate premultiplied BGRA channels.");
+		var oversized = CreateFont(CreateFixtureFont(bitmap: true), 100_000);
+		var oversizedElements = new List<GlyphRunElement>();
+		oversized.BuildGlyphRun(geometry, [1], [Vector2.Zero], 0, oversizedElements);
+		Require(oversizedElements.TrueForAll(element => element is not GlyphImage), "Oversized bitmap representations must fall back before allocating their scaled pixels.");
+		var enlarged = CreateFont(CreateFixtureFont(bitmap: true), 40);
+		var scaledElements = new List<GlyphRunElement>();
+		enlarged.BuildGlyphRun(geometry, [1], [Vector2.Zero], 0, scaledElements);
+		Require(scaledElements.Count == 1 && scaledElements[0] is GlyphImage { PixelWidth: 2, PixelHeight: 2 }, "Bitmap strikes must scale their pixels to the requested font size.");
 		Require(ReferenceEquals(a.Pixels, b.Pixels), "Repeated bitmap glyphs must retain pixel-buffer identity for texture cache reuse.");
 		Require(MathF.Abs(a.X - 12) < 0.001f && MathF.Abs(a.Y - 28) < 0.001f, "The sbix bearing and baseline must be applied to bitmap placement.");
 		Require(MathF.Abs(b.X - a.X - 17) < 0.001f && MathF.Abs(b.Y - a.Y - 16) < 0.001f, "Cached pixels must not cache the first occurrence's position or baseline.");
@@ -219,7 +235,7 @@ internal static class ContentContractTests
 		}
 	}
 
-	private static byte[] CreateFixtureFont(bool bitmap, bool capHeight = true, char mappedCharacter = 'A', ushort outlineHeight = 700)
+	private static byte[] CreateFixtureFont(bool bitmap, bool capHeight = true, char mappedCharacter = 'A', ushort outlineHeight = 700, byte[]? bitmapPng = null)
 	{
 		var head = new byte[54];
 		U16(head, 18, 1000);
@@ -269,7 +285,7 @@ internal static class ContentContractTests
 		};
 		if (bitmap)
 		{
-			var png = Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z3GQAAAAASUVORK5CYII=");
+			var png = bitmapPng ?? Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z3GQAAAAASUVORK5CYII=");
 			var sbix = new byte[40 + png.Length];
 			U16(sbix, 0, 1);
 			U16(sbix, 2, 1);

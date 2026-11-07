@@ -85,10 +85,11 @@ public sealed class ProGpuFontProvider : IFontProvider
 		return font is null ? null : Wrap(font, fontSize);
 	}
 
-	public ValueTask<IFont?> MatchCharacterAsync(int codepoint, FontWeight weight, FontStretch stretch, FontStyle style, float fontSize)
+	public async ValueTask<IFont?> MatchCharacterAsync(int codepoint, FontWeight weight, FontStretch stretch, FontStyle style, float fontSize)
 	{
 		var font = _manager.MatchCharacter(null, ToStyle(weight, stretch, style, fontSize), null, codepoint);
-		return new ValueTask<IFont?>(font is null ? null : Wrap(font, fontSize));
+		return font is not null ? Wrap(font, fontSize)
+			: await FontFallback.MatchCharacterAsync(this, codepoint, weight, stretch, style, fontSize);
 	}
 
 	public IFont GetDefaultFont(FontWeight weight, FontStretch stretch, FontStyle style, float fontSize)
@@ -405,13 +406,47 @@ public sealed class ProGpuFont : IFont
 			var scale = bitmap.PixelsPerEm == 0 ? 1 : Size / bitmap.PixelsPerEm;
 			var x = (bitmap.UsesHorizontalMetrics ? bitmap.BearingX : -bitmap.OriginOffsetX) * scale;
 			var y = (bitmap.UsesHorizontalMetrics ? -bitmap.BearingY : bitmap.OriginOffsetY - decoded.Height) * scale;
-			image = new GlyphImage(bgra, decoded.Width, decoded.Height, x, y);
+			var width = Math.Max(1, checked((int)MathF.Round(decoded.Width * scale)));
+			var height = Math.Max(1, checked((int)MathF.Round(decoded.Height * scale)));
+			if ((long)width * height > MaximumBitmapBytes / 4)
+			{
+				return false;
+			}
+			if (width != decoded.Width || height != decoded.Height)
+			{
+				bgra = ResizeBitmap(bgra, decoded.Width, decoded.Height, width, height);
+			}
+			image = new GlyphImage(bgra, width, height, x, y);
 			return true;
 		}
 		catch (Exception ex) when (ex is not OutOfMemoryException)
 		{
 			return false;
 		}
+	}
+
+	private static byte[] ResizeBitmap(byte[] pixels, int sourceWidth, int sourceHeight, int width, int height)
+	{
+		var result = new byte[checked(width * height * 4)];
+		for (var y = 0; y < height; y++)
+		{
+			var sy = Math.Clamp((y + 0.5f) * sourceHeight / height - 0.5f, 0, sourceHeight - 1);
+			var y0 = (int)sy;
+			var y1 = Math.Min(y0 + 1, sourceHeight - 1);
+			for (var x = 0; x < width; x++)
+			{
+				var sx = Math.Clamp((x + 0.5f) * sourceWidth / width - 0.5f, 0, sourceWidth - 1);
+				var x0 = (int)sx;
+				var x1 = Math.Min(x0 + 1, sourceWidth - 1);
+				for (var channel = 0; channel < 4; channel++)
+				{
+					var top = float.Lerp(pixels[(y0 * sourceWidth + x0) * 4 + channel], pixels[(y0 * sourceWidth + x1) * 4 + channel], sx - x0);
+					var bottom = float.Lerp(pixels[(y1 * sourceWidth + x0) * 4 + channel], pixels[(y1 * sourceWidth + x1) * 4 + channel], sx - x0);
+					result[(y * width + x) * 4 + channel] = (byte)MathF.Round(float.Lerp(top, bottom, sy - y0));
+				}
+			}
+		}
+		return result;
 	}
 
 	internal static void EmitPath(PGeometry path, IPathBuilder builder, Matrix3x2 transform)
