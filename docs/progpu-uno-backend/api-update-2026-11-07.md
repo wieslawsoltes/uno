@@ -138,8 +138,14 @@ requires .NET 11. The standalone `Uno.UI.UnitTests` project builds cleanly for
 Failures comprise ResourceCandidate (44), AbsolutePathComparer (28), Android
 resource conversion (20), Calendar (12), Android resource-name encoding (10),
 iOS resource conversion (4), and TimePicker (1). These tests do not exercise the
-ProGPU renderer. The test sources match Uno master; no clean-master runtime
-baseline was run, so this is not a claim that the full Uno suite is green.
+ProGPU renderer. A subsequent clean-master run at
+`968398de4a1f46032ac2c20c8cceab9a14a032e3`, in an isolated worktree with the
+same SDK, target framework, Release configuration, Europe/Warsaw timezone, and
+native ICU library paths, reports the same **4,377 passed, 119 failed, 23 skipped**.
+Comparison by fully qualified test class and data-row display name finds **119
+shared failures, zero integration-only failures, and zero master-only failures**.
+These broader failures are therefore excluded from the ProGPU fix scope. No
+unrelated path, globalization, or TimePicker fixes are included in this branch.
 
 **Code review:** eight lenses reviewed the integration. Contract, graphics
 correctness, test coverage, performance, and configuration findings were fixed
