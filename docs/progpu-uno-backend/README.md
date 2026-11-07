@@ -1,14 +1,12 @@
 # ProGPU drawing backend for Uno Platform
 
-Status, 2026-09-22: checkpoint of the integration updated to Uno Platform
-[PR #24153](https://github.com/unoplatform/uno/pull/24153) at
-`e82519bc235faabdf2e9d78598573a7f3e28dba4`, on
-`feat/progpu-drawing-backend-latest`. The original
-`feat/progpu-drawing-backend` branch is preserved. The GPU smoke suite and two
-Gallery Lottie runtime tests pass. Generic live-backdrop blend graphs remain
-unsupported; browser and native C++ custom-shader qualification remain open.
-Work is paused at the user's request. Current evidence and remaining work are in the
-[API update record](api-update-2026-09-22.md).
+Status, 2026-11-07: the local `feat/progpu-drawing-backend-latest` integration
+includes Uno `master` at `968398de4a1f46032ac2c20c8cceab9a14a032e3`, including
+the final merged [WebGPU PR #24153](https://github.com/unoplatform/uno/pull/24153).
+ProGPU is pinned to `23f68615192ef5fb96beb72262d9a093340064df` from `main`
+(one commit after `v0.1.0-preview.70`). The original integration branch is preserved.
+Current validation and supported-platform boundaries are recorded in the
+[November update record](api-update-2026-11-07.md).
 
 The August 23–24 validation and benchmark reports describe the previous API
 and renderer revisions. Their timings, ratios, and correctness findings are
@@ -24,7 +22,8 @@ modify the Skia or WebGPU backend implementations from that work.
 
 Documents:
 
-- [Current API migration and validation record](api-update-2026-09-22.md)
+- [Current API migration and validation record](api-update-2026-11-07.md)
+- [Historical September migration record](api-update-2026-09-22.md)
 - [Historical rendering contract and three-backend review, August 24](final-rendering-contract-review-2026-08-24.md)
 - [Analysis of Uno PR #24153 and source integrations](pr-24153-analysis.md)
 - [Architecture and integration specification](architecture.md)
@@ -37,8 +36,7 @@ Documents:
 - [Initial validation record](validation-2026-08-22.md)
 
 The implementation consumes ProGPU as a git submodule pinned to immutable
-`main` merge commit `93ca8d1170a8911cf5b4f94b6c380663cea48f9f`; this migration
-does not change that pin. The existing integration foundation includes public
+`main` commit `23f68615192ef5fb96beb72262d9a093340064df`. The existing integration foundation includes public
 dependency changes
 [#125](https://github.com/wieslawsoltes/ProGPU/pull/125),
 [#126](https://github.com/wieslawsoltes/ProGPU/pull/126),
@@ -181,11 +179,10 @@ GPU completion wait, bounded-batch throughput, ProGPU compositor stages,
 retained-picture counters, and exact final-target readback. Use `skia-metal`
 for real Skia GPU rendering on macOS; `skia` is the CPU raster baseline and
 `webgpu` selects the built-in renderer. The JSON structure remains v4 while
-the fixture semantic-hash input is v3 after the API migration. Keep historical
+the fixture semantic-hash input is v4 after adopting geometry-unit dashes. Keep historical
 results separate and follow the [benchmark protocol](performance-benchmarks.md)
 for pixel gates and CPU-submit versus completed-GPU measurements.
 
-The new browser contract exposes JavaScript `GPUDevice` and `GPUTextureView`
-objects. A direct browser ProGPU provider is not implemented in this branch;
-the native provider rejects browser execution. See the dedicated browser
-section in the [API update record](api-update-2026-09-22.md).
+A browser ProGPU provider is not implemented in this branch; the native
+provider rejects browser execution. See the limitations in the
+[current update record](api-update-2026-11-07.md).
