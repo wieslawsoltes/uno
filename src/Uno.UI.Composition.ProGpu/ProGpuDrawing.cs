@@ -34,9 +34,6 @@ public sealed class ProGpuGraphicsProvider : IGraphicsProvider<IWebGpuDeviceCont
 
 public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderTarget>, IDisposable
 {
-	// Calibrate Uno's explicit sigma contract to ProGPU's fixed-tap backdrop
-	// footprint while retaining the single-pass sampling path.
-	private const float BackdropBlurRadiusPerSigma = 2f;
 	private readonly WgpuContext _context = new();
 	private readonly Compositor _compositor;
 	private readonly PictureVisual _presentVisual = new();
@@ -146,6 +143,7 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 				transform = retainedTransform;
 				clearColor = explicitClear ?? clearColor;
 			}
+			clearColor = Premultiply(clearColor);
 			_compositor.ClearColor = clearColor;
 			var contentChanged = _presentVisual.Update(content, transform);
 			var pixelWidth = Math.Max(1, target.Width);
@@ -302,7 +300,7 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 				texture,
 				0,
 				1f,
-				record.LeadingClearColor ?? Vector4.Zero);
+				Premultiply(record.LeadingClearColor ?? Vector4.Zero));
 			texture.NotifyExternalContentChanged();
 			return new ProGpuTexture(texture);
 		}
@@ -406,53 +404,11 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 		{
 			return new ProGpuEffectFilter(new ProGpuBlendEffect(blend.Background, blend.Mode, new PRect((float)bounds.X, (float)bounds.Y, (float)bounds.Width, (float)bounds.Height), blend.Foreground is SourceInput ? null : blend.Foreground));
 		}
-		if (TryCompileBackdrop(tree, out var backdrop))
-		{
-			return new ProGpuEffectFilter(new ProGpuBackdropEffect(backdrop));
-		}
 		return tree switch
 		{
-			BlurEffectNode blur when blur.Source is SourceInput => new ProGpuEffectFilter(new BlurEffect(blur.Sigma)),
+			BlurEffectNode { Source: SourceInput, ClampEdge: false } blur => new ProGpuEffectFilter(new ProGpuBlurEffect(blur.Sigma, new PRect((float)bounds.X, (float)bounds.Y, (float)bounds.Width, (float)bounds.Height))),
 			_ => null,
 		};
-	}
-
-	private static bool TryCompileBackdrop(EffectNode tree, out BackdropMaterialBrush material)
-	{
-		var sawBackdrop = false;
-		var blur = 0f;
-		var colors = new List<Vector4>();
-		void Walk(EffectNode node)
-		{
-			switch (node)
-			{
-				case SourceInput:
-					sawBackdrop = true;
-					break;
-				case BlurEffectNode blurNode:
-					blur = MathF.Max(blur, blurNode.Sigma * BackdropBlurRadiusPerSigma);
-					Walk(blurNode.Source);
-					break;
-				case ColorInput color:
-					colors.Add(Color(color.Color));
-					break;
-				default:
-					foreach (var child in node.Children) Walk(child);
-					break;
-			}
-		}
-		Walk(tree);
-		material = new BackdropMaterialBrush
-		{
-			Kind = blur > 0 && colors.Count > 0 ? BackdropMaterialKind.Acrylic : blur > 0 ? BackdropMaterialKind.Blur : BackdropMaterialKind.Tint,
-			Source = BackdropMaterialSource.HostBackdrop,
-			BlurRadius = blur,
-			TintColor = colors.Count > 0 ? colors[^1] : Vector4.Zero,
-			LuminosityColor = colors.Count > 1 ? colors[^2] : Vector4.Zero,
-			NoiseOpacity = colors.Count > 1 ? 0.02f : 0,
-			Saturation = 1f,
-		};
-		return sawBackdrop && (blur > 0 || colors.Count > 0);
 	}
 
 	internal GpuTexture NewTexture(int width, int height) => new(_context, (uint)width, (uint)height, _format,
@@ -474,6 +430,7 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 	}
 
 	private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(_disposed, this);
+	private static Vector4 Premultiply(Vector4 color) => new(color.X * color.W, color.Y * color.W, color.Z * color.W, color.W);
 	private static GradientStop[] Stops(UColor[] colors, float[] positions)
 	{
 		ArgumentNullException.ThrowIfNull(colors);
@@ -590,7 +547,7 @@ internal sealed class ProGpuEffectFilter : DrawingResource, IEffectFilter
 	}
 }
 
-internal sealed record ProGpuBackdropEffect(BackdropMaterialBrush Material);
+internal sealed record ProGpuBlurEffect(float Sigma, PRect Bounds);
 internal sealed record ProGpuBlendEffect(EffectNode Background, BlendMode Mode, PRect Bounds, EffectNode? Foreground = null);
 
 internal sealed class ProGpuTexture(GpuTexture texture) : DrawingResource, ITexture
@@ -723,6 +680,10 @@ internal class ProGpuDrawingSession : IDrawingSession
 				_effectContentBounds = layer.ParentContentBounds;
 				_effectLayerDepth--;
 				Context = layer.Parent;
+				if (layer.Effect is BlendModeEffect { BlendMode: GpuBlendMode.DstIn })
+				{
+					ClearOutside(contentBounds);
+				}
 				if (contentBounds is { IsEmpty: false } bounds)
 				{
 					Context.RetainResource(picture);
@@ -737,6 +698,27 @@ internal class ProGpuDrawingSession : IDrawingSession
 		}
 		_matrix = state.Matrix;
 		_clipBounds = state.ClipBounds;
+	}
+
+	private void ClearOutside(PRect? coverage)
+	{
+		if (coverage is not { IsEmpty: false } bounds)
+		{
+			RecordReplacementClear(Vector4.Zero);
+			return;
+		}
+		// Destination-in clears outside its finite source too, including a leading target clear.
+		const float extent = 1_000_000;
+		var left = MathF.Floor(bounds.X);
+		var top = MathF.Floor(bounds.Y);
+		bounds = Intersect(new PRect(left, top, MathF.Ceiling(bounds.Right) - left, MathF.Ceiling(bounds.Bottom) - top), new PRect(-extent, -extent, 2 * extent, 2 * extent));
+		var transparent = new SolidColorBrush(Vector4.Zero);
+		Context.PushBlendMode(GpuBlendMode.Src);
+		Context.DrawRectangle(transparent, null, new PRect(-extent, -extent, 2 * extent, bounds.Y + extent), Matrix4x4.Identity);
+		Context.DrawRectangle(transparent, null, new PRect(-extent, bounds.Bottom, 2 * extent, extent - bounds.Bottom), Matrix4x4.Identity);
+		Context.DrawRectangle(transparent, null, new PRect(-extent, bounds.Y, bounds.X + extent, bounds.Height), Matrix4x4.Identity);
+		Context.DrawRectangle(transparent, null, new PRect(bounds.Right, bounds.Y, extent - bounds.Right, bounds.Height), Matrix4x4.Identity);
+		Context.PopBlendMode();
 	}
 	public void RestoreToCount(int count) { if (count < 1 || count > SaveCount) throw new ArgumentOutOfRangeException(nameof(count)); while (SaveCount > count) Restore(); }
 	public void SaveLayer() =>
@@ -758,6 +740,12 @@ internal class ProGpuDrawingSession : IDrawingSession
 		if (filter is ProGpuEffectFilter { Value: ProGpuBlendEffect blend })
 		{
 			BeginEffectLayer(new BlendModeEffect(GpuBlendMode.SrcOver), blend);
+			RetainResource(filter);
+			return;
+		}
+		if (filter is ProGpuEffectFilter { Value: ProGpuBlurEffect blur })
+		{
+			BeginEffectLayer(new BlurEffect(blur.Sigma));
 			RetainResource(filter);
 			return;
 		}
@@ -1258,17 +1246,20 @@ internal class ProGpuDrawingSession : IDrawingSession
 			Unsupported("DrawEffectBackdrop.BlendGraph");
 			return;
 		}
-		if (filter is ProGpuEffectFilter { Value: ProGpuBackdropEffect backdrop })
+		if (filter is ProGpuEffectFilter { Value: ProGpuBlurEffect blur })
 		{
-			var material = backdrop.Material;
-			if (material.Source == BackdropMaterialSource.HostBackdrop && !material.UseFallback)
+			var bounds = Intersect(_clipBounds, blur.Bounds);
+			var material = new BackdropMaterialBrush
 			{
-				_hasHostBackdrop = true;
-			}
-			var originalOpacity = material.MaterialOpacity;
-			material.MaterialOpacity = originalOpacity * Math.Clamp(opacity, 0, 1);
-			Context.DrawBackdropMaterial(material, _clipBounds, transform: _matrix);
-			material.MaterialOpacity = originalOpacity;
+				Kind = BackdropMaterialKind.Blur,
+				Source = BackdropMaterialSource.HostBackdrop,
+				BlurRadius = blur.Sigma * 2f,
+				MaterialOpacity = Math.Clamp(opacity, 0, 1),
+				Saturation = 1f,
+			};
+			_hasHostBackdrop = true;
+			IncludeEffectBounds(bounds);
+			Context.DrawBackdropMaterial(material, bounds, transform: _matrix);
 			return;
 		}
 		Unsupported(nameof(DrawEffectBackdrop));

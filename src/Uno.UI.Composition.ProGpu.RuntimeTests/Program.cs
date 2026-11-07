@@ -27,6 +27,7 @@ var backendOptions = new ProGpuBackendOptions
 		PrimarySampleCount = 1,
 		PrecompileBasePipelines = true,
 		EnableGpuHitTesting = false,
+		EnableIncrementalScenePages = true,
 	},
 };
 var provider = new ProGpuGraphicsProvider(backendOptions);
@@ -35,6 +36,7 @@ await RunBorrowedDeviceOwnershipSmoke(device, provider);
 using var factory = (ProGpuDrawingFactory)provider.CreateGraphics(device);
 RunGradientLocalMatrixContractSmoke(factory);
 var geometryFactory = new ProGpuGeometryFactory();
+await ReviewContractTests.Run(factory, geometryFactory);
 await ContentContractTests.Run(factory, geometryFactory);
 await RefreshContractTests.Run(factory, geometryFactory);
 {
@@ -554,7 +556,7 @@ static async Task RunHostBackdropSmoke(
 	ProGpuDrawingFactory factory)
 {
 	using var effect = factory.CreateEffectFilter(
-		new BlurEffectNode(new SourceInput(), 6f, true),
+		new BlurEffectNode(new SourceInput(), 6f, false),
 		new Rect(8, 8, 48, 48)) ??
 		throw new InvalidOperationException("The ProGPU backend rejected a host-backdrop blur graph.");
 	using var record = CreateHostBackdropRecord(factory, effect);
@@ -622,7 +624,7 @@ static async Task RunTransformedHostBackdropSmoke(
 	ProGpuDrawingFactory factory)
 {
 	using var effect = factory.CreateEffectFilter(
-		new BlurEffectNode(new SourceInput(), 6f, true),
+		new BlurEffectNode(new SourceInput(), 6f, false),
 		new Rect(0, 0, 48, 48)) ??
 		throw new InvalidOperationException("The ProGPU backend rejected a transformed host-backdrop blur graph.");
 	using var texture = factory.RenderOffscreen(64, 64, drawing =>

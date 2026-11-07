@@ -79,26 +79,18 @@ public sealed class ProGpuGeometryFactory : IGeometryFactory
 public sealed class ProGpuGeometry : DrawingResource, IGeometry, unouwp::Windows.Graphics.IGeometrySource2D
 {
 	private readonly RoundRectangle? _roundRect;
+	private readonly Rect _bounds;
 
 	internal ProGpuGeometry(PGeometry path, RoundRectangle? roundRect = null)
 	{
 		Path = path ?? throw new ArgumentNullException(nameof(path));
 		_roundRect = roundRect;
+		_bounds = ProGpuGeometryAlgorithms.GetBounds(path);
 	}
 
 	internal PGeometry Path { get; }
 
-	public Rect Bounds
-	{
-		get
-		{
-			if (!Path.TryGetBounds(out var min, out var max))
-			{
-				return default;
-			}
-			return new Rect(min.X, min.Y, Math.Max(0, max.X - min.X), Math.Max(0, max.Y - min.Y));
-		}
-	}
+	public Rect Bounds => _bounds;
 
 	public GeometryFillRule FillRule => Path.FillRule == PFillRule.EvenOdd
 		? GeometryFillRule.EvenOdd

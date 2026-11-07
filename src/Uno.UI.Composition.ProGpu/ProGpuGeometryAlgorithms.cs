@@ -1,3 +1,5 @@
+extern alias unofoundation;
+
 #nullable enable
 
 using System;
@@ -10,12 +12,99 @@ using PGeometry = ProGPU.Vector.PathGeometry;
 using PFigure = ProGPU.Vector.PathFigure;
 using PLine = ProGPU.Vector.LineSegment;
 using PQuadratic = ProGPU.Vector.QuadraticBezierSegment;
+using Rect = unofoundation::Windows.Foundation.Rect;
 
 namespace Uno.UI.Composition.ProGpu;
 
 internal static class ProGpuGeometryAlgorithms
 {
 	private const float Epsilon = 0.0001f;
+
+	internal static Rect GetBounds(PGeometry source)
+	{
+		if (source.IsCombined)
+		{
+			// Preserve deferred boolean geometry; resolving it here submits GPU work and reads it back.
+			return source.TryGetBounds(out var combinedMin, out var combinedMax)
+				? new Rect(combinedMin.X, combinedMin.Y, combinedMax.X - combinedMin.X, combinedMax.Y - combinedMin.Y)
+				: default;
+		}
+		var min = new Vector2(float.PositiveInfinity);
+		var max = new Vector2(float.NegativeInfinity);
+		void Include(Vector2 point)
+		{
+			min = Vector2.Min(min, point);
+			max = Vector2.Max(max, point);
+		}
+		void IncludeCubic(Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3)
+		{
+			void Extremum(double a, double b, double c)
+			{
+				void Evaluate(double t)
+				{
+					if (t > 0 && t < 1)
+					{
+						var u = (float)t;
+						var v = 1 - u;
+						Include(v * v * v * p0 + 3 * v * v * u * p1 + 3 * v * u * u * p2 + u * u * u * p3);
+					}
+				}
+				if (Math.Abs(a) < 1e-12)
+				{
+					if (Math.Abs(b) > 1e-12)
+					{
+						Evaluate(-c / b);
+					}
+					return;
+				}
+				var discriminant = b * b - 4 * a * c;
+				if (discriminant >= 0)
+				{
+					var root = Math.Sqrt(discriminant);
+					Evaluate((-b + root) / (2 * a));
+					Evaluate((-b - root) / (2 * a));
+				}
+			}
+			Extremum(-p0.X + 3d * p1.X - 3d * p2.X + p3.X, 2d * (p0.X - 2d * p1.X + p2.X), p1.X - p0.X);
+			Extremum(-p0.Y + 3d * p1.Y - 3d * p2.Y + p3.Y, 2d * (p0.Y - 2d * p1.Y + p2.Y), p1.Y - p0.Y);
+			Include(p3);
+		}
+		foreach (var figure in source.Figures)
+		{
+			if (figure.Segments.Count == 0)
+			{
+				continue;
+			}
+			var current = figure.StartPoint;
+			Include(current);
+			foreach (var segment in figure.Segments)
+			{
+				switch (segment)
+				{
+					case PLine line:
+						Include(current = line.Point);
+						break;
+					case PQuadratic quadratic:
+						IncludeCubic(current, current + (quadratic.ControlPoint - current) * (2f / 3), quadratic.Point + (quadratic.ControlPoint - quadratic.Point) * (2f / 3), quadratic.Point);
+						current = quadratic.Point;
+						break;
+					case PCubic cubic:
+						IncludeCubic(current, cubic.ControlPoint1, cubic.ControlPoint2, cubic.Point);
+						current = cubic.Point;
+						break;
+					case PArc arc:
+						if (ProGPU.Vector.ArcSegmentGeometry.TryGetArcBounds(current, arc, out var arcMin, out var arcMax))
+						{
+							Include(arcMin);
+							Include(arcMax);
+						}
+						Include(current = arc.Point);
+						break;
+				}
+			}
+		}
+		return float.IsPositiveInfinity(min.X) ? default : new Rect(min.X, min.Y, max.X - min.X, max.Y - min.Y);
+	}
 
 	internal static PGeometry CreateRoundedRectangle(in RoundRectangle value)
 	{
@@ -26,10 +115,10 @@ internal static class ProGpuGeometryAlgorithms
 		var bottom = (float)rect.Bottom;
 		var width = Math.Max(0, right - left);
 		var height = Math.Max(0, bottom - top);
-		var tl = Vector2.Max(value.TopLeft, Vector2.Zero);
-		var tr = Vector2.Max(value.TopRight, Vector2.Zero);
-		var br = Vector2.Max(value.BottomRight, Vector2.Zero);
-		var bl = Vector2.Max(value.BottomLeft, Vector2.Zero);
+		var tl = NormalizeCorner(value.TopLeft);
+		var tr = NormalizeCorner(value.TopRight);
+		var br = NormalizeCorner(value.BottomRight);
+		var bl = NormalizeCorner(value.BottomLeft);
 
 		var factor = MathF.Min(1, MathF.Min(
 			MathF.Min(RadiusScale(width, tl.X + tr.X), RadiusScale(width, bl.X + br.X)),
@@ -57,6 +146,9 @@ internal static class ProGpuGeometryAlgorithms
 		path.Figures.Add(figure);
 		return path;
 	}
+
+	private static Vector2 NormalizeCorner(Vector2 radius) =>
+		radius.X > Epsilon && radius.Y > Epsilon ? radius : Vector2.Zero;
 
 	internal static void StreamSegments(PGeometry source, IGeometrySink sink)
 	{
@@ -419,11 +511,7 @@ internal static class ProGpuGeometryAlgorithms
 
 	private static void AddCorner(PFigure figure, Vector2 end, Vector2 radius)
 	{
-		if (radius.X <= Epsilon || radius.Y <= Epsilon)
-		{
-			figure.Segments.Add(new PLine(end));
-		}
-		else
+		if (radius.X > Epsilon && radius.Y > Epsilon)
 		{
 			figure.Segments.Add(new PArc(end, radius, 0, false, ProGPU.Vector.SweepDirection.Clockwise));
 		}
