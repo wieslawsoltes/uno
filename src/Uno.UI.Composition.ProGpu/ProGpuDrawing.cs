@@ -175,6 +175,8 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 			ThrowIfDisposed();
 			RefreshExternalTextures();
 			var submit = Stopwatch.StartNew();
+			using var prepared = ProGpuDeferredClips.Prepare(picture, new PRect(-1, -1, target.Width + 2, target.Height + 2), Matrix4x4.Identity);
+			picture = prepared ?? picture;
 			var sceneDumpPath = ProGpuDiagnostics.TryDumpScene(picture, frame);
 			var content = picture;
 			var transform = Matrix4x4.Identity;
@@ -338,8 +340,9 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 			try
 			{
 				RefreshExternalTextures();
+				using var prepared = ProGpuDeferredClips.Prepare(record.Picture, new PRect(-1, -1, pixelWidth + 2, pixelHeight + 2), Matrix4x4.Identity);
 				_compositor.RenderOffscreen(
-					new PictureVisual(record.Picture),
+					new PictureVisual(prepared ?? record.Picture),
 					(uint)pixelWidth,
 					(uint)pixelHeight,
 					texture,
@@ -651,7 +654,7 @@ internal sealed class ProGpuRenderRecord(GpuPicture picture, Vector4? leadingCle
 		// Nested replay owns a cheap clone of the immutable command storage, so disposing
 		// this record cannot leave the destination pointing at disposed picture leases.
 		session.IncludeRecordedBounds(ContentBounds);
-		var retained = Picture.Clone();
+		var retained = ProGpuDeferredClips.Clone(Picture);
 		session.Context.RetainResource(retained);
 		var transform = session.TotalMatrix;
 		if (transform == Matrix4x4.Identity)
@@ -729,7 +732,7 @@ internal class ProGpuDrawingSession : IDrawingSession
 			case Scope.Blend: Context.PopBlendMode(); break;
 			case Scope.EffectLayer:
 				var layer = state.Layer ?? throw new InvalidOperationException("Effect layer state was incomplete.");
-				var picture = layer.Recorder.EndRecording();
+				var picture = ProGpuDeferredClips.Finish(layer.Recorder, Context);
 				var contentBounds = CompositeEffectBounds(_effectContentBounds, layer.Effect, layer.ParentContentBounds);
 				if (layer.Blend is { } blend)
 				{
@@ -847,7 +850,7 @@ internal class ProGpuDrawingSession : IDrawingSession
 		context.RetainResource(source);
 		context.DrawVisual(new EffectPictureVisual(source, new BlendModeEffect(ToBlend(blend.Mode)), bounds));
 		context.PopClip();
-		return recorder.EndRecording();
+		return ProGpuDeferredClips.Finish(recorder, context);
 	}
 
 	private void DrawBlendInput(DrawingContext context, EffectNode input, PRect bounds, Matrix4x4 transform)
@@ -886,7 +889,7 @@ internal class ProGpuDrawingSession : IDrawingSession
 			ClipPath(difference, operation);
 			return;
 		}
-		_clipBounds = Intersect(_clipBounds, Rect(rect));
+		_clipBounds = Intersect(_clipBounds, TransformBounds(Rect(rect), _matrix));
 		Context.PushClip(Rect(rect), _matrix);
 		_clips.Push(new ClipState(ClipScope.Rect));
 	}
@@ -914,32 +917,14 @@ internal class ProGpuDrawingSession : IDrawingSession
 		var path = ProGpuGeometryFactory.Import(geometry).Path;
 		if (operation == ClipOperation.Difference)
 		{
-			var outer = ProGPU.Vector.PrimitivePathGeometry.CreateRectangle(
-				_clipBounds.X,
-				_clipBounds.Y,
-				_clipBounds.Width,
-				_clipBounds.Height);
-			if (!path.IsCombined && path.Figures.Count == 1)
-			{
-				// Uno builds a gradient rounded border by intersecting the outer
-				// contour and then excluding one contained inner contour. Encoding
-				// that subtraction as two even-odd contours is exact for this case
-				// and keeps ProGPU on its regular vector-mask path instead of the
-				// more expensive deferred boolean-mask path.
-				var excluded = path.CreateTransformed(Matrix4x4.Identity);
-				outer.FillRule = FillRule.EvenOdd;
-				foreach (var figure in excluded.Figures)
-				{
-					outer.Figures.Add(figure);
-				}
-				path = outer;
-			}
-			else
-			{
-				path = new PathGeometry { IsCombined = true, PathA = outer, PathB = path, Op = 0, FillRule = FillRule.Nonzero };
-			}
+			var recorder = new GpuPictureRecorder();
+			var excluded = path.CreateTransformed(_matrix);
+			_clips.Push(new ClipState(ClipScope.Difference, Difference: new DifferenceClip(Context, recorder, excluded)));
+			Context = recorder.BeginRecording(new PRect(0, 0, 1, 1));
+			_lastRoundedClip = null;
+			return;
 		}
-		if (operation == ClipOperation.Intersect) _clipBounds = Intersect(_clipBounds, Rect(geometry.Bounds));
+		if (operation == ClipOperation.Intersect) _clipBounds = Intersect(_clipBounds, TransformBounds(Rect(geometry.Bounds), _matrix));
 		Context.PushGeometryClip(path, _matrix);
 		_clips.Push(new ClipState(ClipScope.Geometry));
 	}
@@ -1050,7 +1035,7 @@ internal class ProGpuDrawingSession : IDrawingSession
 		// would leave destination pixels behind for transparent and translucent colors.
 		if (_effectLayerDepth > 0 && _clips.Count > 0)
 		{
-			IncludeEffectBounds(_clipBounds);
+			IncludeEffectBounds(_clipBounds, alreadyTransformed: true);
 		}
 		Context.PushBlendMode(GpuBlendMode.Src);
 		Context.DrawRectangle(new SolidColorBrush(color), null, new PRect(-1_000_000, -1_000_000, 2_000_000, 2_000_000), Matrix4x4.Identity);
@@ -1307,7 +1292,7 @@ internal class ProGpuDrawingSession : IDrawingSession
 		}
 		if (filter is ProGpuEffectFilter { Value: ProGpuBlurEffect blur })
 		{
-			var bounds = Intersect(_clipBounds, blur.Bounds);
+			var bounds = blur.Bounds;
 			var material = new BackdropMaterialBrush
 			{
 				Kind = BackdropMaterialKind.Blur,
@@ -1330,7 +1315,7 @@ internal class ProGpuDrawingSession : IDrawingSession
 		while (_states.Count > 0) Restore();
 		while (_clips.Count > 0) PopClip();
 		_finished = true;
-		return _recorder.EndRecording();
+		return ProGpuDeferredClips.Finish(_recorder, Context);
 	}
 
 	private int PushState(Scope scope, EffectLayer? layer = null)
@@ -1346,6 +1331,9 @@ internal class ProGpuDrawingSession : IDrawingSession
 		var clip = _clips.Pop();
 		switch (clip.Scope)
 		{
+			case ClipScope.Difference:
+				CompleteDifferenceClip(clip.Difference ?? throw new InvalidOperationException("A difference clip had no recording."));
+				break;
 			case ClipScope.Rect: Context.PopClip(); break;
 			case ClipScope.Geometry: Context.PopGeometryClip(); break;
 			case ClipScope.CoalescedRoundedDifference:
@@ -1355,6 +1343,14 @@ internal class ProGpuDrawingSession : IDrawingSession
 					clip.RestoreTransform);
 				break;
 		}
+	}
+
+	private void CompleteDifferenceClip(DifferenceClip clip)
+	{
+		var picture = ProGpuDeferredClips.Finish(clip.Recorder, Context);
+		Context = clip.Parent;
+		Context.RetainResource(picture);
+		Context.DrawVisual(new ProGpuDifferenceVisual(picture, clip.Excluded), Matrix4x4.Identity);
 	}
 
 	private void DrawTexture(ITexture texture, URect destination, float opacity) => DrawTexturePart(texture, new PRect(0, 0, texture.PixelWidth, texture.PixelHeight), Rect(destination), opacity);
@@ -1383,7 +1379,7 @@ internal class ProGpuDrawingSession : IDrawingSession
 	private static Brush Shader(IShader shader) => shader is ProGpuShader native ? native.Brush : throw new ArgumentException("Shader belongs to another backend.", nameof(shader));
 	private static SolidColorBrush Solid(UColor color) => new(ProGpuDrawingFactory.Color(color));
 	private static PRect Rect(URect value) => new((float)value.X, (float)value.Y, (float)value.Width, (float)value.Height);
-	private static PRect Intersect(PRect left, PRect right)
+	internal static PRect Intersect(PRect left, PRect right)
 	{
 		var x = MathF.Max(left.X, right.X);
 		var y = MathF.Max(left.Y, right.Y);
@@ -1456,7 +1452,7 @@ internal class ProGpuDrawingSession : IDrawingSession
 		GpuBlendMode.SrcOut or
 		GpuBlendMode.DstAtop;
 
-	private static PRect TransformBounds(PRect bounds, Matrix4x4 transform)
+	internal static PRect TransformBounds(PRect bounds, Matrix4x4 transform)
 	{
 		var p0 = TransformPoint(bounds.X, bounds.Y, transform);
 		var p1 = TransformPoint(bounds.Right, bounds.Y, transform);
@@ -1529,24 +1525,25 @@ internal class ProGpuDrawingSession : IDrawingSession
 		_ => GpuBlendMode.SrcOver,
 	};
 	private readonly record struct State(Matrix4x4 Matrix, Scope Scope, PRect ClipBounds, int ClipCount, EffectLayer? Layer = null);
-	private readonly record struct ClipState(ClipScope Scope, PathGeometry? RestorePath = null, Matrix4x4 RestoreTransform = default);
+	private readonly record struct ClipState(ClipScope Scope, PathGeometry? RestorePath = null, Matrix4x4 RestoreTransform = default, DifferenceClip? Difference = null);
 	private readonly record struct RoundedClipCommand(DrawingContext Context, int CommandIndex, RoundRectangle RoundRect, Matrix4x4 Transform, int ClipCount);
 	private sealed record EffectLayer(DrawingContext Parent, GpuPictureRecorder Recorder, EffectBase Effect, PRect? ParentContentBounds, ProGpuBlendEffect? Blend);
 	private enum Scope { None, Blend, EffectLayer }
-	private enum ClipScope { Rect, Geometry, CoalescedRoundedDifference }
-	private sealed class EffectPictureVisual : Visual
+	private enum ClipScope { Rect, Geometry, CoalescedRoundedDifference, Difference }
+	private sealed record DifferenceClip(DrawingContext Parent, GpuPictureRecorder Recorder, PathGeometry Excluded);
+	internal sealed class EffectPictureVisual : Visual
 	{
-		private readonly GpuPicture _picture;
+		internal GpuPicture Picture { get; }
 		internal EffectPictureVisual(GpuPicture picture, EffectBase effect, PRect contentBounds)
 		{
-			_picture = picture;
+			Picture = picture;
 			Effect = effect;
 			// Keep the capture grid aligned with the parent so identity layers do not resample it.
 			var left = MathF.Floor(contentBounds.X);
 			var top = MathF.Floor(contentBounds.Y);
 			EffectContentBounds = new PRect(left, top, MathF.Ceiling(contentBounds.Right) - left, MathF.Ceiling(contentBounds.Bottom) - top);
 		}
-		public override void OnRender(DrawingContext context) => context.DrawPicture(_picture);
+		public override void OnRender(DrawingContext context) => context.DrawPicture(Picture);
 	}
 }
 

@@ -21,6 +21,13 @@ internal static class ReviewContractTests
 		foreach (var test in new Func<Task>[]
 		{
 			() => BorrowedDeviceLoss(),
+			() => DifferenceClip(factory, geometries, false),
+			() => DifferenceClip(factory, geometries, true),
+			() => RetainedDifference(factory, geometries),
+			() => DifferenceClear(factory, geometries),
+			() => DifferenceCapacity(factory, geometries),
+			() => DifferenceRetention(factory, geometries),
+			() => DifferenceBackdrop(factory, geometries),
 			() => ExternalTexture(factory),
 			() => DiagnosticFailure(factory),
 			() => CurveBounds(geometries),
@@ -64,6 +71,209 @@ internal static class ReviewContractTests
 			throw new InvalidOperationException("Queue device loss must mark the borrowed context before disposal.");
 		}
 		return Task.CompletedTask;
+	}
+
+	private static async Task DifferenceBackdrop(ProGpuDrawingFactory factory, ProGpuGeometryFactory geometries)
+	{
+		var builder = geometries.CreatePrimitiveGeometryBuilder();
+		builder.AddEllipse(new Vector2(32), 10, 10);
+		using var ellipse = builder.Build();
+		using var blur = factory.CreateEffectFilter(new BlurEffectNode(new SourceInput(), 3, false), new Rect(0, 0, 64, 64))!;
+		async Task<byte[]> Render(bool clip)
+		{
+			using var texture = factory.RenderOffscreen(64, 64, drawing =>
+			{
+				drawing.DrawRect(new Rect(0, 0, 32, 64), Color.FromArgb(255, 255, 0, 0));
+				drawing.DrawRect(new Rect(32, 0, 32, 64), Color.FromArgb(255, 0, 0, 255));
+				if (clip)
+				{
+					drawing.ClipPath(ellipse, ClipOperation.Difference);
+				}
+				drawing.DrawEffectBackdrop(blur, 0.75f);
+			});
+			using var image = await factory.SnapshotAsync(texture);
+			var pixels = new byte[64 * 64 * 4];
+			image.CopyPixels(pixels);
+			return pixels;
+		}
+		var expected = await Render(false);
+		var actual = await Render(true);
+		for (var y = 2; y < 62; y++)
+		{
+			for (var x = 2; x < 62; x++)
+			{
+				var distance = Vector2.Distance(new Vector2(x + 0.5f, y + 0.5f), new Vector2(32));
+				if (distance > 12)
+				{
+					for (var channel = 0; channel < 4; channel++)
+					{
+						var index = (y * 64 + x) * 4 + channel;
+						if (Math.Abs(actual[index] - expected[index]) > 3)
+						{
+							throw new InvalidOperationException("Inverse clipping must preserve unpartitioned backdrop sampling outside the hole.");
+						}
+					}
+				}
+				else if (distance < 8 && (actual[(y * 64 + x) * 4] != (x < 32 ? 0 : 255) || actual[(y * 64 + x) * 4 + 2] != (x < 32 ? 255 : 0)))
+				{
+					throw new InvalidOperationException("Inverse clipping must preserve original backdrop pixels inside the hole.");
+				}
+			}
+		}
+	}
+
+	private static async Task DifferenceCapacity(ProGpuDrawingFactory factory, ProGpuGeometryFactory geometries)
+	{
+		var builder = geometries.CreatePrimitiveGeometryBuilder();
+		builder.AddEllipse(new Vector2(50), 10, 10);
+		using var ellipse = builder.Build();
+		using var texture = factory.RenderOffscreen(4096, 256, drawing =>
+		{
+			for (var i = 0; i < 8; i++)
+			{
+				drawing.ClipPath(ellipse, ClipOperation.Difference);
+			}
+			drawing.DrawRect(new Rect(0, 0, 4096, 256), Color.FromArgb(255, 255, 255, 255));
+		});
+		using var image = await factory.SnapshotAsync(texture);
+		var pixels = new byte[4096 * 256 * 4];
+		image.CopyPixels(pixels);
+		if (pixels[(50 * 4096 + 50) * 4 + 3] != 0 || pixels[(50 * 4096 + 4090) * 4 + 3] != 255)
+		{
+			throw new InvalidOperationException("Nested inverse clips must support 4K-wide targets without atlas-sized outer paths.");
+		}
+	}
+
+	private static async Task DifferenceRetention(ProGpuDrawingFactory factory, ProGpuGeometryFactory geometries)
+	{
+		var builder = geometries.CreatePrimitiveGeometryBuilder();
+		builder.AddEllipse(new Vector2(50), 10, 10);
+		using var ellipse = builder.Build();
+		using var identity = factory.CreateColorMatrixColorFilter([1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0]);
+		using var source = factory.CreateTexture(1, 1, new byte[] { 0, 255, 0, 255 });
+		var child = factory.CreateRecording();
+		child.SaveLayer(identity);
+		child.ClipPath(ellipse, ClipOperation.Difference);
+		child.Clear(Color.FromArgb(0, 0, 0, 0));
+		child.DrawImageTiled(source, new Rect(0, 0, 100, 100), EdgeExtend.Wrap, EdgeExtend.Wrap);
+		child.Restore();
+		using var childRecord = child.Finish();
+		var parent = factory.CreateRecording();
+		parent.Clear(Color.FromArgb(0, 0, 0, 0));
+		childRecord.Replay(parent);
+		using var record = parent.Finish();
+		childRecord.Dispose();
+		source.Dispose();
+		foreach (var size in new[] { 100, 160 })
+		{
+			using var output = factory.CreateTexture(size, size, new byte[size * size * 4]);
+			using var target = Target(output);
+			for (var frame = 0; frame < 2; frame++)
+			{
+				using (var session = factory.BeginPresent(target))
+				{
+					record.Replay(session);
+				}
+				if (frame == 1 && ProGpuDiagnostics.LastFrame?.TargetContentReused != true)
+				{
+					throw new InvalidOperationException("Unchanged inverse recordings must reuse retained target contents.");
+				}
+			}
+			using var image = await factory.SnapshotAsync(output);
+			var pixels = new byte[size * size * 4];
+			image.CopyPixels(pixels);
+			if (pixels[(20 * size + 20) * 4 + 1] != 255 || pixels[(50 * size + 50) * 4 + 3] != 0)
+			{
+				throw new InvalidOperationException($"Deferred clips lifetime/effect/resize: size={size}, outside={pixels[(20 * size + 20) * 4 + 1]},{pixels[(20 * size + 20) * 4 + 3]}, hole={pixels[(50 * size + 50) * 4 + 1]},{pixels[(50 * size + 50) * 4 + 3]}.");
+			}
+		}
+	}
+
+	private static async Task DifferenceClear(ProGpuDrawingFactory factory, ProGpuGeometryFactory geometries)
+	{
+		var builder = geometries.CreatePrimitiveGeometryBuilder();
+		builder.AddEllipse(new Vector2(50), 10, 10);
+		using var ellipse = builder.Build();
+		using var texture = factory.RenderOffscreen(100, 100, drawing =>
+		{
+			drawing.Clear(Color.FromArgb(255, 255, 0, 0));
+			drawing.ClipPath(ellipse, ClipOperation.Difference);
+			drawing.Clear(Color.FromArgb(128, 255, 255, 255));
+		});
+		using var image = await factory.SnapshotAsync(texture);
+		var pixels = new byte[100 * 100 * 4];
+		image.CopyPixels(pixels);
+		var center = (50 * 100 + 50) * 4;
+		if (pixels[3] != 128 || pixels[1] != 128 || pixels[center + 1] != 0 || pixels[center + 2] != 255 || pixels[center + 3] != 255)
+		{
+			throw new InvalidOperationException($"Inverse-clipped clear must preserve the excluded destination: outside={pixels[3]}, hole={pixels[center + 1]},{pixels[center + 2]},{pixels[center + 3]}.");
+		}
+	}
+
+	private static async Task RetainedDifference(ProGpuDrawingFactory factory, ProGpuGeometryFactory geometries)
+	{
+		var builder = geometries.CreatePrimitiveGeometryBuilder();
+		builder.AddEllipse(new Vector2(25, 50), 10, 10);
+		using var ellipse = builder.Build();
+		var recorder = factory.CreateRecording();
+		recorder.ClipPath(ellipse, ClipOperation.Difference);
+		recorder.DrawRect(new Rect(-100, -100, 300, 300), Color.FromArgb(128, 255, 255, 255));
+		using var record = recorder.Finish();
+		foreach (var rotation in new[] { 0f, 0.3f })
+		{
+			var transform = Matrix4x4.CreateRotationZ(rotation) * Matrix4x4.CreateTranslation(20.25f, 0.5f, 0);
+			Matrix4x4.Invert(transform, out var inverse);
+			using var texture = factory.RenderOffscreen(100, 100, drawing =>
+			{
+				drawing.SetMatrix(transform);
+				record.Replay(drawing);
+			});
+			using var image = await factory.SnapshotAsync(texture);
+			var pixels = new byte[100 * 100 * 4];
+			image.CopyPixels(pixels);
+			for (var y = 2; y < 98; y++)
+			{
+				for (var x = 2; x < 98; x++)
+				{
+					var local = Vector2.Transform(new Vector2(x + 0.5f, y + 0.5f), inverse);
+					var distance = Vector2.Distance(local, new Vector2(25, 50));
+					if (distance is > 8 and < 12)
+					{
+						continue;
+					}
+					var expected = distance < 8 ? 0 : 128;
+					if (Math.Abs(pixels[(y * 100 + x) * 4 + 3] - expected) > 2)
+					{
+						throw new InvalidOperationException($"Retained difference clip seam at {x},{y}, rotation={rotation}, alpha={pixels[(y * 100 + x) * 4 + 3]} expected={expected}.");
+					}
+				}
+			}
+		}
+	}
+
+	private static async Task DifferenceClip(ProGpuDrawingFactory factory, ProGpuGeometryFactory geometries, bool transformed)
+	{
+		var builder = geometries.CreatePrimitiveGeometryBuilder();
+		builder.AddEllipse(new Vector2(25, 50), 10, 10);
+		using var ellipse = builder.Build();
+		using var texture = factory.RenderOffscreen(100, 100, drawing =>
+		{
+			if (transformed)
+			{
+				drawing.ClipRect(new Rect(0, 0, 100, 100));
+				drawing.Translate(50, 0);
+			}
+			drawing.ClipPath(ellipse, ClipOperation.Difference);
+			drawing.DrawRect(new Rect(transformed ? -50 : 0, 0, 100, 100), Color.FromArgb(255, 255, 255, 255));
+		});
+		using var image = await factory.SnapshotAsync(texture);
+		var pixels = new byte[100 * 100 * 4];
+		image.CopyPixels(pixels);
+		var centerX = transformed ? 75 : 25;
+		if (pixels[(50 * 100 + 5) * 4 + 3] != 255 || pixels[(50 * 100 + centerX) * 4 + 3] != 0)
+		{
+			throw new InvalidOperationException($"Difference clip must preserve the physical outer clip across transforms: transformed={transformed}.");
+		}
 	}
 
 	private static async Task ExternalTexture(ProGpuDrawingFactory factory)
