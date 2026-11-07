@@ -31,6 +31,7 @@ internal static class ReviewContractTests
 			() => ExternalTexture(factory),
 			() => DiagnosticFailure(factory),
 			() => CurveBounds(geometries),
+			() => StrokeWinding(factory, geometries),
 			() => RetinaClip(factory, geometries, false),
 			() => RetinaClip(factory, geometries, true),
 			() => RetinaClip(factory, geometries, true, true),
@@ -71,6 +72,31 @@ internal static class ReviewContractTests
 			throw new InvalidOperationException("Queue device loss must mark the borrowed context before disposal.");
 		}
 		return Task.CompletedTask;
+	}
+
+	private static async Task StrokeWinding(ProGpuDrawingFactory factory, ProGpuGeometryFactory geometries)
+	{
+		var builder = geometries.CreatePathBuilder();
+		builder.MoveTo(new Vector2(10, 30));
+		builder.LineTo(new Vector2(30, 30));
+		builder.LineTo(new Vector2(30, 50));
+		builder.LineTo(new Vector2(50, 50));
+		builder.LineTo(new Vector2(50, 26));
+		builder.LineTo(new Vector2(10, 26));
+		using var path = builder.Build();
+		using var stroke = path.GetStrokeFillGeometry(new StrokeStyle { Thickness = 12, LineJoin = StrokeJoin.Miter, MiterLimit = 4 });
+		using var texture = factory.RenderOffscreen(64, 64, drawing =>
+		{
+			drawing.ClipPath(stroke);
+			drawing.DrawRect(new Rect(0, 0, 64, 64), Color.FromArgb(255, 255, 255, 255));
+		});
+		using var image = await factory.SnapshotAsync(texture);
+		var pixels = new byte[64 * 64 * 4];
+		image.CopyPixels(pixels);
+		if (!stroke.FillContains(new Vector2(34.5f, 26.5f)) || pixels[(26 * 64 + 34) * 4 + 3] < 250)
+		{
+			throw new InvalidOperationException("Overlapping stroke segments and joins must form a union, without winding cancellation holes.");
+		}
 	}
 
 	private static async Task DifferenceBackdrop(ProGpuDrawingFactory factory, ProGpuGeometryFactory geometries)

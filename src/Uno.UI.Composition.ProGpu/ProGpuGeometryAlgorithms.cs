@@ -320,6 +320,13 @@ internal static class ProGpuGeometryAlgorithms
 
 	private static void AppendTriangle(PGeometry result, Vector2 p0, Vector2 p1, Vector2 p2)
 	{
+		// Stroke primitives form a union under nonzero fill, including self-overlap.
+		var first = p1 - p0;
+		var second = p2 - p0;
+		if (first.X * second.Y - first.Y * second.X > 0)
+		{
+			(p1, p2) = (p2, p1);
+		}
 		var figure = new PFigure(p0, isClosed: true);
 		figure.Segments.Add(new PLine(p1));
 		figure.Segments.Add(new PLine(p2));
