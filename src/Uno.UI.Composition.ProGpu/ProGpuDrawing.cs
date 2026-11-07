@@ -81,6 +81,8 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 			_format);
 		ProGpuDiagnostics.PublishGraphicsIdentity(GetGraphicsIdentity(device));
 		_compositor = new Compositor(_context, _format, options.Compositor);
+		_compositor.RegisterExtension(CompositorBuiltInExtensions.BackdropMaterial,
+			new ProGpuBackdropExtension(_compositor.GetExtension(CompositorBuiltInExtensions.BackdropMaterial)!));
 		_defaultClearColor = _compositor.ClearColor;
 		_ = ProGpuDiagnostics.NextDeviceGeneration();
 	}
@@ -462,6 +464,20 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 	public IEffectFilter? CreateEffectFilter(EffectNode tree, URect bounds)
 	{
 		ArgumentNullException.ThrowIfNull(tree);
+		if (tree is BlendEffectNode
+			{
+				Background: BlendEffectNode
+				{
+					Background: BlurEffectNode { Source: SourceInput, ClampEdge: true } acrylicBlur,
+					Foreground: ColorInput luminosity,
+					Mode: BlendMode.Luminosity,
+				},
+				Foreground: ColorInput tint,
+				Mode: BlendMode.Color,
+			})
+		{
+			return new ProGpuEffectFilter(new ProGpuAcrylicEffect(acrylicBlur.Sigma, Color(luminosity.Color), Color(tint.Color), new PRect((float)bounds.X, (float)bounds.Y, (float)bounds.Width, (float)bounds.Height)));
+		}
 		if (tree is BlendEffectNode { Foreground: SourceInput or ColorInput or TextureInput, Background: ColorInput or TextureInput } blend)
 		{
 			return new ProGpuEffectFilter(new ProGpuBlendEffect(blend.Background, blend.Mode, new PRect((float)bounds.X, (float)bounds.Y, (float)bounds.Width, (float)bounds.Height), blend.Foreground is SourceInput ? null : blend.Foreground));
@@ -610,6 +626,7 @@ internal sealed class ProGpuEffectFilter : DrawingResource, IEffectFilter
 }
 
 internal sealed record ProGpuBlurEffect(float Sigma, PRect Bounds);
+internal sealed record ProGpuAcrylicEffect(float Sigma, Vector4 Luminosity, Vector4 Tint, PRect Bounds);
 internal sealed record ProGpuBlendEffect(EffectNode Background, BlendMode Mode, PRect Bounds, EffectNode? Foreground = null);
 
 internal sealed class ProGpuTexture(GpuTexture texture) : DrawingResource, ITexture
@@ -739,6 +756,10 @@ internal class ProGpuDrawingSession : IDrawingSession
 			case Scope.Blend: Context.PopBlendMode(); break;
 			case Scope.EffectLayer:
 				var layer = state.Layer ?? throw new InvalidOperationException("Effect layer state was incomplete.");
+				if (layer.Acrylic is { } acrylic)
+				{
+					DrawAcrylic(acrylic, 1, state.Matrix);
+				}
 				var picture = ProGpuDeferredClips.Finish(layer.Recorder, Context);
 				var contentBounds = CompositeEffectBounds(_effectContentBounds, layer.Effect, layer.ParentContentBounds);
 				if (layer.Blend is { } blend)
@@ -756,8 +777,20 @@ internal class ProGpuDrawingSession : IDrawingSession
 				if (contentBounds is { IsEmpty: false } bounds)
 				{
 					Context.RetainResource(picture);
+					if (layer.Acrylic is { } cropped)
+					{
+						Context.PushClip(cropped.Bounds, state.Matrix);
+					}
 					Context.DrawVisual(new EffectPictureVisual(picture, layer.Effect, bounds));
-					IncludeEffectBounds(bounds, layer.Effect, alreadyTransformed: true);
+					if (layer.Acrylic is { } material)
+					{
+						Context.PopClip();
+						IncludeEffectBounds(TransformBounds(material.Bounds, state.Matrix), alreadyTransformed: true);
+					}
+					else
+					{
+						IncludeEffectBounds(bounds, layer.Effect, alreadyTransformed: true);
+					}
 				}
 				else
 				{
@@ -806,6 +839,12 @@ internal class ProGpuDrawingSession : IDrawingSession
 	public void SaveLayerMask() => BeginEffectLayer(new BlendModeEffect(GpuBlendMode.DstIn));
 	public void SaveLayer(IEffectFilter filter)
 	{
+		if (filter is ProGpuEffectFilter { Value: ProGpuAcrylicEffect acrylic })
+		{
+			BeginEffectLayer(new BlendModeEffect(GpuBlendMode.SrcOver), acrylic: acrylic);
+			RetainResource(filter);
+			return;
+		}
 		if (filter is ProGpuEffectFilter { Value: ProGpuBlendEffect blend })
 		{
 			BeginEffectLayer(new BlendModeEffect(GpuBlendMode.SrcOver), blend);
@@ -829,11 +868,11 @@ internal class ProGpuDrawingSession : IDrawingSession
 		RetainResource(filter);
 	}
 
-	private void BeginEffectLayer(EffectBase effect, ProGpuBlendEffect? blend = null)
+	private void BeginEffectLayer(EffectBase effect, ProGpuBlendEffect? blend = null, ProGpuAcrylicEffect? acrylic = null)
 	{
 		var parent = Context;
 		var recorder = new GpuPictureRecorder();
-		PushState(Scope.EffectLayer, new EffectLayer(parent, recorder, effect, _effectContentBounds, blend));
+		PushState(Scope.EffectLayer, new EffectLayer(parent, recorder, effect, _effectContentBounds, blend, acrylic));
 		_effectContentBounds = null;
 		_effectLayerDepth++;
 		Context = recorder.BeginRecording(new PRect(0, 0, 1, 1));
@@ -1281,6 +1320,11 @@ internal class ProGpuDrawingSession : IDrawingSession
 	}
 	public void DrawEffectBackdrop(IEffectFilter filter, float opacity)
 	{
+		if (filter is ProGpuEffectFilter { Value: ProGpuAcrylicEffect acrylic })
+		{
+			DrawAcrylic(acrylic, opacity, _matrix);
+			return;
+		}
 		if (filter is ProGpuEffectFilter { Value: ProGpuBlendEffect { Foreground: not null } })
 		{
 			Context.PushOpacity(Math.Clamp(opacity, 0, 1));
@@ -1310,10 +1354,29 @@ internal class ProGpuDrawingSession : IDrawingSession
 			};
 			_hasHostBackdrop = true;
 			IncludeEffectBounds(bounds);
-			Context.DrawBackdropMaterial(material, bounds, transform: _matrix);
+			ProGpuBackdropExtension.Draw(Context, material, bounds, _matrix);
 			return;
 		}
 		Unsupported(nameof(DrawEffectBackdrop));
+	}
+
+	private void DrawAcrylic(ProGpuAcrylicEffect acrylic, float opacity, Matrix4x4 transform)
+	{
+		// Uno draws its own tiled noise after the material; disable the shader's synthetic grain.
+		var material = new BackdropMaterialBrush
+		{
+			Kind = BackdropMaterialKind.Acrylic,
+			Source = BackdropMaterialSource.HostBackdrop,
+			BlurRadius = acrylic.Sigma * 2f,
+			LuminosityColor = acrylic.Luminosity,
+			TintColor = acrylic.Tint,
+			MaterialOpacity = Math.Clamp(opacity, 0, 1),
+			Saturation = 1f,
+			NoiseOpacity = 0f,
+		};
+		_hasHostBackdrop = true;
+		IncludeEffectBounds(TransformBounds(acrylic.Bounds, transform), alreadyTransformed: true);
+		ProGpuBackdropExtension.Draw(Context, material, acrylic.Bounds, transform);
 	}
 
 	protected GpuPicture FinishPicture()
@@ -1534,7 +1597,7 @@ internal class ProGpuDrawingSession : IDrawingSession
 	private readonly record struct State(Matrix4x4 Matrix, Scope Scope, PRect ClipBounds, int ClipCount, EffectLayer? Layer = null);
 	private readonly record struct ClipState(ClipScope Scope, PathGeometry? RestorePath = null, Matrix4x4 RestoreTransform = default, DifferenceClip? Difference = null);
 	private readonly record struct RoundedClipCommand(DrawingContext Context, int CommandIndex, RoundRectangle RoundRect, Matrix4x4 Transform, int ClipCount);
-	private sealed record EffectLayer(DrawingContext Parent, GpuPictureRecorder Recorder, EffectBase Effect, PRect? ParentContentBounds, ProGpuBlendEffect? Blend);
+	private sealed record EffectLayer(DrawingContext Parent, GpuPictureRecorder Recorder, EffectBase Effect, PRect? ParentContentBounds, ProGpuBlendEffect? Blend, ProGpuAcrylicEffect? Acrylic);
 	private enum Scope { None, Blend, EffectLayer }
 	private enum ClipScope { Rect, Geometry, CoalescedRoundedDifference, Difference }
 	private sealed record DifferenceClip(DrawingContext Parent, GpuPictureRecorder Recorder, PathGeometry Excluded);

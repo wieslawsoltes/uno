@@ -40,6 +40,8 @@ internal static class ReviewContractTests
 			() => EffectGraphRejection(factory),
 			() => LayerBlur(factory),
 			() => BackdropBounds(factory),
+			() => AcrylicMaterial(factory),
+			() => AcrylicDpi(factory),
 			() => ClearOnlyMask(factory, false),
 			() => ClearOnlyMask(factory, true),
 			() => FractionalMask(factory),
@@ -497,6 +499,141 @@ internal static class ReviewContractTests
 					throw new InvalidOperationException($"Nested backdrop must preserve content and opacity {opacity}: byte {i}, direct={direct[i]}, nested={nested[i]}.");
 				}
 			}
+		}
+	}
+
+	private static async Task AcrylicDpi(ProGpuDrawingFactory factory)
+	{
+		async Task<byte[]> Render(bool scaled, bool retained = false)
+		{
+			var size = scaled ? 32 : 64;
+			var graph = new BlendEffectNode(
+				new BlendEffectNode(new BlurEffectNode(new SourceInput(), scaled ? 3 : 6, true), new ColorInput(default), BlendMode.Luminosity),
+				new ColorInput(default), BlendMode.Color);
+			using var filter = factory.CreateEffectFilter(graph, new Rect(0, 0, size, size))!;
+			void Draw(IDrawingSession drawing)
+			{
+				drawing.DrawRect(new Rect(0, 0, size, size), Color.FromArgb(255, 0, 0, 0));
+				drawing.DrawRect(new Rect(size / 2, 0, size / 2, size), Color.FromArgb(255, 255, 255, 255));
+				drawing.DrawEffectBackdrop(filter, 1);
+			}
+			var recorder = factory.CreateRecording();
+			Draw(recorder);
+			using var record = recorder.Finish();
+			using var texture = factory.RenderOffscreen(64, 64, drawing =>
+			{
+				if (scaled)
+				{
+					drawing.Scale(2, 2);
+				}
+				if (retained)
+				{
+					record.Replay(drawing);
+				}
+				else
+				{
+					Draw(drawing);
+				}
+			});
+			using var image = await factory.SnapshotAsync(texture);
+			var pixels = new byte[64 * 64 * 4];
+			image.CopyPixels(pixels);
+			return pixels;
+		}
+		var scaled = await Render(true);
+		var physical = await Render(false);
+		var retained = await Render(true, true);
+		for (var x = 16; x < 48; x++)
+		{
+			var offset = (32 * 64 + x) * 4;
+			if (Math.Abs(scaled[offset] - physical[offset]) > 2 || Math.Abs(retained[offset] - physical[offset]) > 2)
+			{
+				throw new InvalidOperationException($"Acrylic DPI must scale blur width: x={x}, scaled={scaled[offset]}, physical={physical[offset]}.");
+			}
+		}
+	}
+
+	private static async Task AcrylicMaterial(ProGpuDrawingFactory factory)
+	{
+		var background = Color.FromArgb(255, 32, 64, 96);
+		var luminosity = Color.FromArgb(160, 180, 190, 200);
+		var tint = Color.FromArgb(96, 100, 140, 240);
+		var bounds = new Rect(16, 16, 32, 32);
+		var graph = new BlendEffectNode(
+			new BlendEffectNode(new BlurEffectNode(new SourceInput(), 3, true), new ColorInput(luminosity), BlendMode.Luminosity),
+			new ColorInput(tint), BlendMode.Color);
+		using var unsupported = factory.CreateEffectFilter(graph with { Mode = BlendMode.Multiply }, bounds);
+		if (unsupported is not null)
+		{
+			throw new InvalidOperationException("The acrylic mapping must preserve the graph's blend operators.");
+		}
+		using var filter = factory.CreateEffectFilter(graph, bounds)
+			?? throw new InvalidOperationException("Uno's acrylic material graph must be supported.");
+		using var identity = factory.CreateColorMatrixColorFilter([1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0]);
+		var original = new Vector3(background.R, background.G, background.B) / 255f;
+		var expected = Blend(Blend(original, luminosity, false), tint, true);
+		foreach (var layer in new[] { 0, 1, 2 })
+		{
+			foreach (var opacity in new[] { 0.25f, 0.75f, 1f })
+			{
+				using var texture = factory.RenderOffscreen(64, 64, drawing =>
+				{
+					if (layer == 1)
+					{
+						drawing.SaveLayer(identity);
+					}
+					if (layer == 2)
+					{
+						drawing.SaveLayer(filter);
+					}
+					drawing.DrawRect(new Rect(0, 0, 64, 64), background);
+					if (layer != 2)
+					{
+						drawing.DrawEffectBackdrop(filter, opacity);
+					}
+					if (layer != 0)
+					{
+						drawing.Restore();
+					}
+				});
+				using var image = await factory.SnapshotAsync(texture);
+				var pixels = new byte[64 * 64 * 4];
+				image.CopyPixels(pixels);
+				var mixed = Vector3.Lerp(original, expected, layer == 2 ? 1 : opacity) * 255;
+				var offset = (32 * 64 + 32) * 4;
+				if (Math.Abs(pixels[offset] - mixed.Z) > 3 || Math.Abs(pixels[offset + 1] - mixed.Y) > 3 || Math.Abs(pixels[offset + 2] - mixed.X) > 3 || pixels[offset + 3] != 255)
+				{
+					throw new InvalidOperationException($"Acrylic blend layer={layer} opacity={opacity}: BGRA={pixels[offset]},{pixels[offset + 1]},{pixels[offset + 2]},{pixels[offset + 3]}, expected RGB={mixed}.");
+				}
+				if (layer != 2 && (pixels[0] != background.B || pixels[1] != background.G || pixels[2] != background.R))
+				{
+					throw new InvalidOperationException("Acrylic must leave pixels outside its bounds unchanged.");
+				}
+				if (layer == 2 && pixels[3] != 0)
+				{
+					throw new InvalidOperationException("Acrylic layers must crop their output to the effect bounds.");
+				}
+			}
+		}
+
+		static Vector3 Blend(Vector3 destination, Color source, bool colorMode)
+		{
+			var color = new Vector3(source.R, source.G, source.B) / 255f;
+			var weights = new Vector3(0.3f, 0.59f, 0.11f);
+			var lightness = Vector3.Dot(colorMode ? destination : color, weights);
+			var mixed = colorMode ? color : destination;
+			mixed += new Vector3(lightness - Vector3.Dot(mixed, weights));
+			var minimum = Math.Min(mixed.X, Math.Min(mixed.Y, mixed.Z));
+			var maximum = Math.Max(mixed.X, Math.Max(mixed.Y, mixed.Z));
+			if (minimum < 0)
+			{
+				mixed = new Vector3(lightness) + (mixed - new Vector3(lightness)) * lightness / (lightness - minimum);
+			}
+			if (maximum > 1)
+			{
+				mixed = new Vector3(lightness) + (mixed - new Vector3(lightness)) * (1 - lightness) / (maximum - lightness);
+			}
+			return Vector3.Lerp(destination, mixed, source.A / 255f);
 		}
 	}
 

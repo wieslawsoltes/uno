@@ -147,7 +147,7 @@ public static class ProGpuDiagnostics
 		{
 			var command = picture.GetCommand(index);
 			if (command.Type == RenderCommandType.DrawExtension &&
-				command.DataParam is BackdropMaterialParams { Source: ProGPU.Vector.BackdropMaterialSource.HostBackdrop })
+				ProGpuBackdropExtension.GetParameters(command.DataParam) is { Source: ProGPU.Vector.BackdropMaterialSource.HostBackdrop })
 			{
 				return true;
 			}
@@ -240,7 +240,7 @@ public static class ProGpuDiagnostics
 				output.Append(" color=").Append(Color(solid.Color))
 					.Append(" brushOpacity=").Append(solid.Opacity.ToString("F3", CultureInfo.InvariantCulture));
 			}
-			if (command.Type == RenderCommandType.DrawExtension && command.DataParam is BackdropMaterialParams backdrop)
+			if (command.Type == RenderCommandType.DrawExtension && ProGpuBackdropExtension.GetParameters(command.DataParam) is { } backdrop)
 			{
 				output.Append(" extension=").Append(command.ExtensionId)
 					.Append(" rect=").Append(Rect(backdrop.Rect))

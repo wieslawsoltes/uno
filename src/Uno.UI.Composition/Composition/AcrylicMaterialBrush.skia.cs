@@ -166,5 +166,7 @@ internal class AcrylicMaterialBrush : CompositionBrush
 	{
 		base.DisposeInternal();
 		_filter?.Dispose();
+		_noiseTexture?.Dispose();
+		_noiseTexture = null;
 	}
 }

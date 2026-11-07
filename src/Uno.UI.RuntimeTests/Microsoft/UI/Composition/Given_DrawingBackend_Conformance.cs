@@ -29,6 +29,32 @@ public class Given_DrawingBackend_Conformance
 {
 	private const byte Tol = 24;
 
+	[TestMethod]
+	public async Task When_Acrylic_Default_Path_Paints_Material()
+	{
+		var acrylic = new AcrylicBrush
+		{
+			TintColor = Colors.White,
+			TintOpacity = 0.6,
+			TintLuminosityOpacity = 1,
+			FallbackColor = Colors.Magenta,
+		};
+		var host = new Grid { Background = new SolidColorBrush(Colors.Black) };
+		host.Children.Add(new Border { Width = 60, Height = 60, Background = acrylic });
+		var bitmap = await Render(host);
+		var center = bitmap.GetPixel(50, 50);
+		Assert.IsTrue(center.R > 100 && center.G > 100 && center.B > 100 && center.A == 255,
+			$"Acrylic must paint its material over the black backdrop; actual={center}.");
+		ImageAssert.HasColorAt(bitmap, 5, 5, Colors.Black, 3);
+
+		acrylic.TintColor = Colors.Black;
+		acrylic.TintLuminosityOpacity = 0;
+		await TestServices.WindowHelper.WaitForIdle();
+		var updated = await UITestHelper.ScreenShot(host);
+		await updated.Populate();
+		ImageAssert.HasColorAt(updated, 50, 50, Colors.Black, 8);
+	}
+
 	private static async Task<RawBitmap> Render(FrameworkElement content, int w = 100, int h = 100)
 	{
 		var host = new Border { Width = w, Height = h, Background = new SolidColorBrush(Colors.White), Child = content };

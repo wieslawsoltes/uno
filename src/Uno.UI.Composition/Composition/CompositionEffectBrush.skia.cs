@@ -18,6 +18,13 @@ public partial class CompositionEffectBrush : CompositionBrush
 	private IEffectFilter? _filter;
 	private EffectNode? _tree;
 	private bool _hasBackdropBrushInput;
+	private CompositionBrush? _unsupportedGraphFallback;
+
+	internal void SetUnsupportedGraphFallback(CompositionBrush brush)
+	{
+		_unsupportedGraphFallback?.Dispose();
+		_unsupportedGraphFallback = brush;
+	}
 
 	internal bool HasBackdropBrushInput
 	{
@@ -25,11 +32,12 @@ public partial class CompositionEffectBrush : CompositionBrush
 		private set => SetProperty(ref _hasBackdropBrushInput, value);
 	}
 
-	internal override bool RequiresRepaintOnEveryFrame => HasBackdropBrushInput;
+	internal override bool RequiresRepaintOnEveryFrame => HasBackdropBrushInput || (_filter is null && _unsupportedGraphFallback?.RequiresRepaintOnEveryFrame == true);
 
 	private float _backdropBlurSigma;
 
-	internal override float DamageRegionSamplingMargin => HasBackdropBrushInput ? _backdropBlurSigma * 3f : 0f;
+	internal override float DamageRegionSamplingMargin => Math.Max(HasBackdropBrushInput ? _backdropBlurSigma * 3f : 0f,
+		_filter is null ? _unsupportedGraphFallback?.DamageRegionSamplingMargin ?? 0f : 0f);
 
 	internal override bool TryPaint(IDrawingSession session, float opacity, Rect bounds)
 	{
@@ -38,6 +46,10 @@ public partial class CompositionEffectBrush : CompositionBrush
 		{
 			session.DrawEffectBackdrop(filter, opacity);
 			return true;
+		}
+		if (_unsupportedGraphFallback is { } fallback)
+		{
+			return fallback.TryPaint(session, opacity, bounds);
 		}
 		// The backend couldn't realize the effect as a filter (e.g. the WebGPU backend for a per-pixel colour
 		// effect). Fall back to the neutral "recipe": reduce the graph to a single source + composed 4×5 colour
@@ -74,16 +86,25 @@ public partial class CompositionEffectBrush : CompositionBrush
 	{
 		if (IsGraphCurrent(factory, bounds, scale))
 		{
+			if (_filter is null)
+			{
+				_unsupportedGraphFallback?.PrepareForOffscreenRasterization(factory, bounds, scale);
+			}
 			return;
 		}
 
 		ParseGraph(factory, bounds, scale);
+		if (_filter is null)
+		{
+			_unsupportedGraphFallback?.PrepareForOffscreenRasterization(factory, bounds, scale);
+		}
 		_preparedThisPass = true;
 	}
 
 	// The cached graph is reusable only for the same region, at the same resolution, on the same backend device.
 	private bool IsGraphCurrent(IDrawingFactory factory, Rect bounds, Vector2 scale)
-		=> _filter is not null && _currentBounds == bounds && _currentScale == scale && ReferenceEquals(_currentFactory, factory);
+		=> (_filter is not null || (_tree is not null && _unsupportedGraphFallback is not null))
+			&& _currentBounds == bounds && _currentScale == scale && ReferenceEquals(_currentFactory, factory);
 
 	private void UpdateFilter(IDrawingFactory factory, Rect bounds, Vector2 scale)
 	{
@@ -157,6 +178,8 @@ public partial class CompositionEffectBrush : CompositionBrush
 
 		DisposeTree();
 		_filter?.Dispose();
+		_unsupportedGraphFallback?.Dispose();
+		_unsupportedGraphFallback = null;
 	}
 
 	internal override bool CanPaint() => _effect is not null;

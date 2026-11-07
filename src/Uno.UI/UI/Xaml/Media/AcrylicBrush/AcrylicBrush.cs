@@ -325,6 +325,7 @@ namespace Microsoft.UI.Xaml.Media
 
 			// Set noise image source
 			acrylicBrush.SetSourceParameter("Noise", _noiseBrush);
+			acrylicBrush.SetUnsupportedGraphFallback(CreateAcrylicBrushDirect(compositor));
 
 			// The backdrop blur clamps to the element edge (no colour bleed from neighbours) via the blur effect's
 			// BorderMode = Hard, set where the GaussianBlurEffect is built below.
