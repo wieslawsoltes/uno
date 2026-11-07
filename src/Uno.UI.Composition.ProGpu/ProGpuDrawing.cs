@@ -32,9 +32,11 @@ public sealed class ProGpuGraphicsProvider : IGraphicsProvider<IWebGpuDeviceCont
 	public IDrawingFactory CreateGraphics(IWebGpuDeviceContext context) => new ProGpuDrawingFactory(context, _options);
 }
 
-public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderTarget>, IDisposable
+public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderTarget>, IWebGpuTextureInterop, IDisposable
 {
 	private readonly WgpuContext _context = new();
+	private readonly IWebGpuDeviceContext _device;
+	private readonly List<WeakReference<GpuTexture>> _externalTextures = new();
 	private readonly Compositor _compositor;
 	private readonly PictureVisual _presentVisual = new();
 	private readonly ProGpuBackendOptions _options;
@@ -66,13 +68,14 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 		{
 			throw new ArgumentOutOfRangeException(nameof(options), "ProGPU primary sample count must be 1 or 4.");
 		}
+		_device = device;
 		_options = options;
 		_format = device.ColorFormat;
 		_context.MaximumDeferredQueueSubmissions =
 			options.MaximumDeferredQueueSubmissions;
 		_context.InitializeExternalNativeDevice(
 			new UnoHostWebGpuApi(device.Api, device.Api),
-			new UnoBorrowedWebGpuLifetime(device),
+			new UnoBorrowedWebGpuLifetime(device, _context),
 			(Device*)device.Device,
 			(Queue*)device.Queue,
 			_format);
@@ -94,6 +97,44 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 			$"WebGPU ({properties.BackendType})",
 			Marshal.PtrToStringUTF8((nint)properties.Name),
 			properties.AdapterType.ToString());
+	}
+
+	public WebGPU Api => _device.Api;
+	public Instance* Instance => _device.Instance;
+	public Adapter* Adapter => _device.Adapter;
+	public Device* Device => _device.Device;
+	public Queue* Queue => _device.Queue;
+	public TextureFormat RenderTextureFormat => _format;
+
+	public ITexture CreateRenderTexture(int pixelWidth, int pixelHeight, out Texture* texture, out TextureView* textureView)
+	{
+		ArgumentOutOfRangeException.ThrowIfNegativeOrZero(pixelWidth);
+		ArgumentOutOfRangeException.ThrowIfNegativeOrZero(pixelHeight);
+		lock (_context.RenderLock)
+		{
+			ThrowIfDisposed();
+			var native = NewTexture(pixelWidth, pixelHeight);
+			_externalTextures.Add(new WeakReference<GpuTexture>(native));
+			texture = native.TexturePtr;
+			textureView = native.ViewPtr;
+			return new ProGpuTexture(native);
+		}
+	}
+
+	private void RefreshExternalTextures()
+	{
+		// Uno's interop contract has no write notification; external commands may change any live texture.
+		for (var i = _externalTextures.Count - 1; i >= 0; i--)
+		{
+			if (_externalTextures[i].TryGetTarget(out var texture) && !texture.IsDisposed)
+			{
+				texture.NotifyExternalContentChanged();
+			}
+			else
+			{
+				_externalTextures.RemoveAt(i);
+			}
+		}
 	}
 
 	internal WgpuContext Context => _context;
@@ -132,6 +173,7 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 		lock (_context.RenderLock)
 		{
 			ThrowIfDisposed();
+			RefreshExternalTextures();
 			var submit = Stopwatch.StartNew();
 			var sceneDumpPath = ProGpuDiagnostics.TryDumpScene(picture, frame);
 			var content = picture;
@@ -293,16 +335,25 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 		{
 			ThrowIfDisposed();
 			var texture = NewTexture(pixelWidth, pixelHeight);
-			_compositor.RenderOffscreen(
-				new PictureVisual(record.Picture),
-				(uint)pixelWidth,
-				(uint)pixelHeight,
-				texture,
-				0,
-				1f,
-				Premultiply(record.LeadingClearColor ?? Vector4.Zero));
-			texture.NotifyExternalContentChanged();
-			return new ProGpuTexture(texture);
+			try
+			{
+				RefreshExternalTextures();
+				_compositor.RenderOffscreen(
+					new PictureVisual(record.Picture),
+					(uint)pixelWidth,
+					(uint)pixelHeight,
+					texture,
+					0,
+					1f,
+					Premultiply(record.LeadingClearColor ?? Vector4.Zero));
+				texture.NotifyExternalContentChanged();
+				return new ProGpuTexture(texture);
+			}
+			catch
+			{
+				texture.Dispose();
+				throw;
+			}
 		}
 	}
 
@@ -360,8 +411,16 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 		{
 			ThrowIfDisposed();
 			var texture = NewTexture(pixelWidth, pixelHeight);
-			texture.WritePixels<byte>(rgba);
-			return new ProGpuTexture(texture);
+			try
+			{
+				texture.WritePixels<byte>(rgba);
+				return new ProGpuTexture(texture);
+			}
+			catch
+			{
+				texture.Dispose();
+				throw;
+			}
 		}
 	}
 

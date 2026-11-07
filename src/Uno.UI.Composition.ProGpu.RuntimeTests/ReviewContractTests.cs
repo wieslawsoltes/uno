@@ -20,6 +20,9 @@ internal static class ReviewContractTests
 		var failures = new List<Exception>();
 		foreach (var test in new Func<Task>[]
 		{
+			() => BorrowedDeviceLoss(),
+			() => ExternalTexture(factory),
+			() => DiagnosticFailure(factory),
 			() => CurveBounds(geometries),
 			() => RetinaClip(factory, geometries, false),
 			() => RetinaClip(factory, geometries, true),
@@ -50,6 +53,103 @@ internal static class ReviewContractTests
 			throw new AggregateException("Backend review regressions", failures);
 		}
 	}
+
+	private static Task BorrowedDeviceLoss()
+	{
+		using var context = new ProGPU.Backend.WgpuContext();
+		var type = typeof(ProGpuDrawingFactory).Assembly.GetType("Uno.UI.Composition.ProGpu.UnoBorrowedWebGpuLifetime")!;
+		type.GetMethod("ObserveCompletion", BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null, [context, Silk.NET.WebGPU.QueueWorkDoneStatus.DeviceLost]);
+		if (!context.IsDeviceLost)
+		{
+			throw new InvalidOperationException("Queue device loss must mark the borrowed context before disposal.");
+		}
+		return Task.CompletedTask;
+	}
+
+	private static async Task ExternalTexture(ProGpuDrawingFactory factory)
+	{
+		var interop = (object)factory as IWebGpuTextureInterop
+			?? throw new InvalidOperationException("The WebGPU drawing factory must support Uno's texture interop interface.");
+		ITexture Create()
+		{
+			unsafe
+			{
+				return interop.CreateRenderTexture(8, 8, out _, out _);
+			}
+		}
+		using var source = Create();
+		var recorder = factory.CreateRecording();
+		recorder.DrawImage(source, 0, 0);
+		using var record = recorder.Finish();
+		source.Dispose();
+		using var output = factory.CreateTexture(8, 8, new byte[8 * 8 * 4]);
+		using var target = Target(output);
+		unsafe void Write(byte green)
+		{
+			var native = Native(source);
+			var destination = new Silk.NET.WebGPU.ImageCopyTexture { Texture = native.TexturePtr };
+			var layout = new Silk.NET.WebGPU.TextureDataLayout { BytesPerRow = 32, RowsPerImage = 8 };
+			var size = new Silk.NET.WebGPU.Extent3D { Width = 8, Height = 8, DepthOrArrayLayers = 1 };
+			var bytes = new byte[8 * 8 * 4];
+			for (var i = 0; i < bytes.Length; i += 4)
+			{
+				bytes[i + 1] = green;
+				bytes[i + 3] = 255;
+			}
+			fixed (byte* data = bytes)
+			{
+				interop.Api.QueueWriteTexture(interop.Queue, &destination, data, (nuint)bytes.Length, &layout, &size);
+			}
+		}
+		foreach (var green in new byte[] { 40, 200 })
+		{
+			Write(green);
+			using (var session = factory.BeginPresent(target))
+			{
+				record.Replay(session);
+			}
+			using var image = await factory.SnapshotAsync(output);
+			var pixels = new byte[8 * 8 * 4];
+			image.CopyPixels(pixels);
+			if (pixels[1] != green || pixels[3] != 255)
+			{
+				throw new InvalidOperationException($"External texture writes must invalidate retained presentation: {pixels[1]} != {green}.");
+			}
+		}
+	}
+
+	private static async Task DiagnosticFailure(ProGpuDrawingFactory factory)
+	{
+		var previous = Environment.GetEnvironmentVariable("UNO_PROGPU_DUMP_SCENE");
+		var previousFrame = Environment.GetEnvironmentVariable("UNO_PROGPU_DUMP_FRAME");
+		try
+		{
+			Environment.SetEnvironmentVariable("UNO_PROGPU_DUMP_SCENE", System.IO.Path.Combine(System.IO.Path.GetTempPath(), Guid.NewGuid().ToString(), "scene.txt"));
+			Environment.SetEnvironmentVariable("UNO_PROGPU_DUMP_FRAME", "1");
+			using var texture = factory.CreateTexture(8, 8, new byte[8 * 8 * 4]);
+			var recorder = factory.CreateRecording();
+			recorder.Clear(Color.FromArgb(255, 0, 255, 0));
+			using var record = recorder.Finish();
+			Present(factory, texture, record);
+			using var image = await factory.SnapshotAsync(texture);
+			var pixels = new byte[8 * 8 * 4];
+			image.CopyPixels(pixels);
+			if (pixels[1] != 255 || pixels[3] != 255)
+			{
+				throw new InvalidOperationException("Diagnostic I/O failure must not prevent presentation.");
+			}
+		}
+		finally
+		{
+			Environment.SetEnvironmentVariable("UNO_PROGPU_DUMP_SCENE", previous);
+			Environment.SetEnvironmentVariable("UNO_PROGPU_DUMP_FRAME", previousFrame);
+		}
+	}
+
+	private static ProGPU.Backend.GpuTexture Native(ITexture texture) =>
+		(ProGPU.Backend.GpuTexture)texture.GetType().GetProperty("Texture", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(texture)!;
+
+	private static unsafe SmokeTarget Target(ITexture texture) => new(Native(texture).ViewPtr, texture.PixelWidth, texture.PixelHeight);
 
 	private static async Task ClearPremultiplied(ProGpuDrawingFactory factory)
 	{

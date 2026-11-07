@@ -36,8 +36,8 @@ await RunBorrowedDeviceOwnershipSmoke(device, provider);
 using var factory = (ProGpuDrawingFactory)provider.CreateGraphics(device);
 RunGradientLocalMatrixContractSmoke(factory);
 var geometryFactory = new ProGpuGeometryFactory();
-await ReviewContractTests.Run(factory, geometryFactory);
 await ContentContractTests.Run(factory, geometryFactory);
+await ReviewContractTests.Run(factory, geometryFactory);
 await RefreshContractTests.Run(factory, geometryFactory);
 {
 	var geometryBuilder = geometryFactory.CreatePrimitiveGeometryBuilder();

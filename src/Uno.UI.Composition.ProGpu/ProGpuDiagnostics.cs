@@ -8,6 +8,7 @@ using System.Numerics;
 using System.Text;
 using System.Threading;
 using ProGPU.Scene;
+using Uno.Foundation.Logging;
 
 namespace Uno.UI.Composition.ProGpu;
 
@@ -120,8 +121,16 @@ public static class ProGpuDiagnostics
 		DumpPicture(output, picture, Matrix4x4.Identity, state, 0, "root");
 		output.AppendLine(FormattableString.Invariant(
 			$"FINAL rectClip={state.RectangleClipDepth} geometryClip={state.GeometryClipDepth} opacity={state.OpacityDepth} blend={state.BlendDepth}"));
-		File.WriteAllText(path, output.ToString());
-		return path;
+		try
+		{
+			File.WriteAllText(path, output.ToString());
+			return path;
+		}
+		catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+		{
+			ReportDiagnosticFailure(error);
+			return null;
+		}
 	}
 
 	private static bool ContainsHostBackdrop(GpuPicture picture) =>
@@ -152,8 +161,23 @@ public static class ProGpuDiagnostics
 
 	internal static void AppendCompositorMetrics(string path, in CompositorMetrics metrics)
 	{
-		File.AppendAllText(path, string.Create(CultureInfo.InvariantCulture,
-			$"METRICS frameMs={metrics.FrameTimeMs:F3} compileMs={metrics.VisualTreeCompileTimeMs:F3} uploadMs={metrics.GpuUploadTimeMs:F3} passMs={metrics.RenderPassTimeMs:F3} vectors={metrics.VectorVerticesCount}/{metrics.VectorIndicesCount} text={metrics.TextVerticesCount} masks={metrics.MaskRenderPassCount} maskDraws={metrics.MaskRenderDrawCallCount} generalMaskPeak={metrics.GeneralGeometryMaskPeakDemand} opacityMaskPeak={metrics.OpacityMaskPeakDemand} maskPool={metrics.MaskTexturePoolCount} cacheHit={metrics.SceneCacheHit} bundleHit={metrics.RenderBundleCacheHit} bundleRecorded={metrics.RenderBundleRecorded} bundleDraws={metrics.RenderBundleDrawCallCount} cacheMiss={metrics.SceneCacheMissReason}{Environment.NewLine}"));
+		try
+		{
+			File.AppendAllText(path, string.Create(CultureInfo.InvariantCulture,
+				$"METRICS frameMs={metrics.FrameTimeMs:F3} compileMs={metrics.VisualTreeCompileTimeMs:F3} uploadMs={metrics.GpuUploadTimeMs:F3} passMs={metrics.RenderPassTimeMs:F3} vectors={metrics.VectorVerticesCount}/{metrics.VectorIndicesCount} text={metrics.TextVerticesCount} masks={metrics.MaskRenderPassCount} maskDraws={metrics.MaskRenderDrawCallCount} generalMaskPeak={metrics.GeneralGeometryMaskPeakDemand} opacityMaskPeak={metrics.OpacityMaskPeakDemand} maskPool={metrics.MaskTexturePoolCount} cacheHit={metrics.SceneCacheHit} bundleHit={metrics.RenderBundleCacheHit} bundleRecorded={metrics.RenderBundleRecorded} bundleDraws={metrics.RenderBundleDrawCallCount} cacheMiss={metrics.SceneCacheMissReason}{Environment.NewLine}"));
+		}
+		catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+		{
+			ReportDiagnosticFailure(error);
+		}
+	}
+
+	private static void ReportDiagnosticFailure(Exception error)
+	{
+		if (typeof(ProGpuDiagnostics).Log().IsEnabled(LogLevel.Warning))
+		{
+			typeof(ProGpuDiagnostics).Log().Warn("Could not write ProGPU diagnostics.", error);
+		}
 	}
 
 	private static void DumpPicture(StringBuilder output, GpuPicture picture, Matrix4x4 parent, SceneDumpState state, int depth, string name)
@@ -203,6 +227,7 @@ public static class ProGpuDiagnostics
 			if (command.Type == RenderCommandType.DrawGlyphRun)
 			{
 				output.Append(" glyphs=").Append(command.GlyphRangeCount)
+					.Append(" font=").Append(command.Font?.FamilyName)
 					.Append(" size=").Append(command.FontSize.ToString("F2", CultureInfo.InvariantCulture));
 				if (command.GlyphPositions is { Length: > 0 } positions)
 				{

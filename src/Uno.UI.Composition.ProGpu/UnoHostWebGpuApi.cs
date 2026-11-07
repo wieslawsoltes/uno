@@ -444,7 +444,7 @@ internal unsafe sealed class UnoHostWebGpuApi(
 	}
 }
 
-internal sealed unsafe class UnoBorrowedWebGpuLifetime(IWebGpuDeviceContext device) : IWebGpuExternalDeviceLifetime
+internal sealed unsafe class UnoBorrowedWebGpuLifetime(IWebGpuDeviceContext device, WgpuContext context) : IWebGpuExternalDeviceLifetime
 {
 	private struct QueueCompletion
 	{
@@ -466,9 +466,18 @@ internal sealed unsafe class UnoBorrowedWebGpuLifetime(IWebGpuDeviceContext devi
 			device.Api.InstanceProcessEvents(device.Instance);
 			System.Threading.Thread.SpinWait(64);
 		}
-		if (completion.Status != QueueWorkDoneStatus.Success)
+		ObserveCompletion(context, completion.Status);
+	}
+
+	internal static void ObserveCompletion(WgpuContext context, QueueWorkDoneStatus status)
+	{
+		if (status == QueueWorkDoneStatus.DeviceLost)
 		{
-			throw new InvalidOperationException($"WebGPU queue completion failed ({completion.Status}).");
+			context.ReportDeviceLost(DeviceLostReason.Unknown, "The borrowed WebGPU device was lost during queue completion.");
+		}
+		else if (status != QueueWorkDoneStatus.Success)
+		{
+			throw new InvalidOperationException($"WebGPU queue completion failed ({status}).");
 		}
 	}
 
