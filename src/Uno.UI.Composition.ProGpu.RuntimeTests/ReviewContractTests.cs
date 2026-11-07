@@ -21,6 +21,7 @@ internal static class ReviewContractTests
 		foreach (var test in new Func<Task>[]
 		{
 			() => BorrowedDeviceLoss(),
+			() => TextureRetirement(factory),
 			() => DifferenceClip(factory, geometries, false),
 			() => DifferenceClip(factory, geometries, true),
 			() => RetainedDifference(factory, geometries),
@@ -60,6 +61,36 @@ internal static class ReviewContractTests
 		{
 			throw new AggregateException("Backend review regressions", failures);
 		}
+	}
+
+	private static Task TextureRetirement(ProGpuDrawingFactory factory)
+	{
+		using var texture = factory.CreateTexture(1, 1, new byte[4]);
+		var native = Native(texture);
+		var notified = false;
+		var serialized = false;
+		void OnRetired(ulong id)
+		{
+			if (id == native.Id)
+			{
+				notified = true;
+				serialized = System.Threading.Monitor.IsEntered(native.Context.RenderLock);
+			}
+		}
+		ProGPU.Backend.GpuTexture.OnDisposedWithId += OnRetired;
+		try
+		{
+			texture.Dispose();
+		}
+		finally
+		{
+			ProGPU.Backend.GpuTexture.OnDisposedWithId -= OnRetired;
+		}
+		if (!notified || !serialized)
+		{
+			throw new InvalidOperationException("Native texture retirement notifications must be serialized with compositor cache mutation.");
+		}
+		return Task.CompletedTask;
 	}
 
 	private static Task BorrowedDeviceLoss()

@@ -617,7 +617,14 @@ internal sealed class ProGpuTexture(GpuTexture texture) : DrawingResource, IText
 	internal GpuTexture Texture { get; } = texture;
 	public int PixelWidth => checked((int)Texture.Width);
 	public int PixelHeight => checked((int)Texture.Height);
-	protected override void Free() => Texture.Dispose();
+	protected override void Free()
+	{
+		// Native retirement notifies compositor caches before GpuTexture takes its own lock.
+		lock (Texture.Context.RenderLock)
+		{
+			Texture.Dispose();
+		}
+	}
 }
 
 internal sealed class ProGpuDrawingResourceLease : IDisposable
