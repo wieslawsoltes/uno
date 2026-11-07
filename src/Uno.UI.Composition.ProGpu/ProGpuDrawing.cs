@@ -191,10 +191,13 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 			}
 			clearColor = Premultiply(clearColor);
 			_compositor.ClearColor = clearColor;
-			var contentChanged = _presentVisual.Update(content, transform);
+			// Uno opens an empty session to present an undamaged, preserved target.
+			// An explicit clear still replaces its contents, even without draw commands.
+			var hasDrawing = picture.CommandCount != 0 || leadingClearColor.HasValue;
+			var contentChanged = hasDrawing && _presentVisual.Update(content, transform);
 			var pixelWidth = Math.Max(1, target.Width);
 			var pixelHeight = Math.Max(1, target.Height);
-			var targetContentReused =
+			var targetContentReused = !hasDrawing || (
 				!contentChanged &&
 				!hasHostBackdrop &&
 				sceneDumpPath is null &&
@@ -203,7 +206,7 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 				_presentedWidth == pixelWidth &&
 				_presentedHeight == pixelHeight &&
 				_presentedClearColor == clearColor &&
-				_presentedTextureContentVersion == _context.TextureContentVersion;
+				_presentedTextureContentVersion == _context.TextureContentVersion);
 			if (!targetContentReused && hasHostBackdrop)
 			{
 				_presentedTarget = null;
@@ -235,12 +238,12 @@ public sealed unsafe class ProGpuDrawingFactory : IDrawingFactory<IWebGpuRenderT
 				_presentedClearColor = clearColor;
 				_presentedTextureContentVersion = _context.TextureContentVersion;
 			}
+			var metrics = targetContentReused ? default : _compositor.Metrics;
 			if (sceneDumpPath is not null)
 			{
-				ProGpuDiagnostics.AppendCompositorMetrics(sceneDumpPath, _compositor.Metrics);
+				ProGpuDiagnostics.AppendCompositorMetrics(sceneDumpPath, metrics);
 			}
 			submit.Stop();
-			var metrics = targetContentReused ? default : _compositor.Metrics;
 			frameMetrics = new ProGpuFrameMetrics(frame, recordMilliseconds, submit.Elapsed.TotalMilliseconds, picture.CommandCount, metrics.IncrementalSceneUploadBytes, checked((int)ProGpuDiagnostics.UnsupportedOperationCount))
 			{
 				CompositorFrameMilliseconds = metrics.FrameTimeMs,

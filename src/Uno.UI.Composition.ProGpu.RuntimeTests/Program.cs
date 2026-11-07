@@ -1041,22 +1041,13 @@ static unsafe void RunResizeAndSharedDeviceSmoke(IWebGpuDeviceContext device, Pr
 
 static unsafe void RunStablePresentCacheSmoke(IWebGpuDeviceContext device, ProGpuDrawingFactory factory)
 {
-	var descriptor = new TextureDescriptor
-	{
-		Size = new Extent3D { Width = 64, Height = 64, DepthOrArrayLayers = 1 },
-		Format = TextureFormat.Bgra8Unorm,
-		MipLevelCount = 1,
-		SampleCount = 1,
-		Dimension = TextureDimension.Dimension2D,
-		Usage = TextureUsage.RenderAttachment | TextureUsage.CopySrc,
-	};
-	var nativeTexture = device.Api.DeviceCreateTexture(device.Device, &descriptor);
-	var nativeView = device.Api.TextureCreateView(nativeTexture, null);
-	using var target = new SmokeTarget(nativeView, 64, 64);
-	using var replacementTarget = new SmokeTarget(nativeView, 64, 64);
 	var context = (WgpuContext)typeof(ProGpuDrawingFactory)
 		.GetField("_context", BindingFlags.Instance | BindingFlags.NonPublic)!
 		.GetValue(factory)!;
+	using var targetTexture = new GpuTexture(context, 64, 64, TextureFormat.Bgra8Unorm,
+		TextureUsage.RenderAttachment | TextureUsage.CopySrc, "Uno preserved target regression");
+	using var target = new SmokeTarget(targetTexture.ViewPtr, 64, 64);
+	using var replacementTarget = new SmokeTarget(targetTexture.ViewPtr, 64, 64);
 	using var mutationTexture = new GpuTexture(
 		context,
 		1,
@@ -1143,9 +1134,40 @@ static unsafe void RunStablePresentCacheSmoke(IWebGpuDeviceContext device, ProGp
 		throw new InvalidOperationException(
 			$"A stable replacement target was not reused: reused={metrics?.TargetContentReused}, draws={metrics?.DrawCallCount}, vertices={metrics?.VectorVertexCount}.");
 	}
-	device.Api.TextureViewRelease(nativeView);
-	device.Api.TextureDestroy(nativeTexture);
-	device.Api.TextureRelease(nativeTexture);
+	using var readback = new GpuTextureReadbackBuffer(context);
+	var pixels = new byte[64 * 64 * 4];
+	void AssertTarget(byte blue, byte green, byte red, string scenario)
+	{
+		lock (context.RenderLock)
+		fixed (byte* destination = pixels)
+		{
+			if (!readback.TryReadTextureRows(targetTexture, 64, 64, destination, 64 * 4))
+			{
+				throw new InvalidOperationException($"{scenario}: target readback failed.");
+			}
+		}
+		var pixel = Pixel(pixels, 32, 32);
+		if (pixel[0] != blue || pixel[1] != green || pixel[2] != red || pixel[3] != 255)
+		{
+			throw new InvalidOperationException($"{scenario}: unexpected pixel {Convert.ToHexString(pixel)}.");
+		}
+	}
+	AssertTarget(120, 60, 20, "Populated target");
+	using (var present = factory.BeginPresent(replacementTarget))
+	{
+		// Uno opens a session without replay when a preserved frame has no damage.
+		present.Save();
+		present.Scale(2, 2);
+		present.Save();
+		present.Restore();
+		present.Restore();
+	}
+	AssertTarget(120, 60, 20, "Undamaged presentation must preserve content");
+	using (var present = factory.BeginPresent(replacementTarget))
+	{
+		present.Clear(Color.FromArgb(255, 4, 8, 12));
+	}
+	AssertTarget(12, 8, 4, "Explicit clear-only presentation");
 }
 
 static async Task RunNestedRecordClearSmoke(ProGpuDrawingFactory factory)
